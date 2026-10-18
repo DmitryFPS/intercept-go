@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -87,6 +88,7 @@ type Server struct {
 	rootContext context.Context
 	rootStop    context.CancelFunc
 	background  sync.WaitGroup
+	signingKey  ed25519.PrivateKey
 }
 
 func NewServer(ctx context.Context, baseDir, version string, logger *slog.Logger) (*Server, error) {
@@ -304,6 +306,14 @@ func (server *Server) AddClient(ctx context.Context, request config.ClientReques
 		return nil, fmt.Errorf("бот точки не может писать в указанную тему: %w", err)
 	}
 	clientConfig, err := config.GenerateClient(request, time.Now().UTC(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	signingKey, err := server.clientSigningKey()
+	if err != nil {
+		return nil, fmt.Errorf("подготовить подпись настроек точки: %w", err)
+	}
+	clientConfig, err = config.SignClient(clientConfig, signingKey)
 	if err != nil {
 		return nil, err
 	}
@@ -686,6 +696,20 @@ func (server *Server) configPath() string {
 
 func (server *Server) clientConfigPath(clientID string) string {
 	return filepath.Join(server.BaseDir, "data", "clients", safeID(clientID)+".dat")
+}
+
+func (server *Server) clientSigningKey() (ed25519.PrivateKey, error) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.signingKey) == ed25519.PrivateKeySize {
+		return append(ed25519.PrivateKey(nil), server.signingKey...), nil
+	}
+	key, err := secrets.LoadOrCreateSigningKey(filepath.Join(server.BaseDir, "data", "server-signing-key.dat"))
+	if err != nil {
+		return nil, err
+	}
+	server.signingKey = append(ed25519.PrivateKey(nil), key...)
+	return append(ed25519.PrivateKey(nil), key...), nil
 }
 
 func (server *Server) fail(title string, err error) {

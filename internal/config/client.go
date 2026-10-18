@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -12,19 +14,20 @@ import (
 	"time"
 )
 
-const ClientSchemaV1 = "intercept-client-config/v1"
+const ClientSchemaV2 = "intercept-client-config/v2"
 
 // Client содержит все настройки точки, подготовленные администратором.
 type Client struct {
-	Schema       string          `json:"schema"`
-	GeneratedAt  time.Time       `json:"generated_at"`
-	ClientID     string          `json:"client_id"`
-	ClientNumber string          `json:"client_number"`
-	ClientName   string          `json:"client_name"`
-	EAVC         EAVC            `json:"eavc"`
-	Transport    ClientTransport `json:"transport"`
-	Cryptography ClientCrypto    `json:"cryptography"`
-	Polling      ClientPolling   `json:"polling"`
+	Schema       string             `json:"schema"`
+	GeneratedAt  time.Time          `json:"generated_at"`
+	ClientID     string             `json:"client_id"`
+	ClientNumber string             `json:"client_number"`
+	ClientName   string             `json:"client_name"`
+	EAVC         EAVC               `json:"eavc"`
+	Transport    ClientTransport    `json:"transport"`
+	Cryptography ClientCrypto       `json:"cryptography"`
+	Polling      ClientPolling      `json:"polling"`
+	Authenticity ClientAuthenticity `json:"authenticity"`
 }
 
 type EAVC struct {
@@ -52,8 +55,15 @@ type ClientPolling struct {
 	MaxEventAgeMinutes int  `json:"max_event_age_minutes"`
 }
 
+// ClientAuthenticity подтверждает, что файл подготовлен доверенным сервером.
+type ClientAuthenticity struct {
+	Algorithm       string `json:"algorithm"`
+	IssuerPublicKey string `json:"issuer_public_key"`
+	Signature       string `json:"signature"`
+}
+
 func (cfg Client) Validate() error {
-	if cfg.Schema != ClientSchemaV1 {
+	if cfg.Schema != ClientSchemaV2 {
 		return fmt.Errorf("неподдерживаемая схема настроек %q", cfg.Schema)
 	}
 	if strings.TrimSpace(cfg.ClientID) == "" || strings.TrimSpace(cfg.ClientNumber) == "" || strings.TrimSpace(cfg.ClientName) == "" {
@@ -87,7 +97,86 @@ func (cfg Client) Validate() error {
 	if cfg.Polling.MaxEventAgeMinutes < 1 || cfg.Polling.MaxEventAgeMinutes > 1440 {
 		return errors.New("срок доставки события должен быть от 1 до 1440 минут")
 	}
+	if cfg.Authenticity.Algorithm != "Ed25519" {
+		return errors.New("неподдерживаемая подпись файла настроек")
+	}
+	if _, err := cfg.IssuerPublicKey(); err != nil {
+		return err
+	}
+	if _, err := cfg.signature(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (cfg Client) IssuerPublicKey() (ed25519.PublicKey, error) {
+	key, err := base64.RawStdEncoding.DecodeString(cfg.Authenticity.IssuerPublicKey)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return nil, errors.New("открытый ключ сервера имеет неверный формат")
+	}
+	return ed25519.PublicKey(key), nil
+}
+
+func (cfg Client) signature() ([]byte, error) {
+	signature, err := base64.RawStdEncoding.DecodeString(cfg.Authenticity.Signature)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return nil, errors.New("подпись файла настроек имеет неверный формат")
+	}
+	return signature, nil
+}
+
+// SignClient подписывает все поля конфигурации ключом конкретного сервера.
+func SignClient(cfg Client, privateKey ed25519.PrivateKey) (Client, error) {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return Client{}, errors.New("закрытый ключ подписи сервера повреждён")
+	}
+	cfg.Authenticity = ClientAuthenticity{
+		Algorithm:       "Ed25519",
+		IssuerPublicKey: base64.RawStdEncoding.EncodeToString(privateKey.Public().(ed25519.PublicKey)),
+	}
+	payload, err := clientSigningPayload(cfg)
+	if err != nil {
+		return Client{}, err
+	}
+	cfg.Authenticity.Signature = base64.RawStdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	if err := cfg.Validate(); err != nil {
+		return Client{}, err
+	}
+	return cfg, nil
+}
+
+// VerifyClient отвергает подменённые или повреждённые поля конфигурации.
+func VerifyClient(cfg Client) error {
+	publicKey, err := cfg.IssuerPublicKey()
+	if err != nil {
+		return err
+	}
+	signature, err := cfg.signature()
+	if err != nil {
+		return err
+	}
+	payload, err := clientSigningPayload(cfg)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(publicKey, payload, signature) {
+		return errors.New("подпись файла настроек недействительна")
+	}
+	return nil
+}
+
+func clientSigningPayload(cfg Client) ([]byte, error) {
+	cfg.Authenticity.Signature = ""
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("подготовить данные для подписи: %w", err)
+	}
+	return payload, nil
+}
+
+// SameIssuer сравнивает открытые ключи без утечки по времени выполнения.
+func SameIssuer(left, right ed25519.PublicKey) bool {
+	return len(left) == len(right) && subtle.ConstantTimeCompare(left, right) == 1
 }
 
 func (cfg Client) Key() ([]byte, error) {
@@ -119,14 +208,14 @@ func DecodeClient(reader io.Reader) (Client, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Client{}, fmt.Errorf("разобрать настройки: %w", err)
 	}
-	if cfg.Polling.MaxEventAgeMinutes == 0 {
-		cfg.Polling.MaxEventAgeMinutes = 30
-	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Client{}, errors.New("после настроек найдены лишние данные")
 	}
 	if err := cfg.Validate(); err != nil {
+		return Client{}, err
+	}
+	if err := VerifyClient(cfg); err != nil {
 		return Client{}, err
 	}
 	return cfg, nil

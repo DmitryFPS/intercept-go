@@ -46,7 +46,7 @@ func GenerateClient(request ClientRequest, now time.Time, random io.Reader) (Cli
 		return Client{}, err
 	}
 	cfg := Client{
-		Schema: ClientSchemaV1, GeneratedAt: now.UTC(), ClientID: clientID,
+		Schema: ClientSchemaV2, GeneratedAt: now.UTC(), ClientID: clientID,
 		ClientNumber: strings.TrimSpace(request.Number), ClientName: strings.TrimSpace(request.Name),
 		EAVC: EAVC{SQLitePath: strings.TrimSpace(request.EAVCPath)},
 		Transport: ClientTransport{
@@ -63,5 +63,5 @@ func GenerateClient(request ClientRequest, now time.Time, random io.Reader) (Cli
 			MaxEventAgeMinutes: 30,
 		},
 	}
-	return cfg, cfg.Validate()
+	return cfg, nil
 }
