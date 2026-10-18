@@ -24,8 +24,20 @@ import (
 )
 
 var (
-	timeLinePattern = regexp.MustCompile(`^\d{1,2}\.\d{2}\s*$`)
+	timeLinePattern = regexp.MustCompile(`^(\d{1,2})[.:](\d{2})\s*$`)
 	badFilename     = regexp.MustCompile(`[<>:"/\\|?*]`)
+	codeTailPattern = regexp.MustCompile(`\s*\((\d{1,10})\)\s*$`)
+	codeAnyPattern  = regexp.MustCompile(`\((\d{1,10})\)`)
+	leadingDash     = regexp.MustCompile(`^[-–—]\s*`)
+)
+
+const (
+	directionTitle    = "ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ"
+	defaultNetwork    = "39"
+	defaultOperator   = "Позывной"
+	defaultShiftGroup = "1"
+	defaultShiftChief = "Позывной"
+	editedMark        = "(отредактировано)"
 )
 
 // Destination создаёт DOCX по внешнему шаблону и доставляет его атомарно.
@@ -49,12 +61,9 @@ type state struct {
 type blockRecord struct {
 	Number   int    `json:"number"`
 	Hash     string `json:"hash"`
+	Render   string `json:"render,omitempty"`
 	Filename string `json:"filename"`
-}
-
-type contentBlock struct {
-	Key  string
-	Text string
+	Edited   bool   `json:"edited,omitempty"`
 }
 
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, _ domain.PlannedDelivery) error {
@@ -65,7 +74,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		destination.Prefix = "СТНД"
 	}
 	if destination.Network == "" {
-		destination.Network = "313"
+		destination.Network = defaultNetwork
 	}
 	if destination.TemplatePath == "" || destination.Folder == "" || destination.StatePath == "" {
 		return errors.New("Word-направление настроено не полностью")
@@ -82,36 +91,72 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	if err != nil {
 		return err
 	}
-	for _, block := range splitBlocks(event.Content) {
-		key := event.Source.UUID + "|" + block.Key
+	blocks := event.Blocks
+	if blocks == nil {
+		blocks = domain.SplitContentBlocks(event.Content)
+	}
+	sourceKey := strings.TrimSpace(event.Source.UUID)
+	if sourceKey == "" {
+		sourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
+	}
+	prefix := sourceKey + "|"
+	present := make(map[string]bool, len(blocks))
+	for _, block := range blocks {
+		key := prefix + block.Key
+		present[key] = true
 		digest := digestText(block.Text)
 		record, exists := current.Blocks[key]
-		if exists && record.Hash == digest {
-			if _, err := os.Stat(filepath.Join(destination.Folder, record.Filename)); err == nil {
-				continue
-			}
-		}
 		if !exists {
 			current.LastNumber++
 			record.Number = current.LastNumber
 		}
+		date := event.SourceAt
+		if date.IsZero() {
+			date = event.ObservedAt
+		}
+		document := Document{
+			Unit: event.Position.UnitName, Frequency: event.Position.Frequency,
+			GroupCode: event.Position.GroupCode, Network: destination.Network,
+			Date: date, Operator: event.UpdatedBy, Content: block.Text,
+			Callsigns: block.Callsigns,
+		}
+		render := renderDigest(document)
+		filename := destination.documentName(record.Number, event.Position.UnitName)
+		if exists && ((record.Render != "" && record.Render == render) ||
+			(record.Render == "" && record.Hash == digest && record.Filename == filename)) {
+			continue
+		}
+		document.Edited = record.Edited || (exists && record.Render != "" && record.Render != render)
+		payload, err := Build(destination.TemplatePath, document)
+		if err != nil {
+			return err
+		}
+		if err := writeAtomic(filepath.Join(destination.Folder, filename), payload); err != nil {
+			return err
+		}
+		if record.Filename != "" && record.Filename != filename {
+			_ = os.Remove(filepath.Join(destination.Folder, record.Filename))
+		}
 		record.Hash = digest
-		record.Filename = destination.documentName(record.Number, event.Position.UnitName)
+		record.Render = render
+		record.Filename = filename
+		record.Edited = document.Edited
 		current.Blocks[key] = record
 		if err := saveState(destination.StatePath, current); err != nil {
 			return err
 		}
-		document, err := Build(destination.TemplatePath, Document{
-			Unit: event.Position.UnitName, Frequency: event.Position.Frequency,
-			GroupCode: event.Position.GroupCode, Network: destination.Network,
-			Date: event.ObservedAt, Operator: event.UpdatedBy, Content: block.Text,
-		})
-		if err != nil {
-			return err
+	}
+	for key, record := range current.Blocks {
+		if !strings.HasPrefix(key, prefix) || present[key] {
+			continue
 		}
-		if err := writeAtomic(filepath.Join(destination.Folder, record.Filename), document); err != nil {
-			return err
+		if record.Filename != "" {
+			_ = os.Remove(filepath.Join(destination.Folder, record.Filename))
 		}
+		delete(current.Blocks, key)
+	}
+	if err := saveState(destination.StatePath, current); err != nil {
+		return err
 	}
 	return nil
 }
@@ -125,6 +170,8 @@ type Document struct {
 	Date      time.Time
 	Operator  string
 	Content   string
+	Callsigns []domain.Callsign
+	Edited    bool
 }
 
 // Build сохраняет все части шаблона и заменяет только тело документа.
@@ -184,94 +231,163 @@ func buildBody(document Document) []byte {
 	if unit == "" {
 		unit = "н/у"
 	}
+	network := strings.TrimSpace(document.Network)
+	if network == "" {
+		network = defaultNetwork
+	}
 	date := document.Date
 	if date.IsZero() {
 		date = time.Now()
 	}
+	date = date.In(time.FixedZone("MSK", 3*60*60))
+	correspondents, lines := parseDocumentContent(document.Content, document.Callsigns)
 	var paragraphs strings.Builder
-	paragraphs.WriteString(paragraph("Радиосеть "+unit+" - "+document.Network, true, "left"))
-	paragraphs.WriteString(paragraph(strings.TrimSpace(document.Frequency)+" МГц (гр. ID "+fallback(document.GroupCode, "—")+" AES-256)", false, "left"))
-	paragraphs.WriteString(paragraph(date.Format("02.01.2006"), true, "left"))
-	paragraphs.WriteString(paragraph("", false, "left"))
-	for _, line := range strings.Split(normalizeText(document.Content), "\n") {
-		paragraphs.WriteString(paragraph(line, timeLinePattern.MatchString(strings.TrimSpace(line)), "left"))
+	paragraphs.WriteString(styledParagraph([]styledRun{
+		{Text: "Радиосеть "}, {Text: unit, Bold: true}, {Text: " - " + network},
+	}, false, "left"))
+	paragraphs.WriteString(styledParagraph([]styledRun{{
+		Text: strings.TrimSpace(document.Frequency) + " МГц (гр. ID " + fallback(document.GroupCode, "—") + " AES-256)",
+	}}, false, "left"))
+	paragraphs.WriteString(styledParagraph([]styledRun{{Text: date.Format("02.01.2006г."), Bold: true}}, true, "left"))
+	paragraphs.WriteString(styledParagraph(nil, false, "left"))
+	for _, correspondent := range correspondents {
+		paragraphs.WriteString(styledParagraph([]styledRun{
+			{Text: strconv.Itoa(correspondent.Number) + ".«"},
+			{Text: correspondent.Label, Bold: true},
+			{Text: "» (id: " + correspondent.Code + ") – военнослужащий " + unit + ", мужской голос, украинская речь;"},
+		}, false, "left"))
 	}
-	operator := fallback(document.Operator, "не указан")
-	body := `<w:body><w:tbl><w:tblPr><w:tblW w:w="11055" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
-		row(paragraph("ПЕРЕХВАТ", true, "center")) + row(paragraphs.String()) + `</w:tbl>` +
-		paragraph("Дежурный оператор: "+operator, false, "right") +
-		`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="284" w:right="707" w:bottom="426" w:left="567"/></w:sectPr></w:body>`
+	if len(correspondents) > 0 {
+		paragraphs.WriteString(styledParagraph(nil, false, "left"))
+	}
+	for _, line := range lines {
+		paragraphs.WriteString(styledParagraph([]styledRun{{Text: line.Text, Bold: line.Time}}, line.Time, "left"))
+	}
+	if document.Edited {
+		paragraphs.WriteString(styledParagraph(nil, false, "left"))
+		paragraphs.WriteString(styledParagraph([]styledRun{{Text: editedMark}}, false, "left"))
+	}
+	body := `<w:body>` + styledParagraph(nil, false, "left") +
+		`<w:tbl><w:tblPr><w:tblStyle w:val="a3"/><w:tblW w:w="11055" w:type="dxa"/><w:tblInd w:w="-34" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="11055"/></w:tblGrid>` +
+		styledRow(styledParagraph([]styledRun{{Text: directionTitle, Bold: true}}, false, "center"), true) +
+		styledRow(paragraphs.String(), false) + `</w:tbl>` +
+		styledParagraph([]styledRun{{Text: "Дежурный оператор: "}, {Text: defaultOperator}}, false, "right") +
+		styledParagraph([]styledRun{{Text: "Старший смены МГ "}, {Text: defaultShiftGroup}, {Text: ": "}, {Text: defaultShiftChief}}, false, "center") +
+		styledParagraph(nil, false, "left") +
+		`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="284" w:right="707" w:bottom="426" w:left="567" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/><w:docGrid w:linePitch="360"/></w:sectPr></w:body>`
 	return []byte(body)
 }
 
-func paragraph(text string, options ...any) string {
-	bold := false
-	justify := "left"
-	if len(options) > 0 {
-		if value, ok := options[0].(bool); ok {
-			bold = value
-		}
-	}
-	if len(options) > 1 {
-		if value, ok := options[1].(string); ok {
-			justify = value
-		}
-	}
-	if strings.HasPrefix(text, "<w:p>") {
-		return text
-	}
-	var escaped bytes.Buffer
-	xml.EscapeText(&escaped, []byte(text))
-	boldXML := ""
-	if bold {
-		boldXML = "<w:b/><w:bCs/>"
-	}
-	return `<w:p><w:pPr><w:jc w:val="` + justify + `"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Times New Roman"/>` +
-		boldXML + `<w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr><w:t xml:space="preserve">` + escaped.String() + `</w:t></w:r></w:p>`
+type correspondent struct {
+	Number int
+	Label  string
+	Code   string
 }
 
-func row(paragraphs string) string {
-	return `<w:tr><w:tc><w:tcPr><w:tcW w:w="11055" w:type="dxa"/><w:tcBorders>` +
-		`<w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>` +
-		`<w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>` +
-		`</w:tcBorders></w:tcPr>` + paragraphs + `</w:tc></w:tr>`
+type documentLine struct {
+	Text string
+	Time bool
 }
 
-func splitBlocks(content string) []contentBlock {
-	lines := strings.Split(normalizeText(content), "\n")
-	var starts []int
-	for index, line := range lines {
-		if timeLinePattern.MatchString(strings.TrimSpace(line)) {
-			starts = append(starts, index)
+type styledRun struct {
+	Text string
+	Bold bool
+}
+
+func parseDocumentContent(content string, callsigns []domain.Callsign) ([]correspondent, []documentLine) {
+	labels := make(map[string]string)
+	for _, callsign := range callsigns {
+		code := normalizeCode(callsign.Code)
+		label := strings.TrimSpace(callsign.Label)
+		if code != "" && label != "" && label != "н/у" && labels[code] == "" {
+			labels[code] = label
 		}
 	}
-	if len(starts) == 0 {
-		return []contentBlock{{Key: "без времени", Text: normalizeText(content)}}
-	}
-	var blocks []contentBlock
-	counts := map[string]int{}
-	if starts[0] > 0 {
-		blocks = append(blocks, contentBlock{Key: "начало", Text: strings.TrimSpace(strings.Join(lines[:starts[0]], "\n"))})
-	}
-	for index, start := range starts {
-		end := len(lines)
-		if index+1 < len(starts) {
-			end = starts[index+1]
+	codes := domain.ExtractCorrespondentCodes(content)
+	numbers := make(map[string]int, len(codes))
+	correspondents := make([]correspondent, 0, len(codes))
+	for _, code := range codes {
+		numbers[code] = len(numbers) + 1
+		label := labels[normalizeCode(code)]
+		if label == "" {
+			label = "н/у"
 		}
-		key := strings.TrimSpace(lines[start])
-		counts[key]++
-		if counts[key] > 1 {
-			key += "#" + strconv.Itoa(counts[key])
-		}
-		blocks = append(blocks, contentBlock{Key: key, Text: strings.TrimSpace(strings.Join(lines[start:end], "\n"))})
+		correspondents = append(correspondents, correspondent{Number: numbers[code], Label: label, Code: code})
 	}
-	result := blocks[:0]
-	for _, block := range blocks {
-		if block.Text != "" {
-			result = append(result, block)
+	lines := make([]documentLine, 0)
+	for _, raw := range strings.Split(normalizeText(content), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
 		}
+		if match := timeLinePattern.FindStringSubmatch(line); match != nil {
+			hour, _ := strconv.Atoi(match[1])
+			lines = append(lines, documentLine{Text: fmt.Sprintf("%02d:%s", hour, match[2]), Time: true})
+			continue
+		}
+		body := leadingDash.ReplaceAllString(line, "")
+		code := ""
+		if match := codeTailPattern.FindStringSubmatchIndex(body); match != nil {
+			code = body[match[2]:match[3]]
+			body = strings.TrimSpace(body[:match[0]])
+		} else if match := codeAnyPattern.FindStringSubmatchIndex(body); match != nil {
+			code = body[match[2]:match[3]]
+			body = strings.TrimSpace(body[:match[0]] + body[match[1]:])
+		}
+		if number := numbers[code]; number > 0 {
+			body = "/" + strconv.Itoa(number) + "/ " + body
+		}
+		lines = append(lines, documentLine{Text: strings.TrimSpace(body)})
 	}
-	return result
+	return correspondents, lines
+}
+
+func normalizeCode(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.TrimLeft(value, "0")
+	if value == "" {
+		return "0"
+	}
+	return value
+}
+
+func styledParagraph(runs []styledRun, boldMark bool, justify string) string {
+	var builder strings.Builder
+	builder.WriteString(`<w:p><w:pPr><w:jc w:val="` + justify + `"/><w:rPr><w:rFonts w:eastAsia="Times New Roman"/>`)
+	if boldMark {
+		builder.WriteString(`<w:b/>`)
+	}
+	builder.WriteString(`<w:szCs w:val="24"/><w:lang w:eastAsia="ru-RU"/></w:rPr></w:pPr>`)
+	for _, run := range runs {
+		var escaped bytes.Buffer
+		_ = xml.EscapeText(&escaped, []byte(run.Text))
+		builder.WriteString(`<w:r><w:rPr><w:rFonts w:eastAsia="Times New Roman"/>`)
+		if run.Bold {
+			builder.WriteString(`<w:b/>`)
+		}
+		builder.WriteString(`<w:szCs w:val="24"/><w:lang w:eastAsia="ru-RU"/></w:rPr><w:t xml:space="preserve">`)
+		builder.WriteString(escaped.String())
+		builder.WriteString(`</w:t></w:r>`)
+	}
+	builder.WriteString(`</w:p>`)
+	return builder.String()
+}
+
+func styledRow(paragraphs string, verticalCenter bool) string {
+	vertical := ""
+	if verticalCenter {
+		vertical = `<w:vAlign w:val="center"/><w:hideMark/>`
+	}
+	return `<w:tr><w:trPr><w:trHeight w:val="389"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="11055" w:type="dxa"/><w:tcBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tcBorders>` + vertical + `</w:tcPr>` + paragraphs + `</w:tc></w:tr>`
+}
+
+func renderDigest(document Document) string {
+	document.Edited = false
+	payload, _ := json.Marshal(document)
+	return digestText(string(payload))
 }
 
 func loadState(path string) (state, error) {

@@ -57,18 +57,33 @@ func TestRuleSetDoesNotCreateWordForShabashkaPosition(t *testing.T) {
 	}
 }
 
-func TestDeferredModeOverridesWordDestination(t *testing.T) {
+func TestDeferredSuffixKeepsNormalDestinations(t *testing.T) {
 	t.Parallel()
 
 	rules := testRuleSet()
-	event := testEvent("1 мб 155 омбр")
+	event := testEvent("1 мб 155 омбр (отложенный режим)")
 	event.Mode = SourceModeDeferred
 	plan, err := rules.Resolve(event)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if len(plan.Deliveries) != 1 || plan.Deliveries[0].Destination.ID != "aerodrom" {
-		t.Fatalf("отложенный режим должен отключить Word: %#v", plan.Deliveries)
+	if !plan.Recognized || len(plan.Deliveries) != 2 {
+		t.Fatalf("отложенный перехват должен идти по маршрутам основной позиции: %#v", plan)
+	}
+	if event.Position.UnitName != "1 мб 155 омбр (отложенный режим)" {
+		t.Fatal("служебная пометка не должна исчезать из отображаемого названия")
+	}
+}
+
+func TestRoutingUnitNameRemovesOnlyTrailingDeferredMarker(t *testing.T) {
+	t.Parallel()
+
+	value := `  2 об 3 обр ОсН НГ  ( Отложенный   режим ) `
+	if got := RoutingUnitName(value); got != "2 об 3 обр ОсН НГ" {
+		t.Fatalf("неожиданное название для маршрутизации: %q", got)
+	}
+	if !IsDeferredUnitName(value) {
+		t.Fatal("пометка отложенного режима не распознана")
 	}
 }
 
@@ -99,9 +114,6 @@ func testRuleSet() RuleSet {
 				"aerodrom": {Action: RouteDeliver, ThreadID: 2},
 				"word-39":  {Action: RouteDeliver},
 			},
-		},
-		Modes: map[SourceMode]map[string]RouteDecision{
-			SourceModeDeferred: {"word-39": {Action: RouteSkip}},
 		},
 		Unknown: map[string]RouteDecision{
 			"shabashka": {Action: RouteReview, ThreadID: 0},

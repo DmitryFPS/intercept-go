@@ -2,9 +2,12 @@ package domain
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var deferredSuffix = regexp.MustCompile(`(?i)\s*\(\s*отложенный\s+режим\s*\)\s*$`)
 
 // SourceMode описывает режим, в котором EAVC создал перехват.
 type SourceMode string
@@ -88,7 +91,18 @@ func (event Event) PositionKey() string {
 	if catalogUUID := strings.TrimSpace(event.Position.CatalogUUID); catalogUUID != "" {
 		return "catalog:" + strings.ToLower(catalogUUID)
 	}
-	return "name:" + NormalizeUnitName(event.Position.UnitName)
+	return "name:" + NormalizeUnitName(RoutingUnitName(event.Position.UnitName))
+}
+
+// RoutingUnitName убирает только служебную пометку отложенного перехвата.
+// Исходное название в событии не меняется и полностью попадает в Telegram и Word.
+func RoutingUnitName(value string) string {
+	return strings.TrimSpace(deferredSuffix.ReplaceAllString(strings.TrimSpace(value), ""))
+}
+
+// IsDeferredUnitName сообщает, что оператор добавил служебную пометку в EAVC.
+func IsDeferredUnitName(value string) bool {
+	return deferredSuffix.MatchString(strings.TrimSpace(value))
 }
 
 // NormalizeUnitName выполняет безопасную нормализацию без исправления опечаток.

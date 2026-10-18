@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "destinations": {
     "aerodrom": {"id": "aerodrom", "name": "Аэродром", "kind": "telegram", "enabled": true},
     "shabashka": {"id": "shabashka", "name": "Шабашка", "kind": "telegram", "enabled": true},
@@ -19,8 +19,8 @@
     "name:1 бмп 38 обрмп": {"aerodrom": {"action": "deliver", "thread_id": 18}, "word-39": {"action": "deliver"}},
     "name:2 пдб 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 20}, "word-39": {"action": "deliver"}},
     "name:2 еб 152 оебр": {"aerodrom": {"action": "deliver", "thread_id": 22}, "word-39": {"action": "deliver"}},
-    "name:503 обмп 38 обрмп": {"aerodrom": {"action": "deliver", "thread_id": 24}, "word-39": {"action": "skip", "note": "Отложенный режим"}},
-    "name:управление 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 28}, "word-39": {"action": "skip", "note": "Отложенный режим"}},
+    "name:503 обмп 38 обрмп": {"aerodrom": {"action": "deliver", "thread_id": 24}, "word-39": {"action": "deliver"}},
+    "name:управление 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 28}, "word-39": {"action": "deliver"}},
     "name:1 аэмб 68 оаэмбр": {"aerodrom": {"action": "deliver", "thread_id": 30}, "word-39": {"action": "deliver"}},
     "name:3 мб 155 омбр": {"aerodrom": {"action": "deliver", "thread_id": 447}, "word-39": {"action": "deliver"}},
     "name:4 пдб 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 482}, "word-39": {"action": "deliver"}},
@@ -34,13 +34,9 @@
     "name:12 абатр 4 гадн 55 оабр": {"aerodrom": {"action": "deliver", "thread_id": 2447}, "word-39": {"action": "deliver"}},
     "name:оповещения пво всу": {"aerodrom": {"action": "deliver", "thread_id": 3033}, "word-39": {"action": "deliver"}}
   },
-  "modes": {
-    "deferred": {"word-39": {"action": "skip", "note": "Отложенный режим"}}
-  },
   "unknown": {
     "aerodrom": {"action": "skip"},
     "shabashka": {"action": "review"},
     "word-39": {"action": "skip"}
   }
 }
-

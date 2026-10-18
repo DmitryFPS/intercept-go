@@ -128,6 +128,9 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 			Frequency: frequency.String, GroupCode: groupCode.String,
 		}
 		item.Mode = parseMode(mode)
+		if domain.IsDeferredUnitName(unitName.String) {
+			item.Mode = domain.SourceModeDeferred
+		}
 		item.Content = content.String
 		item.UpdatedBy = updatedBy.String
 		item.ObservedAt = time.Now().UTC()

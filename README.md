@@ -40,6 +40,7 @@
 - [Безопасность](docs/05-security.md)
 - [Критерии готовности](docs/06-definition-of-done.md)
 - [Разработка и проверка](docs/07-development.md)
+- [Старая Python-версия и новая Go-версия](docs/08-old-and-go-behavior.md)
 - [Почему транспортом выбрана Telegram-супергруппа](docs/adr/0001-telegram-transport.md)
 
 ## Состояние реализации

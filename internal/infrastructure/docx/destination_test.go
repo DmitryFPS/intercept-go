@@ -3,9 +3,11 @@ package docx
 import (
 	"archive/zip"
 	"context"
+	"encoding/xml"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +60,140 @@ func TestDestinationBuildsOneDocumentPerTimeBlockWithoutDuplicates(t *testing.T)
 		if !strings.Contains(string(payload), "1 мб 155 омбр") {
 			t.Fatal("подразделение не попало в документ")
 		}
+	}
+}
+
+func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	destination := Destination{
+		TemplatePath: template, Folder: filepath.Join(root, "out"),
+		StatePath: filepath.Join(root, "state", "word.json"), Prefix: "СТНД",
+	}
+	event := domain.Event{
+		ID: "event-deferred", ClientID: "textile", CreatedAt: time.Now(),
+		ObservedAt: time.Date(2026, 10, 18, 10, 0, 0, 0, time.UTC),
+		SourceAt:   time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC),
+		Source:     domain.SourceRecord{ID: 2, UUID: "source-deferred"},
+		Position: domain.Position{
+			UnitName: "2 об 3 обр ОсН НГ (отложенный режим)", Frequency: "159.5750", GroupCode: "3",
+		},
+		Mode: domain.SourceModeDeferred, Content: "03.51\n-На приём. (783693)", ContentDigest: "digest",
+		Blocks: []domain.ContentBlock{{
+			Key: "03.51", Sequence: 0, Text: "03.51\n-На приём. (783693)",
+			Callsigns: []domain.Callsign{{Code: "783693", Label: "Марс"}},
+		}},
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
+	if len(files) != 1 || !strings.Contains(filepath.Base(files[0]), "(отложенный режим) - 39.docx") {
+		t.Fatalf("неожиданное имя документа: %#v", files)
+	}
+	xml := documentXML(t, files[0])
+	for _, expected := range []string{
+		"ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ",
+		"2 об 3 обр ОсН НГ (отложенный режим)",
+		" - 39", "18.10.2026г.", "Марс", "783693", "03:51", "/1/ На приём.",
+	} {
+		if !strings.Contains(xml, expected) {
+			t.Fatalf("в документе нет %q", expected)
+		}
+	}
+	wantRuns := []string{
+		"ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ",
+		"Радиосеть ", "2 об 3 обр ОсН НГ (отложенный режим)", " - 39",
+		"159.5750 МГц (гр. ID 3 AES-256)", "18.10.2026г.",
+		"1.«", "Марс", "» (id: 783693) – военнослужащий 2 об 3 обр ОсН НГ (отложенный режим), мужской голос, украинская речь;",
+		"03:51", "/1/ На приём.",
+		"Дежурный оператор: ", "Позывной", "Старший смены МГ ", "1", ": ", "Позывной",
+	}
+	if runs := documentRuns(t, xml); !reflect.DeepEqual(runs, wantRuns) {
+		t.Fatalf("текстовые фрагменты документа отличаются:\nполучено: %#v\nожидалось: %#v", runs, wantRuns)
+	}
+}
+
+func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	destination := Destination{
+		TemplatePath: template, Folder: filepath.Join(root, "out"),
+		StatePath: filepath.Join(root, "state", "word.json"), Network: "39", Prefix: "СТНД",
+	}
+	event := domain.Event{
+		Source:     domain.SourceRecord{ID: 1, UUID: "source-edit"},
+		Position:   domain.Position{UnitName: "1 мб 155 омбр", Frequency: "100", GroupCode: "A"},
+		ObservedAt: time.Now(), Content: "10.00\n-Первый\n10.05\n-Второй",
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	event.Content = "10.00\n-Первый исправлен"
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
+	if len(files) != 1 {
+		t.Fatalf("удалённый блок должен убрать свой документ: %#v", files)
+	}
+	if xml := documentXML(t, files[0]); !strings.Contains(xml, editedMark) || !strings.Contains(xml, "Первый исправлен") {
+		t.Fatal("изменённый документ не перезаписан с пометкой")
+	}
+}
+
+func documentXML(t *testing.T, path string) string {
+	t.Helper()
+	archive, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	for _, file := range archive.File {
+		if file.Name == "word/document.xml" {
+			reader, err := file.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := io.ReadAll(reader)
+			reader.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(payload)
+		}
+	}
+	t.Fatal("нет word/document.xml")
+	return ""
+}
+
+func documentRuns(t *testing.T, payload string) []string {
+	t.Helper()
+	decoder := xml.NewDecoder(strings.NewReader(payload))
+	var runs []string
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return runs
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "t" {
+			continue
+		}
+		var text string
+		if err := decoder.DecodeElement(&text, &start); err != nil {
+			t.Fatal(err)
+		}
+		runs = append(runs, text)
 	}
 }
 

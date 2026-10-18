@@ -127,8 +127,9 @@ func (rules RuleSet) validateDecisions(owner string, decisions map[string]RouteD
 	return nil
 }
 
-// Resolve применяет правило режима поверх правила позиции, а неизвестные события
-// направляет только по обязательной системной строке.
+// Resolve выбирает правило позиции, а неизвестные события направляет только по
+// обязательной системной строке. Режим источника является метаданными и не
+// меняет получателей: отложенный перехват доставляется как обычный.
 func (rules RuleSet) Resolve(event Event) (DeliveryPlan, error) {
 	if err := rules.Validate(); err != nil {
 		return DeliveryPlan{}, err
@@ -146,9 +147,6 @@ func (rules RuleSet) Resolve(event Event) (DeliveryPlan, error) {
 		if suggestion := rules.closestPosition(event.Position.UnitName); suggestion != "" {
 			decisions = withReviewNote(decisions, "Возможно, имелось в виду: "+suggestion)
 		}
-	} else if modeDecisions, exists := rules.Modes[event.Mode]; exists {
-		decisions = overlayDecisions(decisions, modeDecisions)
-		level = "position+mode"
 	}
 
 	ids := make([]string, 0, len(decisions))
@@ -239,15 +237,4 @@ func levenshtein(left, right []rune) int {
 		previous = current
 	}
 	return previous[len(right)]
-}
-
-func overlayDecisions(base, override map[string]RouteDecision) map[string]RouteDecision {
-	merged := make(map[string]RouteDecision, len(base)+len(override))
-	for id, decision := range base {
-		merged[id] = decision
-	}
-	for id, decision := range override {
-		merged[id] = decision
-	}
-	return merged
 }
