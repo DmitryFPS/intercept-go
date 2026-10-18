@@ -184,6 +184,35 @@ func TestDestinationDoesNotWaitBehindStuckOperation(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsDecompressionBomb(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "oversized.docx")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	part, err := writer.Create("word/document.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := make([]byte, 1024*1024)
+	for written := 0; written <= maxTemplatePartBytes; written += len(chunk) {
+		if _, err := part.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(path, Document{}); err == nil {
+		t.Fatal("DOCX с чрезмерно большой распакованной частью должен быть отклонён")
+	}
+}
+
 func documentXML(t *testing.T, path string) string {
 	t.Helper()
 	archive, err := zip.OpenReader(path)

@@ -235,6 +235,12 @@ type Document struct {
 	Edited    bool
 }
 
+const (
+	maxTemplateParts      = 2048
+	maxTemplatePartBytes  = 16 * 1024 * 1024
+	maxTemplateTotalBytes = 64 * 1024 * 1024
+)
+
 // Build сохраняет все части шаблона и заменяет только тело документа.
 func Build(templatePath string, document Document) ([]byte, error) {
 	archive, err := zip.OpenReader(templatePath)
@@ -242,17 +248,35 @@ func Build(templatePath string, document Document) ([]byte, error) {
 		return nil, fmt.Errorf("открыть шаблон Word: %w", err)
 	}
 	defer archive.Close()
+	if len(archive.File) > maxTemplateParts {
+		return nil, fmt.Errorf("шаблон Word содержит слишком много частей: %d", len(archive.File))
+	}
 	parts := make(map[string][]byte, len(archive.File))
 	order := make([]string, 0, len(archive.File))
+	var totalSize uint64
 	for _, file := range archive.File {
+		if file.UncompressedSize64 > maxTemplatePartBytes ||
+			totalSize+file.UncompressedSize64 > maxTemplateTotalBytes {
+			return nil, fmt.Errorf("шаблон Word слишком велик после распаковки: %s", file.Name)
+		}
+		if _, duplicate := parts[file.Name]; duplicate {
+			return nil, fmt.Errorf("шаблон Word содержит повторяющуюся часть: %s", file.Name)
+		}
 		reader, err := file.Open()
 		if err != nil {
 			return nil, fmt.Errorf("прочитать часть шаблона %s: %w", file.Name, err)
 		}
-		payload, readErr := io.ReadAll(reader)
+		payload, readErr := io.ReadAll(io.LimitReader(reader, maxTemplatePartBytes+1))
 		reader.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("прочитать часть шаблона %s: %w", file.Name, readErr)
+		}
+		if len(payload) > maxTemplatePartBytes {
+			return nil, fmt.Errorf("часть шаблона Word слишком велика: %s", file.Name)
+		}
+		totalSize += uint64(len(payload))
+		if totalSize > maxTemplateTotalBytes {
+			return nil, errors.New("шаблон Word слишком велик после распаковки")
 		}
 		parts[file.Name] = payload
 		order = append(order, file.Name)
