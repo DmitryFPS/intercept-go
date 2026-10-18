@@ -502,7 +502,11 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			result, err := service.Receive(ctx, packet)
 			if err != nil {
 				server.Logger.Warn("пакет помещён в карантин", "error", err, "sender_bot_id", packet.SenderBotID)
-				_ = server.Store.Quarantine(ctx, packet, err.Error())
+				if quarantineErr := server.Store.Quarantine(ctx, packet, err.Error()); quarantineErr != nil {
+					server.Logger.Error("не удалось сохранить пакет в карантин", "error", quarantineErr)
+					continue
+				}
+				server.deleteTransportPacket(ctx, receiver, packet.MessageID)
 				continue
 			}
 			server.Logger.Info("транспортный пакет обработан",
@@ -512,6 +516,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			if err := receiver.Acknowledge(ctx, result.ClientBotUsername, result.EventID, result.Status); err != nil {
 				server.Logger.Warn("не удалось подтвердить событие", "event_id", result.EventID, "error", err)
 			}
+			server.deleteTransportPacket(ctx, receiver, packet.MessageID)
 			now := time.Now().UTC()
 			server.update(func(status *ServerStatus) { status.LastReceived = &now })
 		}
@@ -519,6 +524,16 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			offset = next
 			_ = server.Store.SaveValue(ctx, serverOffsetName, strconv.FormatInt(offset, 10))
 		}
+	}
+}
+
+func (server *Server) deleteTransportPacket(ctx context.Context, receiver *telegram.ServerReceiver, messageID int64) {
+	if messageID <= 0 {
+		return
+	}
+	if err := receiver.DeletePacket(ctx, messageID); err != nil && ctx.Err() == nil {
+		server.Logger.Warn("не удалось удалить обработанный пакет из транспортной группы",
+			"telegram_message_id", messageID, "error", err)
 	}
 }
 

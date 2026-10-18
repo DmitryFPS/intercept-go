@@ -20,6 +20,7 @@ type IncomingPacket struct {
 	SenderBotUsername string
 	ChatID            int64
 	ThreadID          int64
+	MessageID         int64
 	Payload           []byte
 }
 

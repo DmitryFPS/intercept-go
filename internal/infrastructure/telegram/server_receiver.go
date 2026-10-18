@@ -51,10 +51,20 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 		}
 		packets = append(packets, application.IncomingPacket{
 			SenderBotID: message.From.ID, SenderBotUsername: message.From.Username,
-			ChatID: message.Chat.ID, ThreadID: message.MessageThreadID, Payload: payload,
+			ChatID: message.Chat.ID, ThreadID: message.MessageThreadID,
+			MessageID: message.MessageID, Payload: payload,
 		})
 	}
 	return packets, next, nil
+}
+
+// DeletePacket удаляет уже сохранённый транспортный файл из служебной группы.
+// Ошибка удаления не влияет на приём: локальная дедупликация остаётся источником истины.
+func (receiver *ServerReceiver) DeletePacket(ctx context.Context, messageID int64) error {
+	if receiver.API == nil || receiver.ChatID == 0 || messageID <= 0 {
+		return errors.New("не заданы данные транспортного сообщения")
+	}
+	return receiver.API.DeleteMessage(ctx, receiver.ChatID, messageID)
 }
 
 // Acknowledge сообщает боту точки, что событие записано сервером.
