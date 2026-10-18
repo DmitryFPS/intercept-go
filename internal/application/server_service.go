@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -106,6 +107,7 @@ type DeliveryService struct {
 	Now            func() time.Time
 	MaxConcurrent  int
 	AttemptTimeout time.Duration
+	Logger         *slog.Logger
 }
 
 func (service *DeliveryService) RunOnce(ctx context.Context, limit int) (int, error) {
@@ -159,6 +161,12 @@ func (service *DeliveryService) RunOnce(ctx context.Context, limit int) (int, er
 func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob) (bool, error) {
 	now := service.Now().UTC()
 	if job.Event.Expired(now) {
+		if service.Logger != nil {
+			service.Logger.Warn("доставка отменена: событие старше допустимого срока",
+				"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+				"position", job.Event.Position.UnitName, "expires_at", job.Event.ExpiresAt,
+			)
+		}
 		return false, service.Queue.MarkDeliveryExpired(
 			ctx, job.Event.ID, job.Delivery.Destination.ID, now, domain.FreshnessExpired,
 		)
@@ -166,6 +174,10 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 	gateway, exists := service.Gateways[job.Delivery.Destination.ID]
 	if !exists {
 		reason := "для направления не настроен адаптер доставки"
+		if service.Logger != nil {
+			service.Logger.Error(reason, "event_id", job.Event.ID,
+				"destination_id", job.Delivery.Destination.ID)
+		}
 		return false, service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
 			now.Add(retryDelay(job.Attempts+1)), reason)
 	}
@@ -181,10 +193,23 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 			now.Add(retryDelay(job.Attempts+1)), err.Error()); markErr != nil {
 			return false, fmt.Errorf("доставка: %v; сохранить повтор: %w", err, markErr)
 		}
+		if service.Logger != nil {
+			service.Logger.Warn("доставка не удалась, назначен повтор",
+				"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+				"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts+1,
+				"next_attempt_at", now.Add(retryDelay(job.Attempts+1)), "error", err,
+			)
+		}
 		return false, nil
 	}
 	if err := service.Queue.MarkDelivered(ctx, job.Event.ID, job.Delivery.Destination.ID, service.Now()); err != nil {
 		return false, err
+	}
+	if service.Logger != nil {
+		service.Logger.Info("событие доставлено",
+			"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+			"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts+1,
+		)
 	}
 	return true, nil
 }

@@ -29,6 +29,7 @@ type ClientStatus struct {
 	Title            string              `json:"title"`
 	Detail           string              `json:"detail"`
 	Configured       bool                `json:"configured"`
+	ClientID         string              `json:"client_id,omitempty"`
 	ClientName       string              `json:"client_name,omitempty"`
 	ClientNumber     string              `json:"client_number,omitempty"`
 	DatabaseOK       bool                `json:"database_ok"`
@@ -168,7 +169,8 @@ func (client *Client) restartWorker(parent context.Context) error {
 	client.workerStop = cancel
 	client.status = ClientStatus{
 		State: "starting", Title: "Запуск", Detail: "Проверяем базу EAVC и Telegram.",
-		Configured: true, ClientName: cfg.ClientName, ClientNumber: cfg.ClientNumber, Version: client.Version,
+		Configured: true, ClientID: cfg.ClientID, ClientName: cfg.ClientName,
+		ClientNumber: cfg.ClientNumber, Version: client.Version,
 	}
 	client.mu.Unlock()
 	go client.run(workerContext, cfg)
@@ -213,6 +215,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		CatchUpExisting: cfg.Polling.CatchUpExisting,
 		MaxEventAge:     time.Duration(cfg.Polling.MaxEventAgeMinutes) * time.Minute,
 		AttemptTimeout:  20 * time.Second,
+		Logger:          client.Logger,
 		Now:             time.Now,
 	}
 	client.update(func(status *ClientStatus) {

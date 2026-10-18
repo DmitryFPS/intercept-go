@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ type ClientService struct {
 	CatchUpExisting bool
 	MaxEventAge     time.Duration
 	AttemptTimeout  time.Duration
+	Logger          *slog.Logger
 	Now             func() time.Time
 }
 
@@ -73,6 +75,20 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 		}
 		if err := service.Queue.Enqueue(ctx, event); err != nil {
 			return queued, err
+		}
+		if service.Logger != nil {
+			level := slog.LevelInfo
+			message := "событие EAVC поставлено в очередь"
+			if event.FreshnessIssue != "" {
+				level = slog.LevelWarn
+				message = "событие EAVC не будет отправлено из-за срока"
+			}
+			service.Logger.Log(ctx, level, message,
+				"event_id", event.ID, "source_uuid", event.Source.UUID,
+				"source_id", event.Source.ID, "position", event.Position.UnitName,
+				"source_at", event.SourceAt, "expires_at", event.ExpiresAt,
+				"reason", event.FreshnessIssue,
+			)
 		}
 		queued++
 	}
@@ -127,10 +143,22 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 			if markErr := service.Queue.MarkRetry(ctx, event.ID, next, err.Error()); markErr != nil {
 				return sent, fmt.Errorf("отправка: %v; сохранить повтор: %w", err, markErr)
 			}
+			if service.Logger != nil {
+				service.Logger.Warn("передача события не удалась, назначен повтор",
+					"event_id", event.ID, "attempt", queued.Attempts+1,
+					"next_attempt_at", next, "error", err,
+				)
+			}
 			continue
 		}
 		if err := service.Queue.MarkUploaded(ctx, event.ID, messageID); err != nil {
 			return sent, err
+		}
+		if service.Logger != nil {
+			service.Logger.Info("событие загружено в транспортную группу",
+				"event_id", event.ID, "telegram_message_id", messageID,
+				"attempt", queued.Attempts+1,
+			)
 		}
 		sent++
 	}
@@ -158,6 +186,12 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int,
 		}
 		if err != nil {
 			return 0, err
+		}
+		if service.Logger != nil {
+			service.Logger.Info("получено подтверждение сервера",
+				"event_id", acknowledgement.EventID, "status", acknowledgement.Status,
+				"accepted_at", acknowledgement.AcceptedAt,
+			)
 		}
 	}
 	if next > offset {

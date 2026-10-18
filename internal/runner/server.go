@@ -290,12 +290,37 @@ func (server *Server) AddClient(ctx context.Context, request config.ClientReques
 	}); err != nil {
 		return nil, err
 	}
+	payload, err := json.MarshalIndent(clientConfig, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("подготовить настройки точки: %w", err)
+	}
+	if err := secrets.Save(server.clientConfigPath(clientConfig.ClientID), payload); err != nil {
+		return nil, fmt.Errorf("сохранить резервную копию настроек точки: %w", err)
+	}
 	server.Logger.Info("точка добавлена", "client_id", clientConfig.ClientID, "client_number", clientConfig.ClientNumber)
-	return json.MarshalIndent(clientConfig, "", "  ")
+	return payload, nil
 }
 
 func (server *Server) Clients(ctx context.Context) ([]application.RegisteredClient, error) {
 	return server.Store.Clients(ctx)
+}
+
+// ClientConfig возвращает ту же защищённо сохранённую конфигурацию повторно.
+func (server *Server) ClientConfig(ctx context.Context, clientID string) ([]byte, application.RegisteredClient, error) {
+	client, err := server.Store.Client(ctx, strings.TrimSpace(clientID))
+	if err != nil {
+		return nil, application.RegisteredClient{}, err
+	}
+	payload, err := secrets.Load(server.clientConfigPath(client.ID))
+	if err != nil {
+		return nil, application.RegisteredClient{}, fmt.Errorf(
+			"резервная копия настроек этой точки отсутствует; создайте точку заново: %w", err,
+		)
+	}
+	if _, err := config.DecodeClient(bytes.NewReader(payload)); err != nil {
+		return nil, application.RegisteredClient{}, fmt.Errorf("резервная копия настроек повреждена: %w", err)
+	}
+	return payload, client, nil
 }
 
 func (server *Server) Rules(ctx context.Context) (domain.RuleSet, error) {
@@ -438,7 +463,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	service := &application.ServerService{Clients: server.Store, Rules: server.Store, Store: server.Store}
 	delivery := &application.DeliveryService{
 		Queue: server.Store, Gateways: server.gateways(cfg), Now: time.Now,
-		MaxConcurrent: 4, AttemptTimeout: 20 * time.Second,
+		MaxConcurrent: 4, AttemptTimeout: 20 * time.Second, Logger: server.Logger,
 	}
 	server.update(func(status *ServerStatus) {
 		status.State = "running"
@@ -467,6 +492,10 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 				_ = server.Store.Quarantine(ctx, packet, err.Error())
 				continue
 			}
+			server.Logger.Info("транспортный пакет обработан",
+				"event_id", result.EventID, "status", result.Status,
+				"new_event", result.Accepted, "sender_bot", result.ClientBotUsername,
+			)
 			if err := receiver.Acknowledge(ctx, result.ClientBotUsername, result.EventID, result.Status); err != nil {
 				server.Logger.Warn("не удалось подтвердить событие", "event_id", result.EventID, "error", err)
 			}
@@ -553,6 +582,10 @@ func (server *Server) saveConfig(cfg config.Server) error {
 
 func (server *Server) configPath() string {
 	return filepath.Join(server.BaseDir, "data", "server-config.dat")
+}
+
+func (server *Server) clientConfigPath(clientID string) string {
+	return filepath.Join(server.BaseDir, "data", "clients", safeID(clientID)+".dat")
 }
 
 func (server *Server) fail(title string, err error) {

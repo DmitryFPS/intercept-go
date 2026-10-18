@@ -34,6 +34,7 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/setup", handler.setup)
 	mux.HandleFunc("GET /api/clients", handler.clients)
 	mux.HandleFunc("POST /api/clients", handler.addClient)
+	mux.HandleFunc("GET /api/clients/{id}/config", handler.clientConfig)
 	mux.HandleFunc("GET /api/destinations", func(writer http.ResponseWriter, _ *http.Request) {
 		localui.WriteJSON(writer, http.StatusOK, handler.Server.SafeDestinations())
 	})
@@ -44,6 +45,18 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/rule-versions/{version}/restore", handler.restoreRules)
 	mux.HandleFunc("GET /api/diagnostics", handler.diagnostics)
 	return securityHeaders(mux)
+}
+
+func (handler Handler) clientConfig(writer http.ResponseWriter, request *http.Request) {
+	payload, client, err := handler.Server.ClientConfig(request.Context(), request.PathValue("id"))
+	if err != nil {
+		badRequest(writer, err)
+		return
+	}
+	filename := "InterceptClient-" + safeFilename(client.Number) + ".json"
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	writer.Write(payload)
 }
 
 func (handler Handler) diagnostics(writer http.ResponseWriter, request *http.Request) {
