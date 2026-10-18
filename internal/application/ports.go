@@ -38,6 +38,14 @@ type ClientQueue interface {
 	MarkRetry(ctx context.Context, eventID string, next time.Time, reason string) error
 }
 
+// ClientState хранит курсор источника, признаки и смещения транспорта.
+type ClientState interface {
+	Cursor(ctx context.Context, name string) (Cursor, error)
+	SaveCursor(ctx context.Context, name string, cursor Cursor) error
+	Value(ctx context.Context, name string) (string, bool, error)
+	SaveValue(ctx context.Context, name, value string) error
+}
+
 // TransportSender загружает зашифрованный конверт и получает подтверждения.
 type TransportSender interface {
 	Send(ctx context.Context, envelope protocol.Envelope) (messageID int64, err error)

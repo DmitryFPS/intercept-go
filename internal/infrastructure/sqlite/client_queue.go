@@ -33,6 +33,10 @@ CREATE TABLE client_cursors (
 	name TEXT PRIMARY KEY,
 	updated_at TEXT NOT NULL,
 	record_id INTEGER NOT NULL
+);
+CREATE TABLE client_values (
+	name TEXT PRIMARY KEY,
+	value TEXT NOT NULL
 );`
 
 // ClientQueue хранит события независимо от процесса и состояния сети.
@@ -165,6 +169,28 @@ func (queue *ClientQueue) SaveCursor(ctx context.Context, name string, cursor ap
 	)
 	if err != nil {
 		return fmt.Errorf("сохранить курсор: %w", err)
+	}
+	return nil
+}
+
+func (queue *ClientQueue) Value(ctx context.Context, name string) (string, bool, error) {
+	var value string
+	err := queue.db.QueryRowContext(ctx, "SELECT value FROM client_values WHERE name = ?", name).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("прочитать параметр состояния: %w", err)
+	}
+	return value, true, nil
+}
+
+func (queue *ClientQueue) SaveValue(ctx context.Context, name, value string) error {
+	_, err := queue.db.ExecContext(ctx, `
+		INSERT INTO client_values(name, value) VALUES(?, ?)
+		ON CONFLICT(name) DO UPDATE SET value = excluded.value`, name, value)
+	if err != nil {
+		return fmt.Errorf("сохранить параметр состояния: %w", err)
 	}
 	return nil
 }
