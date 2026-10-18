@@ -8,19 +8,26 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$distRoot = Join-Path $repoRoot 'dist'
+$workspaceRoot = (Resolve-Path (Join-Path $repoRoot '..')).Path
+$releaseBase = Join-Path $workspaceRoot 'Intercept-Releases'
+$distRoot = Join-Path $releaseBase $Version
+$localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+if ([string]::IsNullOrWhiteSpace($localAppData)) {
+    throw 'Windows не сообщил путь LocalAppData для кэша сборки.'
+}
+$buildCacheRoot = Join-Path $localAppData 'InterceptGoBuild'
 $clientRoot = Join-Path $distRoot 'InterceptClient'
 $serverRoot = Join-Path $distRoot 'InterceptServer'
-$env:GOPATH = Join-Path $repoRoot '.gopath'
-$env:GOCACHE = Join-Path $repoRoot '.gocache'
-$env:GOTMPDIR = Join-Path $repoRoot '.gotmp'
+$env:GOPATH = Join-Path $buildCacheRoot 'gopath'
+$env:GOCACHE = Join-Path $buildCacheRoot 'gocache'
+$env:GOTMPDIR = Join-Path $buildCacheRoot 'gotmp'
 $env:CGO_ENABLED = '0'
 $env:GOOS = 'windows'
 $env:GOARCH = 'amd64'
 
 Push-Location $repoRoot
 try {
-	New-Item -ItemType Directory -Force -Path $env:GOTMPDIR | Out-Null
+    New-Item -ItemType Directory -Force -Path $env:GOTMPDIR, $releaseBase | Out-Null
     $unformatted = @(gofmt -l cmd internal)
     if ($unformatted.Count -ne 0) {
         throw "gofmt требуется для: $($unformatted -join ', ')"
@@ -32,8 +39,9 @@ try {
 
     if (Test-Path -LiteralPath $distRoot) {
         $resolved = [System.IO.Path]::GetFullPath($distRoot)
-        if (-not $resolved.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
-            (Split-Path -Leaf $resolved) -ne 'dist') {
+        $resolvedBase = [System.IO.Path]::GetFullPath($releaseBase) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $resolved.StartsWith($resolvedBase, [System.StringComparison]::OrdinalIgnoreCase) -or
+            (Split-Path -Leaf $resolved) -ne $Version) {
             throw "Небезопасный путь очистки: $resolved"
         }
         Remove-Item -LiteralPath $resolved -Recurse -Force
