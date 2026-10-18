@@ -1,0 +1,13 @@
+/bin/
+/dist/
+/coverage/
+/.idea/
+*.log
+*.local.json
+*.secret.json
+*.db
+*.db-shm
+*.db-wal
+*.exe
+*.zip
+
