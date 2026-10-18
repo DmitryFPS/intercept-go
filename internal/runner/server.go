@@ -524,7 +524,14 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		server.fail("Ошибка Telegram", err)
 		return
 	}
-	receiver := &telegram.ServerReceiver{API: api, ChatID: cfg.Transport.ChatID, MaxBytes: 4 * 1024 * 1024}
+	receiver := &telegram.ServerReceiver{
+		API: api, ChatID: cfg.Transport.ChatID, MaxBytes: 4 * 1024 * 1024,
+		Authorize: func(ctx context.Context, packet application.IncomingPacket) (bool, error) {
+			return server.Store.AuthorizeTransport(
+				ctx, packet.SenderBotID, packet.SenderBotUsername, packet.ChatID, packet.ThreadID,
+			)
+		},
+	}
 	service := &application.ServerService{Clients: server.Store, Rules: server.Store, Store: server.Store}
 	delivery := &application.DeliveryService{
 		Queue: server.Store, Gateways: server.gateways(cfg), Now: time.Now,

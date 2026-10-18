@@ -6,10 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"intercept/internal/application"
 	"intercept/internal/domain"
+)
+
+const (
+	rejectedPacketLimit = 1000
+	rejectedBytesLimit  = 64 * 1024 * 1024
 )
 
 const serverMigration = `
@@ -280,6 +286,28 @@ func (store *ServerStore) SaveClient(ctx context.Context, client application.Reg
 	return nil
 }
 
+// AuthorizeTransport проверяет отправителя по Telegram-метаданным, не раскрывая ключ.
+func (store *ServerStore) AuthorizeTransport(
+	ctx context.Context, senderBotID int64, senderBotUsername string, chatID, threadID int64,
+) (bool, error) {
+	var registeredUsername string
+	err := store.db.QueryRowContext(ctx, `
+		SELECT sender_bot_username FROM server_clients
+		WHERE sender_bot_id=? AND chat_id=? AND thread_id=? AND active=1`,
+		senderBotID, chatID, threadID,
+	).Scan(&registeredUsername)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("проверить транспортного отправителя: %w", err)
+	}
+	normalize := func(value string) string {
+		return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(value), "@"))
+	}
+	return normalize(registeredUsername) == normalize(senderBotUsername), nil
+}
+
 func (store *ServerStore) Clients(ctx context.Context) ([]application.RegisteredClient, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT client_id, client_number, name, sender_bot_id, sender_bot_username,
@@ -330,13 +358,52 @@ func (store *ServerStore) Quarantine(ctx context.Context, packet application.Inc
 	if err != nil {
 		return fmt.Errorf("защитить пакет карантина: %w", err)
 	}
-	_, err = store.db.ExecContext(ctx, `
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("начать запись карантина: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO rejected_packets(
 			sender_bot_id, sender_bot_username, chat_id, thread_id, reason, payload, received_at
 		) VALUES(?,?,?,?,?,?,?)`, packet.SenderBotID, packet.SenderBotUsername,
 		packet.ChatID, packet.ThreadID, reason, protectedPayload, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("сохранить пакет в карантин: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, LENGTH(payload) FROM rejected_packets ORDER BY id DESC`)
+	if err != nil {
+		return fmt.Errorf("проверить объём карантина: %w", err)
+	}
+	var (
+		count            int
+		totalBytes       int64
+		deleteAtAndBelow int64
+	)
+	for rows.Next() {
+		var id, size int64
+		if err := rows.Scan(&id, &size); err != nil {
+			rows.Close()
+			return err
+		}
+		count++
+		if count > rejectedPacketLimit || totalBytes+size > rejectedBytesLimit {
+			deleteAtAndBelow = id
+			break
+		}
+		totalBytes += size
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if deleteAtAndBelow > 0 {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM rejected_packets WHERE id<=?", deleteAtAndBelow); err != nil {
+			return fmt.Errorf("ограничить карантин: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("завершить запись карантина: %w", err)
 	}
 	return nil
 }

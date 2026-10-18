@@ -14,6 +14,8 @@ type ServerReceiver struct {
 	API      *Client
 	ChatID   int64
 	MaxBytes int64
+	// Authorize проверяет метаданные отправителя до скачивания файла.
+	Authorize func(context.Context, application.IncomingPacket) (bool, error)
 }
 
 // Packets возвращает пакеты и следующее безопасное смещение Telegram.
@@ -41,6 +43,22 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 		if message.Document.FileSize <= 0 || message.Document.FileSize > receiver.MaxBytes {
 			continue
 		}
+		packet := application.IncomingPacket{
+			SenderBotID: message.From.ID, SenderBotUsername: message.From.Username,
+			ChatID: message.Chat.ID, ThreadID: message.MessageThreadID,
+			MessageID: message.MessageID,
+		}
+		if receiver.Authorize != nil {
+			allowed, err := receiver.Authorize(ctx, packet)
+			if err != nil {
+				return packets, offset, fmt.Errorf("проверить отправителя пакета: %w", err)
+			}
+			if !allowed {
+				// Неизвестный бот не заставит сервер скачивать произвольные файлы.
+				_ = receiver.API.DeleteMessage(ctx, receiver.ChatID, message.MessageID)
+				continue
+			}
+		}
 		file, err := receiver.API.GetFile(ctx, message.Document.FileID)
 		if err != nil {
 			return packets, offset, fmt.Errorf("получить пакет Telegram: %w", err)
@@ -49,11 +67,8 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 		if err != nil {
 			return packets, offset, err
 		}
-		packets = append(packets, application.IncomingPacket{
-			SenderBotID: message.From.ID, SenderBotUsername: message.From.Username,
-			ChatID: message.Chat.ID, ThreadID: message.MessageThreadID,
-			MessageID: message.MessageID, Payload: payload,
-		})
+		packet.Payload = payload
+		packets = append(packets, packet)
 	}
 	return packets, next, nil
 }

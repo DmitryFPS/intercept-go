@@ -105,6 +105,56 @@ func TestServerStoreKeepsRuleHistoryForRestore(t *testing.T) {
 	}
 }
 
+func TestServerStoreAuthorizesTransportAndCapsQuarantineImmediately(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := application.RegisteredClient{
+		ID: "client", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "Point_Bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key", Key: make([]byte, 32), Active: true,
+	}
+	if err := store.SaveClient(ctx, client); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := store.AuthorizeTransport(ctx, 12, "@point_bot", -1001, 10)
+	if err != nil || !allowed {
+		t.Fatalf("зарегистрированный бот не распознан: allowed=%v err=%v", allowed, err)
+	}
+	allowed, err = store.AuthorizeTransport(ctx, 999, "unknown", -1001, 10)
+	if err != nil || allowed {
+		t.Fatalf("посторонний бот разрешён: allowed=%v err=%v", allowed, err)
+	}
+	for index := 0; index < rejectedPacketLimit; index++ {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO rejected_packets(sender_bot_id,sender_bot_username,chat_id,thread_id,reason,payload,received_at)
+			VALUES(1,'x',-1,1,'test',x'01',?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Quarantine(ctx, application.IncomingPacket{
+		SenderBotID: 12, SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		Payload: []byte("повреждённый пакет"),
+	}, "неверная подпись"); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != rejectedPacketLimit {
+		t.Fatalf("карантин не ограничен сразу: %d", count)
+	}
+}
+
 func TestServerStorePreservesOrderInsideTopicWithoutBlockingOtherTopics(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
