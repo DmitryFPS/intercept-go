@@ -2,6 +2,8 @@
 /dist/
 /coverage/
 /.idea/
+/.gocache/
+/.gomodcache/
 *.log
 *.local.json
 *.secret.json
@@ -10,4 +12,3 @@
 *.db-wal
 *.exe
 *.zip
-
