@@ -11,7 +11,10 @@ import (
 	"intercept/internal/protocol"
 )
 
-const acknowledgementPrefix = "IC-ACK/1 "
+const (
+	acknowledgementPrefixV1 = "IC-ACK/1 "
+	acknowledgementPrefixV2 = "IC-ACK/2 "
+)
 
 // ClientTransport передаёт конверты точки и принимает подтверждения сервера.
 type ClientTransport struct {
@@ -55,21 +58,31 @@ func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset i
 		if strings.ToLower(message.From.Username) != expected {
 			continue
 		}
-		if !strings.HasPrefix(message.Text, acknowledgementPrefix) {
+		status := "accepted"
+		eventID := ""
+		switch {
+		case strings.HasPrefix(message.Text, acknowledgementPrefixV2):
+			parts := strings.Fields(strings.TrimPrefix(message.Text, acknowledgementPrefixV2))
+			if len(parts) != 2 || (parts[1] != "accepted" && parts[1] != "expired") {
+				continue
+			}
+			eventID, status = parts[0], parts[1]
+		case strings.HasPrefix(message.Text, acknowledgementPrefixV1):
+			eventID = strings.TrimSpace(strings.TrimPrefix(message.Text, acknowledgementPrefixV1))
+		default:
 			continue
 		}
-		eventID := strings.TrimSpace(strings.TrimPrefix(message.Text, acknowledgementPrefix))
 		if eventID == "" || strings.ContainsAny(eventID, " \r\n\t") {
 			continue
 		}
 		acknowledgements = append(acknowledgements, application.Acknowledgement{
-			EventID: eventID, AcceptedAt: time.Unix(message.Date, 0).UTC(),
+			EventID: eventID, AcceptedAt: time.Unix(message.Date, 0).UTC(), Status: status,
 		})
 	}
 	return acknowledgements, next, nil
 }
 
 // AcknowledgementText возвращает единый машинно-читаемый ответ сервера.
-func AcknowledgementText(eventID string) string {
-	return acknowledgementPrefix + eventID
+func AcknowledgementText(eventID, status string) string {
+	return acknowledgementPrefixV2 + eventID + " " + status
 }

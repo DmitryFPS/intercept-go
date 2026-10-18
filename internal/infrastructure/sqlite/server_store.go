@@ -73,6 +73,39 @@ CREATE TABLE rejected_packets (
 );
 `
 
+const serverDeliveryOrderMigration = `
+ALTER TABLE delivery_jobs RENAME TO delivery_jobs_v1;
+DROP INDEX delivery_jobs_pending_idx;
+CREATE TABLE delivery_jobs (
+	event_id TEXT NOT NULL,
+	destination_id TEXT NOT NULL,
+	delivery_json BLOB NOT NULL,
+	stream_key TEXT NOT NULL,
+	source_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	state TEXT NOT NULL CHECK(state IN ('pending', 'delivered', 'expired')),
+	attempts INTEGER NOT NULL DEFAULT 0,
+	next_attempt_at TEXT NOT NULL,
+	last_error TEXT NOT NULL DEFAULT '',
+	delivered_at TEXT,
+	expired_at TEXT,
+	PRIMARY KEY(event_id, destination_id),
+	FOREIGN KEY(event_id) REFERENCES received_events(event_id) ON DELETE CASCADE
+);
+INSERT INTO delivery_jobs(
+	event_id, destination_id, delivery_json, stream_key, source_at, expires_at,
+	state, attempts, next_attempt_at, last_error, delivered_at
+)
+SELECT j.event_id, j.destination_id, j.delivery_json, j.destination_id,
+	e.received_at, e.received_at, j.state, j.attempts, j.next_attempt_at,
+	j.last_error, j.delivered_at
+FROM delivery_jobs_v1 j
+JOIN received_events e ON e.event_id = j.event_id;
+DROP TABLE delivery_jobs_v1;
+CREATE INDEX delivery_jobs_pending_idx
+	ON delivery_jobs(state, stream_key, source_at, event_id, next_attempt_at);
+`
+
 // ServerStore реализует реестр, версии правил, входные события и очереди.
 type ServerStore struct {
 	db *sql.DB
@@ -83,6 +116,7 @@ type ServerStats struct {
 	Events    int `json:"events"`
 	Pending   int `json:"pending"`
 	Delivered int `json:"delivered"`
+	Expired   int `json:"expired"`
 	Rejected  int `json:"rejected"`
 }
 
@@ -95,7 +129,7 @@ type RuleVersion struct {
 }
 
 func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
-	if err := Migrate(ctx, db, []string{serverMigration}); err != nil {
+	if err := Migrate(ctx, db, []string{serverMigration, serverDeliveryOrderMigration}); err != nil {
 		return nil, err
 	}
 	return &ServerStore{db: db}, nil
@@ -224,6 +258,7 @@ func (store *ServerStore) Stats(ctx context.Context) (ServerStats, error) {
 		{"SELECT COUNT(*) FROM received_events", &stats.Events},
 		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='pending'", &stats.Pending},
 		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='delivered'", &stats.Delivered},
+		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='expired'", &stats.Expired},
 		{"SELECT COUNT(*) FROM rejected_packets", &stats.Rejected},
 	}
 	for _, item := range queries {
@@ -355,7 +390,8 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 	if !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("проверить повтор события: %w", err)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO received_events(
 			event_id, client_id, source_uuid, content_digest, payload_json, rule_version, received_at
@@ -368,11 +404,21 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 		if err != nil {
 			return false, fmt.Errorf("кодировать задание доставки: %w", err)
 		}
+		sourceAt := event.SourceAt.UTC()
+		if sourceAt.IsZero() {
+			sourceAt = event.CreatedAt.UTC()
+		}
+		expiresAt := event.ExpiresAt.UTC()
+		if expiresAt.IsZero() {
+			expiresAt = sourceAt.Add(30 * time.Minute)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO delivery_jobs(
-				event_id, destination_id, delivery_json, state, next_attempt_at
-			) VALUES(?, ?, ?, 'pending', ?)`, event.ID, delivery.Destination.ID,
-			deliveryPayload, now); err != nil {
+				event_id, destination_id, delivery_json, stream_key, source_at,
+				expires_at, state, next_attempt_at
+			) VALUES(?, ?, ?, ?, ?, ?, 'pending', ?)`, event.ID, delivery.Destination.ID,
+			deliveryPayload, deliveryStreamKey(delivery), sourceAt.Format(time.RFC3339Nano),
+			expiresAt.Format(time.RFC3339Nano), now); err != nil {
 			return false, fmt.Errorf("создать задание %s: %w", delivery.Destination.ID, err)
 		}
 	}
@@ -386,13 +432,27 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 	if limit <= 0 || limit > 1000 {
 		return nil, errors.New("лимит заданий должен быть от 1 до 1000")
 	}
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE delivery_jobs
+		SET state='expired', expired_at=?, last_error=?
+		WHERE state='pending' AND expires_at < ?`,
+		now.UTC().Format(time.RFC3339Nano), domain.FreshnessExpired,
+		now.UTC().Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("завершить просроченные доставки: %w", err)
+	}
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT e.payload_json, j.delivery_json, j.attempts
 		FROM delivery_jobs j
 		JOIN received_events e ON e.event_id = j.event_id
-		WHERE j.state = 'pending' AND j.next_attempt_at <= ?
-		ORDER BY j.next_attempt_at, j.event_id, j.destination_id
-		LIMIT ?`, now.UTC().Format(time.RFC3339Nano), limit)
+		WHERE j.state = 'pending' AND j.next_attempt_at <= ? AND j.expires_at >= ?
+			AND NOT EXISTS (
+				SELECT 1 FROM delivery_jobs earlier
+				WHERE earlier.state = 'pending' AND earlier.stream_key = j.stream_key
+					AND (earlier.source_at < j.source_at OR
+						(earlier.source_at = j.source_at AND earlier.event_id < j.event_id))
+			)
+		ORDER BY j.source_at, j.event_id, j.destination_id
+		LIMIT ?`, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, fmt.Errorf("прочитать очередь доставки: %w", err)
 	}
@@ -423,6 +483,16 @@ func (store *ServerStore) MarkDelivered(ctx context.Context, eventID, destinatio
 	return changedExactlyOnce(result, err, "подтвердить внешнюю доставку")
 }
 
+func (store *ServerStore) MarkDeliveryExpired(
+	ctx context.Context, eventID, destinationID string, at time.Time, reason string,
+) error {
+	result, err := store.db.ExecContext(ctx, `
+		UPDATE delivery_jobs SET state='expired', expired_at=?, last_error=?
+		WHERE event_id=? AND destination_id=? AND state='pending'`,
+		at.UTC().Format(time.RFC3339Nano), reason, eventID, destinationID)
+	return changedExactlyOnce(result, err, "завершить просроченную доставку")
+}
+
 func (store *ServerStore) MarkDeliveryRetry(ctx context.Context, eventID, destinationID string, next time.Time, reason string) error {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE delivery_jobs
@@ -430,4 +500,11 @@ func (store *ServerStore) MarkDeliveryRetry(ctx context.Context, eventID, destin
 		WHERE event_id=? AND destination_id=? AND state='pending'`,
 		next.UTC().Format(time.RFC3339Nano), reason, eventID, destinationID)
 	return changedExactlyOnce(result, err, "запланировать внешнюю доставку")
+}
+
+func deliveryStreamKey(delivery domain.PlannedDelivery) string {
+	if delivery.Destination.Kind == domain.DestinationTelegram {
+		return fmt.Sprintf("%s:topic:%d", delivery.Destination.ID, delivery.Decision.ThreadID)
+	}
+	return delivery.Destination.ID
 }

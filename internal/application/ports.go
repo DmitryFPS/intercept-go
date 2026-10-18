@@ -32,10 +32,18 @@ type SourceItem struct {
 // ClientQueue гарантирует сохранение события до обращения к сети.
 type ClientQueue interface {
 	Enqueue(ctx context.Context, event domain.Event) error
-	Pending(ctx context.Context, limit int, now time.Time) ([]domain.Event, error)
+	Pending(ctx context.Context, limit int, now time.Time) ([]QueuedEvent, error)
 	MarkUploaded(ctx context.Context, eventID string, telegramMessageID int64) error
 	MarkAcknowledged(ctx context.Context, eventID string, at time.Time) error
+	MarkExpired(ctx context.Context, eventID string, at time.Time, reason string) error
+	ExpireDue(ctx context.Context, now time.Time) (int, error)
 	MarkRetry(ctx context.Context, eventID string, next time.Time, reason string) error
+}
+
+// QueuedEvent содержит состояние попыток, не смешивая его с данными EAVC.
+type QueuedEvent struct {
+	Event    domain.Event
+	Attempts int
 }
 
 // ClientState хранит курсор источника, признаки и смещения транспорта.
@@ -56,6 +64,7 @@ type TransportSender interface {
 type Acknowledgement struct {
 	EventID    string
 	AcceptedAt time.Time
+	Status     string
 }
 
 // ServerStore атомарно сохраняет входное событие и его задания доставки.
@@ -100,6 +109,7 @@ type DeliveryJob struct {
 type DeliveryQueue interface {
 	PendingDeliveries(ctx context.Context, limit int, now time.Time) ([]DeliveryJob, error)
 	MarkDelivered(ctx context.Context, eventID, destinationID string, at time.Time) error
+	MarkDeliveryExpired(ctx context.Context, eventID, destinationID string, at time.Time, reason string) error
 	MarkDeliveryRetry(ctx context.Context, eventID, destinationID string, next time.Time, reason string) error
 }
 

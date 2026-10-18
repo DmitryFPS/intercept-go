@@ -45,9 +45,10 @@ type ClientCrypto struct {
 }
 
 type ClientPolling struct {
-	EAVCSeconds     int  `json:"eavc_seconds"`
-	BatchSize       int  `json:"batch_size"`
-	CatchUpExisting bool `json:"catch_up_existing"`
+	EAVCSeconds        int  `json:"eavc_seconds"`
+	BatchSize          int  `json:"batch_size"`
+	CatchUpExisting    bool `json:"catch_up_existing"`
+	MaxEventAgeMinutes int  `json:"max_event_age_minutes"`
 }
 
 func (cfg Client) Validate() error {
@@ -82,6 +83,9 @@ func (cfg Client) Validate() error {
 	if cfg.Polling.BatchSize < 1 || cfg.Polling.BatchSize > 1000 {
 		return errors.New("размер пакета должен быть от 1 до 1000")
 	}
+	if cfg.Polling.MaxEventAgeMinutes < 1 || cfg.Polling.MaxEventAgeMinutes > 1440 {
+		return errors.New("срок доставки события должен быть от 1 до 1440 минут")
+	}
 	return nil
 }
 
@@ -113,6 +117,9 @@ func DecodeClient(reader io.Reader) (Client, error) {
 	var cfg Client
 	if err := decoder.Decode(&cfg); err != nil {
 		return Client{}, fmt.Errorf("разобрать настройки: %w", err)
+	}
+	if cfg.Polling.MaxEventAgeMinutes == 0 {
+		cfg.Polling.MaxEventAgeMinutes = 30
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {

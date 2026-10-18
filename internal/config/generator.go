@@ -56,7 +56,10 @@ func GenerateClient(request ClientRequest, now time.Time, random io.Reader) (Cli
 		Cryptography: ClientCrypto{
 			KeyID: keyID, KeyBase64: base64.RawStdEncoding.EncodeToString(key),
 		},
-		Polling: ClientPolling{EAVCSeconds: 2, BatchSize: 100, CatchUpExisting: request.CatchUpExisting},
+		Polling: ClientPolling{
+			EAVCSeconds: 2, BatchSize: 100, CatchUpExisting: request.CatchUpExisting,
+			MaxEventAgeMinutes: 30,
+		},
 	}
 	return cfg, cfg.Validate()
 }

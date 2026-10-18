@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"intercept/internal/domain"
 	"intercept/internal/protocol"
 )
 
@@ -25,6 +26,7 @@ type PacketResult struct {
 	EventID           string
 	ClientBotUsername string
 	Accepted          bool
+	Status            string
 }
 
 // ServerService проверяет входные пакеты и создаёт независимые задания.
@@ -32,6 +34,7 @@ type ServerService struct {
 	Clients ClientRegistry
 	Rules   RuleRepository
 	Store   ServerStore
+	Now     func() time.Time
 }
 
 func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket) (PacketResult, error) {
@@ -68,6 +71,15 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	if event.ClientID != client.ID {
 		return PacketResult{}, errors.New("ID точки внутри события не совпадает с регистрацией")
 	}
+	if service.Now == nil {
+		service.Now = time.Now
+	}
+	if event.Expired(service.Now()) {
+		return PacketResult{
+			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
+			Status: "expired",
+		}, nil
+	}
 	rules, err := service.Rules.ActiveRules(ctx)
 	if err != nil {
 		return PacketResult{}, fmt.Errorf("получить маршруты: %w", err)
@@ -81,7 +93,8 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 		return PacketResult{}, err
 	}
 	return PacketResult{
-		EventID: event.ID, ClientBotUsername: client.SenderBotUsername, Accepted: accepted,
+		EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
+		Accepted: accepted, Status: "accepted",
 	}, nil
 }
 
@@ -102,6 +115,15 @@ func (service *DeliveryService) RunOnce(ctx context.Context, limit int) (int, er
 	}
 	delivered := 0
 	for _, job := range jobs {
+		now := service.Now().UTC()
+		if job.Event.Expired(now) {
+			if err := service.Queue.MarkDeliveryExpired(
+				ctx, job.Event.ID, job.Delivery.Destination.ID, now, domain.FreshnessExpired,
+			); err != nil {
+				return delivered, err
+			}
+			continue
+		}
 		gateway, exists := service.Gateways[job.Delivery.Destination.ID]
 		if !exists {
 			reason := "для направления не настроен адаптер доставки"

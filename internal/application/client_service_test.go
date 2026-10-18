@@ -18,7 +18,7 @@ func TestClientServiceSeparatesUploadFromServerAcknowledgement(t *testing.T) {
 	sender := &memorySender{}
 	service := ClientService{
 		ClientID: "textile", Source: &memorySource{items: []SourceItem{{
-			Record:   domain.SourceRecord{ID: 1, UUID: "source-1"},
+			Record:   domain.SourceRecord{ID: 1, UUID: "source-1", UpdatedAt: now.Format(time.RFC3339Nano)},
 			Position: domain.Position{UnitName: "1 мб 155 омбр"},
 			Mode:     domain.SourceModeUnknown, Content: "данные", ObservedAt: now,
 		}}},
@@ -117,14 +117,36 @@ func (state *memoryClientState) Enqueue(_ context.Context, event domain.Event) e
 	return nil
 }
 
-func (state *memoryClientState) Pending(_ context.Context, _ int, _ time.Time) ([]domain.Event, error) {
-	var pending []domain.Event
+func (state *memoryClientState) Pending(_ context.Context, limit int, _ time.Time) ([]QueuedEvent, error) {
+	var pending []QueuedEvent
 	for _, event := range state.events {
-		if state.states[event.ID] != "acknowledged" {
-			pending = append(pending, event)
+		if state.states[event.ID] != "acknowledged" && state.states[event.ID] != "expired" {
+			pending = append(pending, QueuedEvent{Event: event})
+			if len(pending) == limit {
+				break
+			}
 		}
 	}
 	return pending, nil
+}
+
+func (state *memoryClientState) ExpireDue(_ context.Context, now time.Time) (int, error) {
+	count := 0
+	for _, event := range state.events {
+		if event.Expired(now) && state.states[event.ID] != "acknowledged" && state.states[event.ID] != "expired" {
+			state.states[event.ID] = "expired"
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (state *memoryClientState) MarkExpired(_ context.Context, eventID string, _ time.Time, _ string) error {
+	if _, exists := state.states[eventID]; !exists {
+		return errors.New("not found")
+	}
+	state.states[eventID] = "expired"
+	return nil
 }
 
 func (state *memoryClientState) MarkUploaded(_ context.Context, eventID string, _ int64) error {

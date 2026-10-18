@@ -17,16 +17,24 @@ const (
 
 // Event — независимое от транспорта представление одного состояния перехвата.
 type Event struct {
-	ID            string       `json:"event_id"`
-	ClientID      string       `json:"client_id"`
-	CreatedAt     time.Time    `json:"created_at"`
-	ObservedAt    time.Time    `json:"observed_at"`
-	Source        SourceRecord `json:"source"`
-	Position      Position     `json:"position"`
-	Mode          SourceMode   `json:"source_mode"`
-	Content       string       `json:"content"`
-	UpdatedBy     string       `json:"updated_by,omitempty"`
-	ContentDigest string       `json:"content_digest"`
+	ID             string       `json:"event_id"`
+	ClientID       string       `json:"client_id"`
+	CreatedAt      time.Time    `json:"created_at"`
+	ObservedAt     time.Time    `json:"observed_at"`
+	SourceAt       time.Time    `json:"source_at"`
+	ExpiresAt      time.Time    `json:"expires_at"`
+	FreshnessIssue string       `json:"freshness_issue,omitempty"`
+	Source         SourceRecord `json:"source"`
+	Position       Position     `json:"position"`
+	Mode           SourceMode   `json:"source_mode"`
+	Content        string       `json:"content"`
+	UpdatedBy      string       `json:"updated_by,omitempty"`
+	ContentDigest  string       `json:"content_digest"`
+}
+
+// Expired сообщает, что событие больше нельзя впервые передавать получателям.
+func (event Event) Expired(now time.Time) bool {
+	return event.FreshnessIssue != "" || (!event.ExpiresAt.IsZero() && now.UTC().After(event.ExpiresAt.UTC()))
 }
 
 // SourceRecord связывает событие с записью EAVC, но не выдаёт её за ID позиции.

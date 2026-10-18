@@ -58,10 +58,13 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 }
 
 // Acknowledge сообщает боту точки, что событие записано сервером.
-func (receiver *ServerReceiver) Acknowledge(ctx context.Context, botUsername, eventID string) error {
+func (receiver *ServerReceiver) Acknowledge(ctx context.Context, botUsername, eventID, status string) error {
 	if strings.TrimSpace(botUsername) == "" || strings.TrimSpace(eventID) == "" {
 		return errors.New("для подтверждения не задан бот или событие")
 	}
-	_, err := receiver.API.SendMessage(ctx, 0, botUsername, AcknowledgementText(eventID))
+	if status != "accepted" && status != "expired" {
+		return errors.New("для подтверждения задан неизвестный статус")
+	}
+	_, err := receiver.API.SendMessage(ctx, 0, botUsername, AcknowledgementText(eventID, status))
 	return err
 }

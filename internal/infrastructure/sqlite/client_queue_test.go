@@ -14,7 +14,7 @@ func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "state.db")
-	now := time.Date(2026, 10, 18, 10, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	event := domain.Event{
 		ID: "event-1", ClientID: "textile", CreatedAt: now, ObservedAt: now,
 		Source:   domain.SourceRecord{ID: 1, UUID: "source-1"},
@@ -56,7 +56,7 @@ func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pending: %v", err)
 	}
-	if len(events) != 1 || events[0].ID != event.ID {
+	if len(events) != 1 || events[0].Event.ID != event.ID {
 		t.Fatalf("ожидалось одно исходное событие: %#v", events)
 	}
 	cursor, err := queue.Cursor(context.Background(), "eavc")
@@ -71,5 +71,57 @@ func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	}
 	if err := queue.MarkAcknowledged(context.Background(), event.ID, now); err != nil {
 		t.Fatalf("повторное подтверждение должно быть безопасным: %v", err)
+	}
+}
+
+func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := domain.Event{
+		ID: "event-1", ClientID: "textile", CreatedAt: now, ObservedAt: now,
+		ExpiresAt: now.Add(time.Minute), Source: domain.SourceRecord{UUID: "source-1"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "первое", ContentDigest: "digest-1",
+	}
+	second := first
+	second.ID = "event-2"
+	second.Source.UUID = "source-2"
+	second.Content = "второе"
+	second.ContentDigest = "digest-2"
+	second.CreatedAt = now.Add(time.Second)
+	second.ExpiresAt = now.Add(30 * time.Minute)
+	if err := queue.Enqueue(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Enqueue(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkRetry(ctx, first.ID, now.Add(time.Minute), "временная ошибка"); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := queue.Pending(ctx, 10, now.Add(10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("второе событие обогнало первое: %#v", jobs)
+	}
+	if _, err := queue.ExpireDue(ctx, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = queue.Pending(ctx, 10, now.Add(2*time.Minute))
+	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != second.ID {
+		t.Fatalf("после истечения первого ожидалось второе: %#v, %v", jobs, err)
 	}
 }

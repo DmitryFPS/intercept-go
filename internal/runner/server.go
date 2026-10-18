@@ -466,7 +466,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 				_ = server.Store.Quarantine(ctx, packet, err.Error())
 				continue
 			}
-			if err := receiver.Acknowledge(ctx, result.ClientBotUsername, result.EventID); err != nil {
+			if err := receiver.Acknowledge(ctx, result.ClientBotUsername, result.EventID, result.Status); err != nil {
 				server.Logger.Warn("не удалось подтвердить событие", "event_id", result.EventID, "error", err)
 			}
 			now := time.Now().UTC()

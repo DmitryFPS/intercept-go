@@ -41,6 +41,39 @@ CREATE TABLE client_values (
 	value TEXT NOT NULL
 );`
 
+const clientExpiryMigration = `
+ALTER TABLE client_events RENAME TO client_events_v1;
+DROP INDEX client_events_pending_idx;
+CREATE TABLE client_events (
+	event_id TEXT PRIMARY KEY,
+	source_uuid TEXT NOT NULL,
+	content_digest TEXT NOT NULL,
+	payload_json BLOB NOT NULL,
+	state TEXT NOT NULL CHECK(state IN ('pending', 'uploaded', 'acknowledged', 'expired')),
+	attempts INTEGER NOT NULL DEFAULT 0,
+	next_attempt_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	telegram_message_id INTEGER,
+	last_error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	uploaded_at TEXT,
+	acknowledged_at TEXT,
+	expired_at TEXT,
+	UNIQUE(source_uuid, content_digest)
+);
+INSERT INTO client_events(
+	event_id, source_uuid, content_digest, payload_json, state, attempts,
+	next_attempt_at, expires_at, telegram_message_id, last_error, created_at,
+	uploaded_at, acknowledged_at
+)
+SELECT event_id, source_uuid, content_digest, payload_json, state, attempts,
+	next_attempt_at, created_at, telegram_message_id, last_error, created_at,
+	uploaded_at, acknowledged_at
+FROM client_events_v1;
+DROP TABLE client_events_v1;
+CREATE INDEX client_events_pending_idx ON client_events(state, next_attempt_at, created_at);
+`
+
 // ClientQueue хранит события независимо от процесса и состояния сети.
 type ClientQueue struct {
 	db *sql.DB
@@ -50,10 +83,11 @@ type ClientStats struct {
 	Pending      int `json:"pending"`
 	Uploaded     int `json:"uploaded"`
 	Acknowledged int `json:"acknowledged"`
+	Expired      int `json:"expired"`
 }
 
 func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
-	if err := Migrate(ctx, db, []string{clientMigration}); err != nil {
+	if err := Migrate(ctx, db, []string{clientMigration, clientExpiryMigration}); err != nil {
 		return nil, err
 	}
 	return &ClientQueue{db: db}, nil
@@ -71,15 +105,32 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 	if sourceKey == "" {
 		sourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
 	}
+	expiresAt := event.ExpiresAt.UTC()
+	if expiresAt.IsZero() {
+		expiresAt = event.CreatedAt.UTC().Add(30 * time.Minute)
+	}
+	state := "pending"
+	expiredAt := any(nil)
+	lastError := ""
+	if event.FreshnessIssue != "" || time.Now().UTC().After(expiresAt) {
+		state = "expired"
+		expiredAt = time.Now().UTC().Format(time.RFC3339Nano)
+		lastError = event.FreshnessIssue
+		if lastError == "" {
+			lastError = domain.FreshnessExpired
+		}
+	}
 	_, err = queue.db.ExecContext(ctx, `
 		INSERT INTO client_events(
 			event_id, source_uuid, content_digest, payload_json, state,
-			next_attempt_at, created_at
-		) VALUES(?, ?, ?, ?, 'pending', ?, ?)
+			next_attempt_at, expires_at, created_at, expired_at, last_error
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_uuid, content_digest) DO NOTHING`,
-		event.ID, sourceKey, event.ContentDigest, payload,
+		event.ID, sourceKey, event.ContentDigest, payload, state,
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
+		expiresAt.Format(time.RFC3339Nano),
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
+		expiredAt, lastError,
 	)
 	if err != nil {
 		return fmt.Errorf("поставить событие в очередь: %w", err)
@@ -87,31 +138,38 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 	return nil
 }
 
-func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time) ([]domain.Event, error) {
+func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time) ([]application.QueuedEvent, error) {
 	if limit <= 0 || limit > 1000 {
 		return nil, errors.New("лимит очереди должен быть от 1 до 1000")
 	}
 	rows, err := queue.db.QueryContext(ctx, `
-		SELECT payload_json
+		SELECT payload_json, attempts
 		FROM client_events
-		WHERE state IN ('pending', 'uploaded') AND next_attempt_at <= ?
+		WHERE state IN ('pending', 'uploaded')
+			AND next_attempt_at <= ? AND expires_at >= ?
+			AND NOT EXISTS (
+				SELECT 1 FROM client_events earlier
+				WHERE earlier.state IN ('pending', 'uploaded')
+					AND (earlier.created_at < client_events.created_at OR
+						(earlier.created_at = client_events.created_at AND earlier.event_id < client_events.event_id))
+			)
 		ORDER BY created_at, event_id
-		LIMIT ?`, now.UTC().Format(time.RFC3339Nano), limit)
+		LIMIT ?`, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, fmt.Errorf("прочитать очередь: %w", err)
 	}
 	defer rows.Close()
-	var events []domain.Event
+	var events []application.QueuedEvent
 	for rows.Next() {
 		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
+		var queued application.QueuedEvent
+		if err := rows.Scan(&payload, &queued.Attempts); err != nil {
 			return nil, fmt.Errorf("прочитать событие очереди: %w", err)
 		}
-		var event domain.Event
-		if err := json.Unmarshal(payload, &event); err != nil {
+		if err := json.Unmarshal(payload, &queued.Event); err != nil {
 			return nil, fmt.Errorf("декодировать событие очереди: %w", err)
 		}
-		events = append(events, event)
+		events = append(events, queued)
 	}
 	return events, rows.Err()
 }
@@ -120,19 +178,42 @@ func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, tele
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
 		SET state = 'uploaded', telegram_message_id = ?, uploaded_at = ?,
-			last_error = '', next_attempt_at = ?
-		WHERE event_id = ? AND state != 'acknowledged'`,
+			last_error = '', next_attempt_at = ?, attempts = attempts + 1
+		WHERE event_id = ? AND state IN ('pending', 'uploaded')`,
 		telegramMessageID, time.Now().UTC().Format(time.RFC3339Nano),
 		time.Now().UTC().Add(30*time.Second).Format(time.RFC3339Nano), eventID,
 	)
 	return changedExactlyOnce(result, err, "отметить загрузку")
 }
 
+func (queue *ClientQueue) ExpireDue(ctx context.Context, now time.Time) (int, error) {
+	result, err := queue.db.ExecContext(ctx, `
+		UPDATE client_events
+		SET state='expired', expired_at=?, last_error=?
+		WHERE state IN ('pending', 'uploaded') AND expires_at < ?`,
+		now.UTC().Format(time.RFC3339Nano), domain.FreshnessExpired,
+		now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("завершить просроченные события: %w", err)
+	}
+	count, err := result.RowsAffected()
+	return int(count), err
+}
+
+func (queue *ClientQueue) MarkExpired(ctx context.Context, eventID string, at time.Time, reason string) error {
+	result, err := queue.db.ExecContext(ctx, `
+		UPDATE client_events
+		SET state='expired', expired_at=?, last_error=?
+		WHERE event_id=? AND state IN ('pending', 'uploaded')`,
+		at.UTC().Format(time.RFC3339Nano), reason, eventID)
+	return changedExactlyOnce(result, err, "отметить просроченное событие")
+}
+
 func (queue *ClientQueue) MarkAcknowledged(ctx context.Context, eventID string, at time.Time) error {
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
 		SET state = 'acknowledged', acknowledged_at = ?, last_error = ''
-		WHERE event_id = ? AND state != 'acknowledged'`,
+		WHERE event_id = ? AND state IN ('pending', 'uploaded')`,
 		at.UTC().Format(time.RFC3339Nano), eventID,
 	)
 	if err == nil {
@@ -153,7 +234,7 @@ func (queue *ClientQueue) MarkRetry(ctx context.Context, eventID string, next ti
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
 		SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?
-		WHERE event_id = ? AND state != 'acknowledged'`,
+		WHERE event_id = ? AND state IN ('pending', 'uploaded')`,
 		next.UTC().Format(time.RFC3339Nano), reason, eventID,
 	)
 	return changedExactlyOnce(result, err, "запланировать повтор")
@@ -227,6 +308,8 @@ func (queue *ClientQueue) Stats(ctx context.Context) (ClientStats, error) {
 			stats.Uploaded = count
 		case "acknowledged":
 			stats.Acknowledged = count
+		case "expired":
+			stats.Expired = count
 		}
 	}
 	return stats, rows.Err()

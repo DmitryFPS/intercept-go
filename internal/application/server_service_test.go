@@ -136,6 +136,11 @@ func (queue *memoryDeliveryQueue) MarkDelivered(_ context.Context, eventID, dest
 	return nil
 }
 
+func (queue *memoryDeliveryQueue) MarkDeliveryExpired(_ context.Context, eventID, destinationID string, _ time.Time, _ string) error {
+	queue.retried = append(queue.retried, eventID+":"+destinationID+":expired")
+	return nil
+}
+
 func (queue *memoryDeliveryQueue) MarkDeliveryRetry(_ context.Context, eventID, destinationID string, _ time.Time, _ string) error {
 	queue.retried = append(queue.retried, eventID+":"+destinationID)
 	return nil

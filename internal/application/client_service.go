@@ -31,6 +31,7 @@ type ClientService struct {
 	Key             []byte
 	BatchSize       int
 	CatchUpExisting bool
+	MaxEventAge     time.Duration
 	Now             func() time.Time
 }
 
@@ -93,19 +94,32 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 	if service.Now == nil {
 		service.Now = time.Now
 	}
-	events, err := service.Queue.Pending(ctx, service.BatchSize, service.Now())
+	now := service.Now().UTC()
+	if _, err := service.Queue.ExpireDue(ctx, now); err != nil {
+		return 0, err
+	}
+	// Одна точка отправляет события строго по порядку. Следующее событие не
+	// обгоняет предыдущее, пока оно не подтверждено или не просрочено.
+	events, err := service.Queue.Pending(ctx, 1, now)
 	if err != nil {
 		return 0, err
 	}
 	sent := 0
-	for _, event := range events {
-		envelope, err := protocol.Seal(event, service.KeyID, service.Key, service.Now(), rand.Reader)
+	for _, queued := range events {
+		event := queued.Event
+		if event.Expired(now) {
+			if err := service.Queue.MarkExpired(ctx, event.ID, now, domain.FreshnessExpired); err != nil {
+				return sent, err
+			}
+			continue
+		}
+		envelope, err := protocol.Seal(event, service.KeyID, service.Key, now, rand.Reader)
 		if err != nil {
 			return sent, err
 		}
 		messageID, err := service.Sender.Send(ctx, envelope)
 		if err != nil {
-			next := service.Now().Add(retryDelay(1))
+			next := now.Add(retryDelay(queued.Attempts + 1))
 			if markErr := service.Queue.MarkRetry(ctx, event.ID, next, err.Error()); markErr != nil {
 				return sent, fmt.Errorf("отправка: %v; сохранить повтор: %w", err, markErr)
 			}
@@ -132,7 +146,13 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int,
 		return 0, err
 	}
 	for _, acknowledgement := range acknowledgements {
-		if err := service.Queue.MarkAcknowledged(ctx, acknowledgement.EventID, acknowledgement.AcceptedAt); err != nil {
+		var err error
+		if acknowledgement.Status == "expired" {
+			err = service.Queue.MarkExpired(ctx, acknowledgement.EventID, acknowledgement.AcceptedAt, domain.FreshnessExpired)
+		} else {
+			err = service.Queue.MarkAcknowledged(ctx, acknowledgement.EventID, acknowledgement.AcceptedAt)
+		}
+		if err != nil {
 			return 0, err
 		}
 	}
@@ -146,6 +166,13 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int,
 
 func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 	now := service.Now().UTC()
+	maxAge := service.MaxEventAge
+	if maxAge <= 0 {
+		maxAge = 30 * time.Minute
+	}
+	sourceAt, expiresAt, freshnessIssue := domain.Freshness(
+		item.Record.UpdatedAt, item.ObservedAt, now, maxAge,
+	)
 	id, err := protocol.UUIDv7(now, rand.Reader)
 	if err != nil {
 		return domain.Event{}, err
@@ -156,6 +183,7 @@ func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 	}, "\x01")))
 	event := domain.Event{
 		ID: id, ClientID: service.ClientID, CreatedAt: now, ObservedAt: item.ObservedAt,
+		SourceAt: sourceAt, ExpiresAt: expiresAt, FreshnessIssue: freshnessIssue,
 		Source: item.Record, Position: item.Position, Mode: item.Mode,
 		Content: normalizeContent(item.Content), UpdatedBy: item.UpdatedBy,
 		ContentDigest: hex.EncodeToString(digest[:]),

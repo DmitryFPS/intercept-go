@@ -210,12 +210,14 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 			ServerBotUsername: cfg.Transport.ServerBotUsername,
 		},
 		KeyID: cfg.Cryptography.KeyID, Key: key, BatchSize: cfg.Polling.BatchSize,
-		CatchUpExisting: cfg.Polling.CatchUpExisting, Now: time.Now,
+		CatchUpExisting: cfg.Polling.CatchUpExisting,
+		MaxEventAge:     time.Duration(cfg.Polling.MaxEventAgeMinutes) * time.Minute,
+		Now:             time.Now,
 	}
 	client.update(func(status *ClientStatus) {
 		status.State = "running"
 		status.Title = "Программа работает"
-		status.Detail = "EAVC подключён. Данные передаются автоматически."
+		status.Detail = "EAVC подключён. Новые данные передаются в течение 30 минут."
 		status.DatabaseOK = true
 		status.TelegramOK = true
 	})
