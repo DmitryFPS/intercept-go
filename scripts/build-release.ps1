@@ -11,24 +11,15 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $workspaceRoot = (Resolve-Path (Join-Path $repoRoot '..')).Path
 $releaseBase = Join-Path $workspaceRoot 'Intercept-Releases'
 $distRoot = Join-Path $releaseBase $Version
-$localAppData = [Environment]::GetFolderPath('LocalApplicationData')
-if ([string]::IsNullOrWhiteSpace($localAppData)) {
-    throw 'Windows не сообщил путь LocalAppData для кэша сборки.'
-}
-$buildCacheRoot = Join-Path $localAppData 'InterceptGoBuild'
-try {
-    New-Item -ItemType Directory -Force -Path $buildCacheRoot | Out-Null
-}
-catch {
-    # В ограниченной среде сборки AppData может быть закрыта. Кэш остаётся
-    # рядом с рабочей областью и по-прежнему не попадает в репозиторий.
-    $buildCacheRoot = Join-Path $workspaceRoot '.build-cache\release'
-    New-Item -ItemType Directory -Force -Path $buildCacheRoot | Out-Null
-}
+# Все временные файлы сборки находятся рядом с рабочей областью. Это делает
+# результат воспроизводимым и не зависит от прав на системные AppData/GOPATH.
+$buildCacheRoot = Join-Path $workspaceRoot '.build-cache\release'
+New-Item -ItemType Directory -Force -Path $buildCacheRoot | Out-Null
 $clientRoot = Join-Path $distRoot 'InterceptClient'
 $serverRoot = Join-Path $distRoot 'InterceptServer'
 $env:GOPATH = Join-Path $buildCacheRoot 'gopath'
 $env:GOCACHE = Join-Path $buildCacheRoot 'gocache'
+$env:GOMODCACHE = Join-Path $buildCacheRoot 'gomodcache'
 $env:GOTMPDIR = Join-Path $buildCacheRoot 'gotmp'
 $env:CGO_ENABLED = '0'
 $env:GOOS = 'windows'

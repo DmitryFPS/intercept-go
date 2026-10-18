@@ -30,6 +30,13 @@ import (
 
 const serverOffsetName = "telegram_offset"
 
+const (
+	serverTerminalRetention = 30 * 24 * time.Hour
+	serverRejectedRetention = 90 * 24 * time.Hour
+	serverRuleHistoryLimit  = 100
+	serverRejectedLimit     = 1000
+)
+
 type ServerStatus struct {
 	State        string              `json:"state"`
 	Title        string              `json:"title"`
@@ -118,6 +125,7 @@ func (server *Server) Start(ctx context.Context) {
 		}
 	}
 	go server.statusLoop(ctx)
+	go server.serverMaintenanceLoop(ctx)
 }
 
 func (server *Server) Close() {
@@ -565,6 +573,36 @@ func (server *Server) statusLoop(ctx context.Context) {
 		stats, err := server.Store.Stats(ctx)
 		if err == nil {
 			server.update(func(status *ServerStatus) { status.Stats = stats })
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (server *Server) serverMaintenanceLoop(ctx context.Context) {
+	ticker := time.NewTicker(maintenanceInterval)
+	defer ticker.Stop()
+	for {
+		now := time.Now().UTC()
+		result, err := server.Store.PurgeOld(
+			ctx,
+			now.Add(-serverTerminalRetention),
+			now.Add(-serverRejectedRetention),
+			serverRuleHistoryLimit,
+			serverRejectedLimit,
+		)
+		if err != nil && ctx.Err() == nil {
+			server.Logger.Warn("не удалось очистить технические данные сервера", "error", err)
+		} else if result.Events+result.Rejected+result.Rules > 0 {
+			if err := server.Store.Compact(ctx); err != nil && ctx.Err() == nil {
+				server.Logger.Warn("не удалось уплотнить базу сервера", "error", err)
+			} else {
+				server.Logger.Info("очищены технические данные сервера",
+					"events", result.Events, "rejected", result.Rejected, "rules", result.Rules)
+			}
 		}
 		select {
 		case <-ctx.Done():

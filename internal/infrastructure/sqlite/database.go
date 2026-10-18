@@ -79,3 +79,16 @@ func Migrate(ctx context.Context, db *sql.DB, migrations []string) error {
 	}
 	return nil
 }
+
+func compact(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("очистить журнал SQLite: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "VACUUM"); err != nil {
+		return fmt.Errorf("уплотнить SQLite: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA optimize"); err != nil {
+		return fmt.Errorf("оптимизировать SQLite: %w", err)
+	}
+	return nil
+}

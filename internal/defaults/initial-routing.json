@@ -3,40 +3,40 @@
   "destinations": {
     "aerodrom": {"id": "aerodrom", "name": "Аэродром", "kind": "telegram", "enabled": true},
     "shabashka": {"id": "shabashka", "name": "Шабашка", "kind": "telegram", "enabled": true},
-    "word-39": {"id": "word-39", "name": "39-ка", "kind": "word", "enabled": true}
+    "word-main": {"id": "word-main", "name": "Word 313", "kind": "word", "enabled": true}
   },
   "positions": {
-    "name:2 об 3 обр осн \"спартан\" нгу": {"shabashka": {"action": "deliver", "thread_id": 592}, "word-39": {"action": "skip"}},
-    "name:мпб 155 омбр": {"shabashka": {"action": "deliver", "thread_id": 2091}, "word-39": {"action": "skip"}},
-    "name:10 ошб 59 ошбр": {"shabashka": {"action": "deliver", "thread_id": 591}, "word-39": {"action": "skip"}},
+    "name:2 об 3 обр осн \"спартан\" нгу": {"shabashka": {"action": "deliver", "thread_id": 592}, "word-main": {"action": "skip"}},
+    "name:мпб 155 омбр": {"shabashka": {"action": "deliver", "thread_id": 2091}, "word-main": {"action": "skip"}},
+    "name:10 ошб 59 ошбр": {"shabashka": {"action": "deliver", "thread_id": 591}, "word-main": {"action": "skip"}},
 
-    "name:1 мб 155 омбр": {"aerodrom": {"action": "deliver", "thread_id": 2}, "word-39": {"action": "deliver"}},
-    "name:мпб 32 омбр": {"aerodrom": {"action": "deliver", "thread_id": 4}, "word-39": {"action": "deliver"}},
-    "name:3 об 3 обр осн \"спартан\" нгу": {"aerodrom": {"action": "deliver", "thread_id": 8}, "word-39": {"action": "deliver"}},
-    "name:н/у подразделение всу": {"aerodrom": {"action": "deliver", "thread_id": 10}, "word-39": {"action": "deliver"}},
-    "name:управление 9 ак": {"aerodrom": {"action": "deliver", "thread_id": 12}, "word-39": {"action": "deliver"}},
-    "name:10 абатр 4 гадн 55 оабр": {"aerodrom": {"action": "deliver", "thread_id": 14}, "word-39": {"action": "deliver"}},
-    "name:1 бмп 38 обрмп": {"aerodrom": {"action": "deliver", "thread_id": 18}, "word-39": {"action": "deliver"}},
-    "name:2 пдб 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 20}, "word-39": {"action": "deliver"}},
-    "name:2 еб 152 оебр": {"aerodrom": {"action": "deliver", "thread_id": 22}, "word-39": {"action": "deliver"}},
-    "name:503 обмп 38 обрмп": {"aerodrom": {"action": "deliver", "thread_id": 24}, "word-39": {"action": "deliver"}},
-    "name:управление 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 28}, "word-39": {"action": "deliver"}},
-    "name:1 аэмб 68 оаэмбр": {"aerodrom": {"action": "deliver", "thread_id": 30}, "word-39": {"action": "deliver"}},
-    "name:3 мб 155 омбр": {"aerodrom": {"action": "deliver", "thread_id": 447}, "word-39": {"action": "deliver"}},
-    "name:4 пдб 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 482}, "word-39": {"action": "deliver"}},
-    "name:59 ошбр сбпс": {"aerodrom": {"action": "deliver", "thread_id": 670}, "word-39": {"action": "deliver"}},
-    "name:2 мб 1 отмбр": {"aerodrom": {"action": "deliver", "thread_id": 1281}, "word-39": {"action": "deliver"}},
-    "name:2 мб 32 омбр": {"aerodrom": {"action": "deliver", "thread_id": 1688}, "word-39": {"action": "deliver"}},
-    "name:б нпу г. павлоград": {"aerodrom": {"action": "deliver", "thread_id": 1783}, "word-39": {"action": "deliver"}},
-    "name:п/п 81 обу 9 ак": {"aerodrom": {"action": "deliver", "thread_id": 2239}, "word-39": {"action": "deliver"}},
-    "name:3 мб 160 омбр": {"aerodrom": {"action": "deliver", "thread_id": 2274}, "word-39": {"action": "deliver"}},
-    "name:11 абатр 4 гадн 55 оабр": {"aerodrom": {"action": "deliver", "thread_id": 2296}, "word-39": {"action": "deliver"}},
-    "name:12 абатр 4 гадн 55 оабр": {"aerodrom": {"action": "deliver", "thread_id": 2447}, "word-39": {"action": "deliver"}},
-    "name:оповещения пво всу": {"aerodrom": {"action": "deliver", "thread_id": 3033}, "word-39": {"action": "deliver"}}
+    "name:1 мб 155 омбр": {"aerodrom": {"action": "deliver", "thread_id": 2}, "word-main": {"action": "deliver"}},
+    "name:мпб 32 омбр": {"aerodrom": {"action": "deliver", "thread_id": 4}, "word-main": {"action": "deliver"}},
+    "name:3 об 3 обр осн \"спартан\" нгу": {"aerodrom": {"action": "deliver", "thread_id": 8}, "word-main": {"action": "deliver"}},
+    "name:н/у подразделение всу": {"aerodrom": {"action": "deliver", "thread_id": 10}, "word-main": {"action": "deliver"}},
+    "name:управление 9 ак": {"aerodrom": {"action": "deliver", "thread_id": 12}, "word-main": {"action": "deliver"}},
+    "name:10 абатр 4 гадн 55 оабр": {"aerodrom": {"action": "deliver", "thread_id": 14}, "word-main": {"action": "deliver"}},
+    "name:1 бмп 38 обрмп": {"aerodrom": {"action": "deliver", "thread_id": 18}, "word-main": {"action": "deliver"}},
+    "name:2 пдб 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 20}, "word-main": {"action": "deliver"}},
+    "name:2 еб 152 оебр": {"aerodrom": {"action": "deliver", "thread_id": 22}, "word-main": {"action": "deliver"}},
+    "name:503 обмп 38 обрмп": {"aerodrom": {"action": "deliver", "thread_id": 24}, "word-main": {"action": "deliver"}},
+    "name:управление 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 28}, "word-main": {"action": "deliver"}},
+    "name:1 аэмб 68 оаэмбр": {"aerodrom": {"action": "deliver", "thread_id": 30}, "word-main": {"action": "deliver"}},
+    "name:3 мб 155 омбр": {"aerodrom": {"action": "deliver", "thread_id": 447}, "word-main": {"action": "deliver"}},
+    "name:4 пдб 25 овдбр": {"aerodrom": {"action": "deliver", "thread_id": 482}, "word-main": {"action": "deliver"}},
+    "name:59 ошбр сбпс": {"aerodrom": {"action": "deliver", "thread_id": 670}, "word-main": {"action": "deliver"}},
+    "name:2 мб 1 отмбр": {"aerodrom": {"action": "deliver", "thread_id": 1281}, "word-main": {"action": "deliver"}},
+    "name:2 мб 32 омбр": {"aerodrom": {"action": "deliver", "thread_id": 1688}, "word-main": {"action": "deliver"}},
+    "name:б нпу г. павлоград": {"aerodrom": {"action": "deliver", "thread_id": 1783}, "word-main": {"action": "deliver"}},
+    "name:п/п 81 обу 9 ак": {"aerodrom": {"action": "deliver", "thread_id": 2239}, "word-main": {"action": "deliver"}},
+    "name:3 мб 160 омбр": {"aerodrom": {"action": "deliver", "thread_id": 2274}, "word-main": {"action": "deliver"}},
+    "name:11 абатр 4 гадн 55 оабр": {"aerodrom": {"action": "deliver", "thread_id": 2296}, "word-main": {"action": "deliver"}},
+    "name:12 абатр 4 гадн 55 оабр": {"aerodrom": {"action": "deliver", "thread_id": 2447}, "word-main": {"action": "deliver"}},
+    "name:оповещения пво всу": {"aerodrom": {"action": "deliver", "thread_id": 3033}, "word-main": {"action": "deliver"}}
   },
   "unknown": {
     "aerodrom": {"action": "skip"},
     "shabashka": {"action": "review"},
-    "word-39": {"action": "skip"}
+    "word-main": {"action": "skip"}
   }
 }

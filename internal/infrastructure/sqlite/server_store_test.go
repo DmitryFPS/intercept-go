@@ -157,6 +157,66 @@ func TestServerStorePreservesOrderInsideTopicWithoutBlockingOtherTopics(t *testi
 	}
 }
 
+func TestServerStoreMaintenanceKeepsPendingAndRecentData(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Текстиль", SenderBotID: 12,
+		SenderBotUsername: "textile_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}
+	if err := store.SaveClient(ctx, client); err != nil {
+		t.Fatal(err)
+	}
+	rules := serverTestRules()
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	accept := func(id string) {
+		event := serverTestEvent()
+		event.ID = id
+		event.Source.UUID = "source-" + id
+		event.ContentDigest = "digest-" + id
+		plan, _ := rules.Resolve(event)
+		if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+			t.Fatalf("принять %s: accepted=%v err=%v", id, accepted, acceptErr)
+		}
+	}
+	accept("old-done")
+	accept("old-pending")
+	accept("recent-done")
+	for _, destinationID := range []string{"a", "w"} {
+		if err := store.MarkDelivered(ctx, "old-done", destinationID, now.Add(-40*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.MarkDelivered(ctx, "recent-done", destinationID, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldStamp := now.Add(-40 * 24 * time.Hour).Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, "UPDATE received_events SET received_at=? WHERE event_id IN ('old-done','old-pending')", oldStamp); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.PurgeOld(ctx, now.Add(-30*24*time.Hour), now.Add(-90*24*time.Hour), 100, 1000)
+	if err != nil || result.Events != 1 {
+		t.Fatalf("обслуживание: %+v err=%v", result, err)
+	}
+	stats, err := store.Stats(ctx)
+	if err != nil || stats.Events != 2 || stats.Pending != 2 || stats.Delivered != 2 {
+		t.Fatalf("неверные остатки сервера: %+v err=%v", stats, err)
+	}
+}
+
 func serverTestEvent() domain.Event {
 	now := time.Now().UTC()
 	return domain.Event{

@@ -23,6 +23,11 @@ import (
 	"intercept/internal/infrastructure/telegram"
 )
 
+const (
+	maintenanceInterval = 6 * time.Hour
+	terminalRetention   = 30 * 24 * time.Hour
+)
+
 // ClientStatus содержит только безопасные для экрана и диагностики данные.
 type ClientStatus struct {
 	State            string              `json:"state"`
@@ -227,10 +232,34 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 	})
 
 	go client.ackLoop(ctx, service, queue)
+	go client.clientMaintenanceLoop(ctx, queue)
 	ticker := time.NewTicker(time.Duration(cfg.Polling.EAVCSeconds) * time.Second)
 	defer ticker.Stop()
 	for {
 		client.collectAndDispatch(ctx, service, queue)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (client *Client) clientMaintenanceLoop(ctx context.Context, queue *stateDB.ClientQueue) {
+	ticker := time.NewTicker(maintenanceInterval)
+	defer ticker.Stop()
+	for {
+		removed, err := queue.PurgeTerminal(ctx, time.Now().UTC().Add(-terminalRetention))
+		if err != nil && ctx.Err() == nil {
+			client.Logger.Warn("не удалось очистить завершённые события", "error", err)
+		} else if removed > 0 {
+			if err := queue.Compact(ctx); err != nil && ctx.Err() == nil {
+				client.Logger.Warn("не удалось уплотнить базу клиента", "error", err)
+			} else {
+				client.Logger.Info("очищены завершённые события", "count", removed)
+			}
+			client.refreshStats(ctx, queue)
+		}
 		select {
 		case <-ctx.Done():
 			return

@@ -121,6 +121,76 @@ type ServerStats struct {
 	Rejected  int `json:"rejected"`
 }
 
+// MaintenanceResult описывает только удалённые технические записи.
+type MaintenanceResult struct {
+	Events   int
+	Rejected int
+	Rules    int
+}
+
+// PurgeOld удаляет завершённые задания и старый карантин. Незавершённые
+// доставки, действующие точки, настройки и активная версия маршрутов остаются.
+func (store *ServerStore) PurgeOld(
+	ctx context.Context, terminalBefore, rejectedBefore time.Time, keepRuleVersions, keepRejected int,
+) (MaintenanceResult, error) {
+	if keepRuleVersions < 1 || keepRejected < 1 {
+		return MaintenanceResult{}, errors.New("лимиты обслуживания должны быть положительными")
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MaintenanceResult{}, fmt.Errorf("начать обслуживание сервера: %w", err)
+	}
+	defer tx.Rollback()
+	var result MaintenanceResult
+	events, err := tx.ExecContext(ctx, `
+		DELETE FROM received_events
+		WHERE received_at < ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM delivery_jobs
+			WHERE delivery_jobs.event_id=received_events.event_id
+			  AND delivery_jobs.state='pending'
+		  )`, terminalBefore.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return MaintenanceResult{}, fmt.Errorf("очистить завершённые доставки: %w", err)
+	}
+	if count, countErr := events.RowsAffected(); countErr == nil {
+		result.Events = int(count)
+	}
+	rejected, err := tx.ExecContext(ctx, `
+		DELETE FROM rejected_packets
+		WHERE received_at < ?
+		   OR id NOT IN (SELECT id FROM rejected_packets ORDER BY id DESC LIMIT ?)`,
+		rejectedBefore.UTC().Format(time.RFC3339Nano), keepRejected)
+	if err != nil {
+		return MaintenanceResult{}, fmt.Errorf("очистить старый карантин: %w", err)
+	}
+	if count, countErr := rejected.RowsAffected(); countErr == nil {
+		result.Rejected = int(count)
+	}
+	rules, err := tx.ExecContext(ctx, `
+		DELETE FROM route_versions
+		WHERE active=0
+		  AND version NOT IN (
+			SELECT version FROM route_versions WHERE active=0
+			ORDER BY version DESC LIMIT ?
+		  )`, keepRuleVersions)
+	if err != nil {
+		return MaintenanceResult{}, fmt.Errorf("ограничить историю маршрутов: %w", err)
+	}
+	if count, countErr := rules.RowsAffected(); countErr == nil {
+		result.Rules = int(count)
+	}
+	if err := tx.Commit(); err != nil {
+		return MaintenanceResult{}, fmt.Errorf("завершить обслуживание сервера: %w", err)
+	}
+	return result, nil
+}
+
+// Compact возвращает SQLite свободные страницы и ограничивает WAL-файл.
+func (store *ServerStore) Compact(ctx context.Context) error {
+	return compact(ctx, store.db)
+}
+
 // RuleVersion содержит журнал публикаций без копирования всей матрицы в интерфейс.
 type RuleVersion struct {
 	Version   int64     `json:"version"`

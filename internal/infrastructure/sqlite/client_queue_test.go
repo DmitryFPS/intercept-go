@@ -160,3 +160,45 @@ func TestClientQueueAllowsContentToReturnToEarlierValueInNewSourceVersion(t *tes
 		t.Fatalf("возврат к прежнему тексту потерян: %+v, %v", stats, err)
 	}
 }
+
+func TestClientQueuePurgesOnlyOldTerminalEvents(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeEvent := func(id string) domain.Event {
+		return domain.Event{
+			ID: id, ClientID: "client", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+			Source:   domain.SourceRecord{UUID: "source-" + id},
+			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+			Content: id, ContentDigest: "digest-" + id,
+		}
+	}
+	for _, id := range []string{"old", "recent", "pending"} {
+		if err := queue.Enqueue(ctx, makeEvent(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := queue.MarkAcknowledged(ctx, "old", now.Add(-40*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkAcknowledged(ctx, "recent", now); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := queue.PurgeTerminal(ctx, now.Add(-30*24*time.Hour))
+	if err != nil || removed != 1 {
+		t.Fatalf("очистка: removed=%d err=%v", removed, err)
+	}
+	stats, err := queue.Stats(ctx)
+	if err != nil || stats.Acknowledged != 1 || stats.Pending != 1 {
+		t.Fatalf("неверные остатки очереди: %+v err=%v", stats, err)
+	}
+}

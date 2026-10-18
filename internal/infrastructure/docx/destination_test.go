@@ -91,14 +91,14 @@ func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 		t.Fatalf("deliver: %v", err)
 	}
 	files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
-	if len(files) != 1 || !strings.Contains(filepath.Base(files[0]), "(отложенный режим) - 39.docx") {
+	if len(files) != 1 || !strings.Contains(filepath.Base(files[0]), "(отложенный режим) - 313.docx") {
 		t.Fatalf("неожиданное имя документа: %#v", files)
 	}
 	xml := documentXML(t, files[0])
 	for _, expected := range []string{
 		"ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ",
 		"2 об 3 обр ОсН НГ (отложенный режим)",
-		" - 39", "18.10.2026г.", "Марс", "783693", "03:51", "/1/ На приём.",
+		" - 313", "18.10.2026г.", "Марс", "783693", "03:51", "/1/ На приём.",
 	} {
 		if !strings.Contains(xml, expected) {
 			t.Fatalf("в документе нет %q", expected)
@@ -106,7 +106,7 @@ func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 	}
 	wantRuns := []string{
 		"ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ",
-		"Радиосеть ", "2 об 3 обр ОсН НГ (отложенный режим)", " - 39",
+		"Радиосеть ", "2 об 3 обр ОсН НГ (отложенный режим)", " - 313",
 		"159.5750 МГц (гр. ID 3 AES-256)", "18.10.2026г.",
 		"1.«", "Марс", "» (id: 783693) – военнослужащий 2 об 3 обр ОсН НГ (отложенный режим), мужской голос, украинская речь;",
 		"03:51", "/1/ На приём.",
@@ -135,6 +135,11 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
 		t.Fatal(err)
 	}
+	before, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
+	if len(before) != 2 {
+		t.Fatalf("до правки ожидалось два документа: %#v", before)
+	}
+	firstName := filepath.Base(before[0])
 	event.Content = "10.00\n-Первый исправлен"
 	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
 		t.Fatal(err)
@@ -142,6 +147,9 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
 	if len(files) != 1 {
 		t.Fatalf("удалённый блок должен убрать свой документ: %#v", files)
+	}
+	if filepath.Base(files[0]) != firstName {
+		t.Fatalf("правка создала новый номер вместо перезаписи: до=%q после=%q", firstName, filepath.Base(files[0]))
 	}
 	if xml := documentXML(t, files[0]); !strings.Contains(xml, editedMark) || !strings.Contains(xml, "Первый исправлен") {
 		t.Fatal("изменённый документ не перезаписан с пометкой")

@@ -121,6 +121,29 @@ type ClientStats struct {
 	Expired      int `json:"expired"`
 }
 
+// PurgeTerminal удаляет только давно завершённые события. Активная очередь,
+// ожидающая отправки или подтверждения, этим обслуживанием не затрагивается.
+func (queue *ClientQueue) PurgeTerminal(ctx context.Context, before time.Time) (int, error) {
+	result, err := queue.db.ExecContext(ctx, `
+		DELETE FROM client_events
+		WHERE (state='acknowledged' AND acknowledged_at IS NOT NULL AND acknowledged_at < ?)
+		   OR (state='expired' AND expired_at IS NOT NULL AND expired_at < ?)`,
+		before.UTC().Format(time.RFC3339Nano), before.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("очистить завершённые события клиента: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("определить число очищенных событий клиента: %w", err)
+	}
+	return int(count), nil
+}
+
+// Compact возвращает SQLite свободные страницы и ограничивает WAL-файл.
+func (queue *ClientQueue) Compact(ctx context.Context) error {
+	return compact(ctx, queue.db)
+}
+
 func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
 	if err := Migrate(ctx, db, []string{clientMigration, clientExpiryMigration, clientSourceVersionMigration}); err != nil {
 		return nil, err

@@ -23,7 +23,12 @@ type Destination struct {
 	StatePath string
 
 	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	locks map[string]*itemLockEntry
+}
+
+type itemLockEntry struct {
+	mutex sync.Mutex
+	refs  int
 }
 
 type destinationState struct {
@@ -31,8 +36,9 @@ type destinationState struct {
 }
 
 type destinationItem struct {
-	ThreadID int64                       `json:"thread_id"`
-	Blocks   map[string]destinationBlock `json:"blocks"`
+	ThreadID  int64                       `json:"thread_id"`
+	Blocks    map[string]destinationBlock `json:"blocks"`
+	UpdatedAt time.Time                   `json:"updated_at"`
 }
 
 type destinationBlock struct {
@@ -49,9 +55,8 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	if itemKey == "" {
 		itemKey = fmt.Sprintf("id:%d", event.Source.ID)
 	}
-	itemLock := destination.itemLock(itemKey)
-	itemLock.Lock()
-	defer itemLock.Unlock()
+	unlockItem := destination.lockItem(itemKey)
+	defer unlockItem()
 	item, err := destination.loadItem(itemKey)
 	if err != nil {
 		return err
@@ -111,16 +116,28 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	return destination.saveItem(itemKey, item, false)
 }
 
-func (destination *Destination) itemLock(key string) *sync.Mutex {
+func (destination *Destination) lockItem(key string) func() {
 	destination.mu.Lock()
-	defer destination.mu.Unlock()
 	if destination.locks == nil {
-		destination.locks = make(map[string]*sync.Mutex)
+		destination.locks = make(map[string]*itemLockEntry)
 	}
-	if destination.locks[key] == nil {
-		destination.locks[key] = &sync.Mutex{}
+	entry := destination.locks[key]
+	if entry == nil {
+		entry = &itemLockEntry{}
+		destination.locks[key] = entry
 	}
-	return destination.locks[key]
+	entry.refs++
+	destination.mu.Unlock()
+	entry.mutex.Lock()
+	return func() {
+		entry.mutex.Unlock()
+		destination.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(destination.locks, key)
+		}
+		destination.mu.Unlock()
+	}
 }
 
 func (destination *Destination) loadItem(key string) (destinationItem, error) {
@@ -143,6 +160,7 @@ func (destination *Destination) saveItem(key string, item destinationItem, remov
 	if remove {
 		delete(current.Items, key)
 	} else {
+		item.UpdatedAt = time.Now().UTC()
 		current.Items[key] = item
 	}
 	return saveDestinationState(destination.StatePath, current)
@@ -336,6 +354,20 @@ func loadDestinationState(path string) (destinationState, error) {
 	}
 	if current.Items == nil {
 		current.Items = make(map[string]destinationItem)
+	}
+	legacyTime := time.Now().UTC()
+	if info, statErr := os.Stat(path); statErr == nil {
+		legacyTime = info.ModTime().UTC()
+	}
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	for key, item := range current.Items {
+		if item.UpdatedAt.IsZero() {
+			item.UpdatedAt = legacyTime
+			current.Items[key] = item
+		}
+		if item.UpdatedAt.Before(cutoff) {
+			delete(current.Items, key)
+		}
 	}
 	return current, nil
 }

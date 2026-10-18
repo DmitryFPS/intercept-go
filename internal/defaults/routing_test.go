@@ -21,7 +21,7 @@ func TestInitialRulesMatchApprovedExceptions(t *testing.T) {
 		{`2 об 3 обр ОсН "Спартан" НГУ`, "shabashka", 592},
 		{"1 мб 155 омбр", "aerodrom", 2},
 		{"503 обмп 38 обрмп (отложенный режим)", "aerodrom", 24},
-		{"503 обмп 38 обрмп (отложенный режим)", "word-39", 0},
+		{"503 обмп 38 обрмп (отложенный режим)", "word-main", 0},
 		{`2об3 обр ОсН "Спартан" НГУ`, "shabashka", 0},
 	}
 	for _, test := range tests {

@@ -33,7 +33,7 @@ var (
 
 const (
 	directionTitle    = "ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ"
-	defaultNetwork    = "39"
+	defaultNetwork    = "313"
 	defaultOperator   = "Позывной"
 	defaultShiftGroup = "1"
 	defaultShiftChief = "Позывной"
@@ -59,11 +59,12 @@ type state struct {
 }
 
 type blockRecord struct {
-	Number   int    `json:"number"`
-	Hash     string `json:"hash"`
-	Render   string `json:"render,omitempty"`
-	Filename string `json:"filename"`
-	Edited   bool   `json:"edited,omitempty"`
+	Number    int       `json:"number"`
+	Hash      string    `json:"hash"`
+	Render    string    `json:"render,omitempty"`
+	Filename  string    `json:"filename"`
+	Edited    bool      `json:"edited,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, _ domain.PlannedDelivery) error {
@@ -141,6 +142,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		record.Render = render
 		record.Filename = filename
 		record.Edited = document.Edited
+		record.UpdatedAt = time.Now().UTC()
 		current.Blocks[key] = record
 		if err := saveState(destination.StatePath, current); err != nil {
 			return err
@@ -404,6 +406,20 @@ func loadState(path string) (state, error) {
 	}
 	if current.Blocks == nil {
 		current.Blocks = make(map[string]blockRecord)
+	}
+	legacyTime := time.Now().UTC()
+	if info, statErr := os.Stat(path); statErr == nil {
+		legacyTime = info.ModTime().UTC()
+	}
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	for key, record := range current.Blocks {
+		if record.UpdatedAt.IsZero() {
+			record.UpdatedAt = legacyTime
+			current.Blocks[key] = record
+		}
+		if record.UpdatedAt.Before(cutoff) {
+			delete(current.Blocks, key)
+		}
 	}
 	return current, nil
 }
