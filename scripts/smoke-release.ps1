@@ -12,9 +12,15 @@ $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("InterceptSmoke-" + [g
 $processes = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
 
 function Wait-LocalApi {
-    param([string]$Uri)
+    param(
+        [string]$Uri,
+        [System.Diagnostics.Process]$Process
+    )
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
+        if ($Process.HasExited) {
+            throw "Приложение завершилось до запуска локального интерфейса: $($Process.StartInfo.FileName)"
+        }
         try {
             return Invoke-RestMethod -Uri $Uri -TimeoutSec 2
         }
@@ -32,6 +38,15 @@ try {
         @{ Archive = 'InterceptServer-portable.zip'; Folder = 'Сервер Тест'; Exe = 'InterceptServer.exe'; Uri = 'http://127.0.0.1:17632/api/status' }
     )
     foreach ($case in $cases) {
+        try {
+            Invoke-RestMethod -Uri $case.Uri -TimeoutSec 1 | Out-Null
+            throw "Порт локального интерфейса уже занят: $($case.Uri). Закройте ранее запущенную программу."
+        }
+        catch {
+            if ($_.Exception.Message -like 'Порт локального интерфейса уже занят:*') {
+                throw
+            }
+        }
         $archive = Join-Path $resolvedDist $case.Archive
         $target = Join-Path $smokeRoot $case.Folder
         Expand-Archive -LiteralPath $archive -DestinationPath $target
@@ -41,7 +56,10 @@ try {
         }
         $process = Start-Process -FilePath $executable.FullName -ArgumentList '--no-browser' -WorkingDirectory $executable.DirectoryName -WindowStyle Hidden -PassThru
         $processes.Add($process)
-        $status = Wait-LocalApi -Uri $case.Uri
+        $status = Wait-LocalApi -Uri $case.Uri -Process $process
+        if ($process.HasExited) {
+            throw "Приложение $($case.Exe) завершилось во время smoke-теста"
+        }
         if ([string]::IsNullOrWhiteSpace([string]$status.version)) {
             throw "Приложение $($case.Exe) вернуло статус без версии"
         }
@@ -50,8 +68,10 @@ try {
 		if ($diagnostics.Headers['Content-Type'] -notlike 'application/zip*' -or $diagnostics.RawContentLength -lt 100) {
 			throw "Приложение $($case.Exe) не сформировало диагностический ZIP"
 		}
-        Stop-Process -Id $process.Id -Force
-        $process.WaitForExit()
+        if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force
+            $process.WaitForExit()
+        }
         $processes.Remove($process) | Out-Null
     }
     Write-Host 'Smoke-тест переносимых архивов пройден.' -ForegroundColor Green
