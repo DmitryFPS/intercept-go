@@ -153,6 +153,22 @@ func (client *Client) SendText(ctx context.Context, chatID, threadID int64, text
 	return message, err
 }
 
+func (client *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
+	return client.callJSON(ctx, "deleteMessage", map[string]any{
+		"chat_id": chatID, "message_id": messageID,
+	}, nil)
+}
+
+// TestTopic проверяет право записи и по возможности удаляет тестовое сообщение.
+func (client *Client) TestTopic(ctx context.Context, chatID, threadID int64) error {
+	message, err := client.SendText(ctx, chatID, threadID, "Проверка подключения Intercept. Сообщение будет удалено автоматически.")
+	if err != nil {
+		return err
+	}
+	_ = client.DeleteMessage(ctx, chatID, message.MessageID)
+	return nil
+}
+
 func (client *Client) GetUpdates(ctx context.Context, offset int64, timeoutSeconds int) ([]Update, error) {
 	var updates []Update
 	err := client.callJSON(ctx, "getUpdates", map[string]any{

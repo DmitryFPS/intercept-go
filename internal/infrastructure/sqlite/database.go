@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -15,6 +16,9 @@ func OpenState(path string) (*sql.DB, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("получить полный путь базы: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+		return nil, fmt.Errorf("создать папку базы: %w", err)
 	}
 	dsn := "file:" + filepath.ToSlash(abs) +
 		"?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)"

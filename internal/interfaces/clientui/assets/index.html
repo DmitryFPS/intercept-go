@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>InterceptClient</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header><div><span class="eyebrow">ПЕРЕДАЧА ДАННЫХ EAVC</span><h1>InterceptClient</h1></div><span id="version" class="version"></span></header>
+    <section id="hero" class="hero setup">
+      <div class="signal"><span></span></div>
+      <div><p id="stateLabel" class="state-label">Проверяем состояние…</p><h2 id="title">Запуск</h2><p id="detail">Подождите несколько секунд.</p></div>
+    </section>
+    <section id="identity" class="identity hidden"><div><small>ТОЧКА</small><strong id="clientName">—</strong></div><div><small>НОМЕР</small><strong id="clientNumber">—</strong></div></section>
+    <section class="checks">
+      <article><span id="dbDot" class="dot"></span><div><strong>База EAVC</strong><small id="dbText">Не проверена</small></div></article>
+      <article><span id="tgDot" class="dot"></span><div><strong>Передача через Telegram</strong><small id="tgText">Не проверена</small></div></article>
+      <article><span id="ackDot" class="dot"></span><div><strong>Подтверждение сервера</strong><small id="ackText">Ещё не получено</small></div></article>
+    </section>
+    <section class="queue"><div><small>ОЖИДАЮТ ОТПРАВКИ</small><strong id="pending">0</strong></div><div><small>ЗАГРУЖЕНЫ, ЖДУТ СЕРВЕР</small><strong id="uploaded">0</strong></div><div><small>ПОДТВЕРЖДЕНЫ</small><strong id="acknowledged">0</strong></div></section>
+    <section class="actions">
+      <label class="primary">Загрузить настройки<input id="configFile" type="file" accept="application/json,.json"></label>
+      <a class="secondary" href="/api/diagnostics">Скачать диагностику</a>
+    </section>
+    <p id="message" class="message"></p>
+    <footer>Оставьте программу открытой. При пропадании интернета данные сохранятся и уйдут автоматически.</footer>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

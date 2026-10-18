@@ -1,9 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"runtime/debug"
+	"syscall"
+
+	"intercept/internal/interfaces/clientui"
+	"intercept/internal/interfaces/localui"
+	"intercept/internal/observability"
+	"intercept/internal/runner"
 )
 
 var version = "dev"
@@ -13,7 +23,34 @@ func main() {
 		fmt.Printf("InterceptClient %s\n", buildVersion())
 		return
 	}
-	fmt.Println("InterceptClient: каркас приложения готов; запуск интерфейса будет добавлен следующим этапом")
+	baseDir, err := executableDir()
+	if err != nil {
+		panic(err)
+	}
+	logger, closer, err := observability.NewLogger(filepath.Join(baseDir, "logs", "client.log"), "client")
+	if err != nil {
+		logger = slog.Default()
+	} else {
+		defer closer.Close()
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	application := runner.NewClient(baseDir, buildVersion(), logger)
+	application.Start(ctx)
+	handler := clientui.Handler{Client: application, Context: ctx}.Routes()
+	openBrowser := len(os.Args) < 2 || os.Args[1] != "--no-browser"
+	if err := localui.ListenAndServe(ctx, "127.0.0.1:17631", handler, openBrowser); err != nil {
+		logger.Error("локальный интерфейс завершён", "error", err)
+		_ = localui.OpenBrowser("http://127.0.0.1:17631")
+	}
+}
+
+func executableDir() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(executable), nil
 }
 
 func buildVersion() string {

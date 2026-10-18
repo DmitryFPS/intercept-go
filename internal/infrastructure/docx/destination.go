@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"intercept/internal/domain"
+	"intercept/internal/infrastructure/share"
 )
 
 var (
@@ -34,6 +35,8 @@ type Destination struct {
 	StatePath    string
 	Network      string
 	Prefix       string
+	Username     string
+	Password     string
 
 	mu sync.Mutex
 }
@@ -54,7 +57,7 @@ type contentBlock struct {
 	Text string
 }
 
-func (destination *Destination) Deliver(_ context.Context, event domain.Event, _ domain.PlannedDelivery) error {
+func (destination *Destination) Deliver(ctx context.Context, event domain.Event, _ domain.PlannedDelivery) error {
 	destination.mu.Lock()
 	defer destination.mu.Unlock()
 
@@ -66,6 +69,11 @@ func (destination *Destination) Deliver(_ context.Context, event domain.Event, _
 	}
 	if destination.TemplatePath == "" || destination.Folder == "" || destination.StatePath == "" {
 		return errors.New("Word-направление настроено не полностью")
+	}
+	if _, err := os.Stat(destination.Folder); err != nil {
+		if err := share.Connect(ctx, destination.Folder, destination.Username, destination.Password); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(destination.Folder, 0o755); err != nil {
 		return fmt.Errorf("создать папку Word: %w", err)

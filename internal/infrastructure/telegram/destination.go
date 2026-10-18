@@ -16,7 +16,7 @@ type Destination struct {
 }
 
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
-	text := FormatEvent(event, delivery.Decision.Action == domain.RouteReview)
+	text := FormatEvent(event, delivery.Decision.Action == domain.RouteReview, delivery.Decision.Note)
 	if utf8.RuneCountInString(text) <= 4000 {
 		_, err := destination.API.SendText(ctx, destination.ChatID, delivery.Decision.ThreadID, text)
 		return err
@@ -30,7 +30,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 }
 
 // FormatEvent формирует понятное человеку сообщение без технических ключей.
-func FormatEvent(event domain.Event, review bool) string {
+func FormatEvent(event domain.Event, review bool, notes ...string) string {
 	var builder strings.Builder
 	if review {
 		builder.WriteString("🔴 НОВОЕ ИЛИ ОШИБОЧНОЕ ПОДРАЗДЕЛЕНИЕ\n\n")
@@ -50,6 +50,11 @@ func FormatEvent(event domain.Event, review bool) string {
 	}
 	if event.Mode == domain.SourceModeDeferred {
 		builder.WriteString("Режим: отложенный\n")
+	}
+	if len(notes) > 0 && strings.TrimSpace(notes[0]) != "" {
+		builder.WriteString("Проверка: ")
+		builder.WriteString(strings.TrimSpace(notes[0]))
+		builder.WriteString("\n")
 	}
 	builder.WriteString("\n")
 	builder.WriteString(event.Content)

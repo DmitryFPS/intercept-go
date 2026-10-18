@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"intercept/internal/application"
@@ -44,6 +46,12 @@ type ClientQueue struct {
 	db *sql.DB
 }
 
+type ClientStats struct {
+	Pending      int `json:"pending"`
+	Uploaded     int `json:"uploaded"`
+	Acknowledged int `json:"acknowledged"`
+}
+
 func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
 	if err := Migrate(ctx, db, []string{clientMigration}); err != nil {
 		return nil, err
@@ -59,13 +67,17 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 	if err != nil {
 		return fmt.Errorf("кодировать событие: %w", err)
 	}
+	sourceKey := strings.TrimSpace(event.Source.UUID)
+	if sourceKey == "" {
+		sourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
+	}
 	_, err = queue.db.ExecContext(ctx, `
 		INSERT INTO client_events(
 			event_id, source_uuid, content_digest, payload_json, state,
 			next_attempt_at, created_at
 		) VALUES(?, ?, ?, ?, 'pending', ?, ?)
 		ON CONFLICT(source_uuid, content_digest) DO NOTHING`,
-		event.ID, event.Source.UUID, event.ContentDigest, payload,
+		event.ID, sourceKey, event.ContentDigest, payload,
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
 	)
@@ -193,6 +205,31 @@ func (queue *ClientQueue) SaveValue(ctx context.Context, name, value string) err
 		return fmt.Errorf("сохранить параметр состояния: %w", err)
 	}
 	return nil
+}
+
+func (queue *ClientQueue) Stats(ctx context.Context) (ClientStats, error) {
+	rows, err := queue.db.QueryContext(ctx, "SELECT state, COUNT(*) FROM client_events GROUP BY state")
+	if err != nil {
+		return ClientStats{}, fmt.Errorf("прочитать статистику очереди: %w", err)
+	}
+	defer rows.Close()
+	var stats ClientStats
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			return ClientStats{}, err
+		}
+		switch state {
+		case "pending":
+			stats.Pending = count
+		case "uploaded":
+			stats.Uploaded = count
+		case "acknowledged":
+			stats.Acknowledged = count
+		}
+	}
+	return stats, rows.Err()
 }
 
 func changedExactlyOnce(result sql.Result, err error, operation string) error {

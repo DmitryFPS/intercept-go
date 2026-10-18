@@ -36,6 +36,9 @@ func TestRuleSetRoutesUnknownOnlyByUnknownRow(t *testing.T) {
 	if plan.Deliveries[0].Decision.ThreadID != 0 {
 		t.Fatal("неопознанное событие должно идти в General")
 	}
+	if plan.Deliveries[0].Decision.Note == "" {
+		t.Fatal("для близкой опечатки должна быть подсказка, но не автоматическая маршрутизация")
+	}
 }
 
 func TestRuleSetDoesNotCreateWordForShabashkaPosition(t *testing.T) {

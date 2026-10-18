@@ -143,6 +143,9 @@ func (rules RuleSet) Resolve(event Event) (DeliveryPlan, error) {
 	if !recognized {
 		decisions = rules.Unknown
 		level = "unknown"
+		if suggestion := rules.closestPosition(event.Position.UnitName); suggestion != "" {
+			decisions = withReviewNote(decisions, "Возможно, имелось в виду: "+suggestion)
+		}
 	} else if modeDecisions, exists := rules.Modes[event.Mode]; exists {
 		decisions = overlayDecisions(decisions, modeDecisions)
 		level = "position+mode"
@@ -171,6 +174,71 @@ func (rules RuleSet) Resolve(event Event) (DeliveryPlan, error) {
 		})
 	}
 	return plan, nil
+}
+
+func (rules RuleSet) closestPosition(unitName string) string {
+	needle := []rune(NormalizeUnitName(unitName))
+	if len(needle) == 0 {
+		return ""
+	}
+	bestName := ""
+	bestDistance := len(needle) + 1
+	for key := range rules.Positions {
+		if !strings.HasPrefix(key, "name:") {
+			continue
+		}
+		name := strings.TrimPrefix(key, "name:")
+		distance := levenshtein(needle, []rune(name))
+		if distance < bestDistance {
+			bestDistance = distance
+			bestName = name
+		}
+	}
+	threshold := len(needle) / 6
+	if threshold < 3 {
+		threshold = 3
+	}
+	if bestDistance > threshold {
+		return ""
+	}
+	return bestName
+}
+
+func withReviewNote(decisions map[string]RouteDecision, note string) map[string]RouteDecision {
+	result := make(map[string]RouteDecision, len(decisions))
+	for id, decision := range decisions {
+		if decision.Action == RouteReview {
+			if decision.Note != "" {
+				decision.Note += ". "
+			}
+			decision.Note += note
+		}
+		result[id] = decision
+	}
+	return result
+}
+
+func levenshtein(left, right []rune) int {
+	previous := make([]int, len(right)+1)
+	for index := range previous {
+		previous[index] = index
+	}
+	for leftIndex, leftRune := range left {
+		current := make([]int, len(right)+1)
+		current[0] = leftIndex + 1
+		for rightIndex, rightRune := range right {
+			cost := 0
+			if leftRune != rightRune {
+				cost = 1
+			}
+			deletion := previous[rightIndex+1] + 1
+			insertion := current[rightIndex] + 1
+			replacement := previous[rightIndex] + cost
+			current[rightIndex+1] = min(deletion, insertion, replacement)
+		}
+		previous = current
+	}
+	return previous[len(right)]
 }
 
 func overlayDecisions(base, override map[string]RouteDecision) map[string]RouteDecision {
