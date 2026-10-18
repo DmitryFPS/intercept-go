@@ -74,6 +74,40 @@ DROP TABLE client_events_v1;
 CREATE INDEX client_events_pending_idx ON client_events(state, next_attempt_at, created_at);
 `
 
+const clientSourceVersionMigration = `
+ALTER TABLE client_events RENAME TO client_events_v2;
+DROP INDEX client_events_pending_idx;
+CREATE TABLE client_events (
+	event_id TEXT PRIMARY KEY,
+	source_uuid TEXT NOT NULL,
+	source_version TEXT NOT NULL,
+	content_digest TEXT NOT NULL,
+	payload_json BLOB NOT NULL,
+	state TEXT NOT NULL CHECK(state IN ('pending', 'uploaded', 'acknowledged', 'expired')),
+	attempts INTEGER NOT NULL DEFAULT 0,
+	next_attempt_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	telegram_message_id INTEGER,
+	last_error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	uploaded_at TEXT,
+	acknowledged_at TEXT,
+	expired_at TEXT,
+	UNIQUE(source_uuid, source_version, content_digest)
+);
+INSERT INTO client_events(
+	event_id, source_uuid, source_version, content_digest, payload_json, state,
+	attempts, next_attempt_at, expires_at, telegram_message_id, last_error,
+	created_at, uploaded_at, acknowledged_at, expired_at
+)
+SELECT event_id, source_uuid, created_at, content_digest, payload_json, state,
+	attempts, next_attempt_at, expires_at, telegram_message_id, last_error,
+	created_at, uploaded_at, acknowledged_at, expired_at
+FROM client_events_v2;
+DROP TABLE client_events_v2;
+CREATE INDEX client_events_pending_idx ON client_events(state, next_attempt_at, created_at);
+`
+
 // ClientQueue хранит события независимо от процесса и состояния сети.
 type ClientQueue struct {
 	db *sql.DB
@@ -87,7 +121,7 @@ type ClientStats struct {
 }
 
 func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
-	if err := Migrate(ctx, db, []string{clientMigration, clientExpiryMigration}); err != nil {
+	if err := Migrate(ctx, db, []string{clientMigration, clientExpiryMigration, clientSourceVersionMigration}); err != nil {
 		return nil, err
 	}
 	return &ClientQueue{db: db}, nil
@@ -104,6 +138,13 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 	sourceKey := strings.TrimSpace(event.Source.UUID)
 	if sourceKey == "" {
 		sourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
+	}
+	sourceVersion := strings.TrimSpace(event.Source.UpdatedAt)
+	if sourceVersion == "" && !event.SourceAt.IsZero() {
+		sourceVersion = event.SourceAt.UTC().Format(time.RFC3339Nano)
+	}
+	if sourceVersion == "" {
+		sourceVersion = event.CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	expiresAt := event.ExpiresAt.UTC()
 	if expiresAt.IsZero() {
@@ -122,11 +163,11 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 	}
 	_, err = queue.db.ExecContext(ctx, `
 		INSERT INTO client_events(
-			event_id, source_uuid, content_digest, payload_json, state,
+			event_id, source_uuid, source_version, content_digest, payload_json, state,
 			next_attempt_at, expires_at, created_at, expired_at, last_error
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(source_uuid, content_digest) DO NOTHING`,
-		event.ID, sourceKey, event.ContentDigest, payload, state,
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_uuid, source_version, content_digest) DO NOTHING`,
+		event.ID, sourceKey, sourceVersion, event.ContentDigest, payload, state,
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
 		expiresAt.Format(time.RFC3339Nano),
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),

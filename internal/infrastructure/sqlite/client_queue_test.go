@@ -125,3 +125,38 @@ func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {
 		t.Fatalf("после истечения первого ожидалось второе: %#v, %v", jobs, err)
 	}
 }
+
+func TestClientQueueAllowsContentToReturnToEarlierValueInNewSourceVersion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "event-1", ClientID: "client", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source:   domain.SourceRecord{UUID: "source", UpdatedAt: now.Format(time.RFC3339Nano)},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "значение А", ContentDigest: "digest-a",
+	}
+	if err := queue.Enqueue(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	returned := event
+	returned.ID = "event-2"
+	returned.CreatedAt = now.Add(2 * time.Minute)
+	returned.Source.UpdatedAt = now.Add(2 * time.Minute).Format(time.RFC3339Nano)
+	if err := queue.Enqueue(ctx, returned); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := queue.Stats(ctx)
+	if err != nil || stats.Pending != 2 {
+		t.Fatalf("возврат к прежнему тексту потерян: %+v, %v", stats, err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,7 +78,7 @@ func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 		Gateways: map[string]DeliveryGateway{
 			"ok": memoryGateway{}, "fail": memoryGateway{err: errors.New("нет сети")},
 		},
-		Now: time.Now,
+		Now: time.Now, MaxConcurrent: 1,
 	}
 	count, err := service.RunOnce(context.Background(), 10)
 	if err != nil || count != 1 {
@@ -85,6 +86,38 @@ func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 	}
 	if len(queue.delivered) != 1 || len(queue.retried) != 1 {
 		t.Fatalf("состояния направлений смешались: %#v %#v", queue.delivered, queue.retried)
+	}
+}
+
+func TestDeliveryServiceDoesNotLetSlowStreamBlockAnother(t *testing.T) {
+	t.Parallel()
+	queue := &memoryDeliveryQueue{jobs: []DeliveryJob{
+		{Event: serverServiceEvent(), Delivery: domain.PlannedDelivery{Destination: domain.Destination{ID: "slow"}}},
+		{Event: serverServiceEvent(), Delivery: domain.PlannedDelivery{Destination: domain.Destination{ID: "fast"}}},
+	}}
+	release := make(chan struct{})
+	fastDone := make(chan struct{})
+	service := DeliveryService{
+		Queue: queue, MaxConcurrent: 2, AttemptTimeout: time.Second,
+		Gateways: map[string]DeliveryGateway{
+			"slow": channelGateway{release: release},
+			"fast": channelGateway{done: fastDone},
+		},
+		Now: time.Now,
+	}
+	finished := make(chan error, 1)
+	go func() {
+		_, err := service.RunOnce(context.Background(), 10)
+		finished <- err
+	}()
+	select {
+	case <-fastDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("быстрое направление заблокировано медленным")
+	}
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -121,7 +154,26 @@ func (gateway memoryGateway) Deliver(_ context.Context, _ domain.Event, _ domain
 	return gateway.err
 }
 
+type channelGateway struct {
+	release <-chan struct{}
+	done    chan<- struct{}
+}
+
+func (gateway channelGateway) Deliver(ctx context.Context, _ domain.Event, _ domain.PlannedDelivery) error {
+	if gateway.done != nil {
+		close(gateway.done)
+		return nil
+	}
+	select {
+	case <-gateway.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 type memoryDeliveryQueue struct {
+	mu        sync.Mutex
 	jobs      []DeliveryJob
 	delivered []string
 	retried   []string
@@ -132,16 +184,22 @@ func (queue *memoryDeliveryQueue) PendingDeliveries(_ context.Context, _ int, _ 
 }
 
 func (queue *memoryDeliveryQueue) MarkDelivered(_ context.Context, eventID, destinationID string, _ time.Time) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
 	queue.delivered = append(queue.delivered, eventID+":"+destinationID)
 	return nil
 }
 
 func (queue *memoryDeliveryQueue) MarkDeliveryExpired(_ context.Context, eventID, destinationID string, _ time.Time, _ string) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
 	queue.retried = append(queue.retried, eventID+":"+destinationID+":expired")
 	return nil
 }
 
 func (queue *memoryDeliveryQueue) MarkDeliveryRetry(_ context.Context, eventID, destinationID string, _ time.Time, _ string) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
 	queue.retried = append(queue.retried, eventID+":"+destinationID)
 	return nil
 }

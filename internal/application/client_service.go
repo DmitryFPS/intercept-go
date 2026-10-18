@@ -32,6 +32,7 @@ type ClientService struct {
 	BatchSize       int
 	CatchUpExisting bool
 	MaxEventAge     time.Duration
+	AttemptTimeout  time.Duration
 	Now             func() time.Time
 }
 
@@ -114,7 +115,13 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 		if err != nil {
 			return sent, err
 		}
-		messageID, err := service.Sender.Send(ctx, envelope)
+		attemptTimeout := service.AttemptTimeout
+		if attemptTimeout <= 0 {
+			attemptTimeout = 20 * time.Second
+		}
+		sendContext, cancel := context.WithTimeout(ctx, attemptTimeout)
+		messageID, err := service.Sender.Send(sendContext, envelope)
+		cancel()
 		if err != nil {
 			next := now.Add(retryDelay(queued.Attempts + 1))
 			if markErr := service.Queue.MarkRetry(ctx, event.ID, next, err.Error()); markErr != nil {

@@ -438,6 +438,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	service := &application.ServerService{Clients: server.Store, Rules: server.Store, Store: server.Store}
 	delivery := &application.DeliveryService{
 		Queue: server.Store, Gateways: server.gateways(cfg), Now: time.Now,
+		MaxConcurrent: 4, AttemptTimeout: 20 * time.Second,
 	}
 	server.update(func(status *ServerStatus) {
 		status.State = "running"

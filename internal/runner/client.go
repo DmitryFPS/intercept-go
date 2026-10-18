@@ -212,6 +212,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		KeyID: cfg.Cryptography.KeyID, Key: key, BatchSize: cfg.Polling.BatchSize,
 		CatchUpExisting: cfg.Polling.CatchUpExisting,
 		MaxEventAge:     time.Duration(cfg.Polling.MaxEventAgeMinutes) * time.Minute,
+		AttemptTimeout:  20 * time.Second,
 		Now:             time.Now,
 	}
 	client.update(func(status *ClientStatus) {

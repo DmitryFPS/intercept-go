@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"intercept/internal/domain"
@@ -100,9 +101,11 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 
 // DeliveryService выполняет ожидающие задания и не смешивает их состояния.
 type DeliveryService struct {
-	Queue    DeliveryQueue
-	Gateways map[string]DeliveryGateway
-	Now      func() time.Time
+	Queue          DeliveryQueue
+	Gateways       map[string]DeliveryGateway
+	Now            func() time.Time
+	MaxConcurrent  int
+	AttemptTimeout time.Duration
 }
 
 func (service *DeliveryService) RunOnce(ctx context.Context, limit int) (int, error) {
@@ -113,39 +116,77 @@ func (service *DeliveryService) RunOnce(ctx context.Context, limit int) (int, er
 	if err != nil {
 		return 0, err
 	}
-	delivered := 0
-	for _, job := range jobs {
-		now := service.Now().UTC()
-		if job.Event.Expired(now) {
-			if err := service.Queue.MarkDeliveryExpired(
-				ctx, job.Event.ID, job.Delivery.Destination.ID, now, domain.FreshnessExpired,
-			); err != nil {
-				return delivered, err
-			}
-			continue
-		}
-		gateway, exists := service.Gateways[job.Delivery.Destination.ID]
-		if !exists {
-			reason := "для направления не настроен адаптер доставки"
-			if err := service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
-				service.Now().Add(retryDelay(job.Attempts+1)), reason); err != nil {
-				return delivered, err
-			}
-			continue
-		}
-		if err := gateway.Deliver(ctx, job.Event, job.Delivery); err != nil {
-			if markErr := service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
-				service.Now().Add(retryDelay(job.Attempts+1)), err.Error()); markErr != nil {
-				return delivered, fmt.Errorf("доставка: %v; сохранить повтор: %w", err, markErr)
-			}
-			continue
-		}
-		if err := service.Queue.MarkDelivered(ctx, job.Event.ID, job.Delivery.Destination.ID, service.Now()); err != nil {
-			return delivered, err
-		}
-		delivered++
+	maxConcurrent := service.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 4
 	}
-	return delivered, nil
+	if maxConcurrent > len(jobs) {
+		maxConcurrent = len(jobs)
+	}
+	type jobResult struct {
+		delivered bool
+		err       error
+	}
+	results := make(chan jobResult, len(jobs))
+	semaphore := make(chan struct{}, maxConcurrent)
+	var workers sync.WaitGroup
+	for _, job := range jobs {
+		job := job
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+			delivered, err := service.deliverOne(ctx, job)
+			results <- jobResult{delivered: delivered, err: err}
+		}()
+	}
+	workers.Wait()
+	close(results)
+	delivered := 0
+	var firstError error
+	for result := range results {
+		if result.delivered {
+			delivered++
+		}
+		if result.err != nil && firstError == nil {
+			firstError = result.err
+		}
+	}
+	return delivered, firstError
+}
+
+func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob) (bool, error) {
+	now := service.Now().UTC()
+	if job.Event.Expired(now) {
+		return false, service.Queue.MarkDeliveryExpired(
+			ctx, job.Event.ID, job.Delivery.Destination.ID, now, domain.FreshnessExpired,
+		)
+	}
+	gateway, exists := service.Gateways[job.Delivery.Destination.ID]
+	if !exists {
+		reason := "для направления не настроен адаптер доставки"
+		return false, service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
+			now.Add(retryDelay(job.Attempts+1)), reason)
+	}
+	timeout := service.AttemptTimeout
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	attemptContext, cancel := context.WithTimeout(ctx, timeout)
+	err := gateway.Deliver(attemptContext, job.Event, job.Delivery)
+	cancel()
+	if err != nil {
+		if markErr := service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
+			now.Add(retryDelay(job.Attempts+1)), err.Error()); markErr != nil {
+			return false, fmt.Errorf("доставка: %v; сохранить повтор: %w", err, markErr)
+		}
+		return false, nil
+	}
+	if err := service.Queue.MarkDelivered(ctx, job.Event.ID, job.Delivery.Destination.ID, service.Now()); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func sameUsername(left, right string) bool {
