@@ -63,6 +63,45 @@ type ServerStore interface {
 	Accept(ctx context.Context, event domain.Event, plan domain.DeliveryPlan) (accepted bool, err error)
 }
 
+// RegisteredClient — доверенная запись точки на сервере.
+type RegisteredClient struct {
+	ID                string
+	Name              string
+	SenderBotID       int64
+	SenderBotUsername string
+	ChatID            int64
+	ThreadID          int64
+	KeyID             string
+	Key               []byte
+	Active            bool
+}
+
+// ClientRegistry управляет точками без изменения исполняемого файла.
+type ClientRegistry interface {
+	Client(ctx context.Context, id string) (RegisteredClient, error)
+	SaveClient(ctx context.Context, client RegisteredClient) error
+}
+
+// RuleRepository возвращает только целиком опубликованную версию маршрутов.
+type RuleRepository interface {
+	ActiveRules(ctx context.Context) (domain.RuleSet, error)
+	PublishRules(ctx context.Context, rules domain.RuleSet, author string) error
+}
+
+// DeliveryJob связывает исходное событие с одним независимым получателем.
+type DeliveryJob struct {
+	Event    domain.Event
+	Delivery domain.PlannedDelivery
+	Attempts int
+}
+
+// DeliveryQueue хранит результаты каждого направления отдельно.
+type DeliveryQueue interface {
+	PendingDeliveries(ctx context.Context, limit int, now time.Time) ([]DeliveryJob, error)
+	MarkDelivered(ctx context.Context, eventID, destinationID string, at time.Time) error
+	MarkDeliveryRetry(ctx context.Context, eventID, destinationID string, next time.Time, reason string) error
+}
+
 // DeliveryGateway выполняет одно внешнее задание.
 type DeliveryGateway interface {
 	Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error
