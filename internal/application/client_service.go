@@ -66,9 +66,6 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 
 	queued := 0
 	for _, item := range items {
-		if strings.TrimSpace(item.Content) == "" {
-			continue
-		}
 		event, err := service.newEvent(item)
 		if err != nil {
 			return queued, err
@@ -185,7 +182,7 @@ func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 		ID: id, ClientID: service.ClientID, CreatedAt: now, ObservedAt: item.ObservedAt,
 		SourceAt: sourceAt, ExpiresAt: expiresAt, FreshnessIssue: freshnessIssue,
 		Source: item.Record, Position: item.Position, Mode: item.Mode,
-		Content: normalizeContent(item.Content), UpdatedBy: item.UpdatedBy,
+		Content: normalizeContent(item.Content), Blocks: item.Blocks, UpdatedBy: item.UpdatedBy,
 		ContentDigest: hex.EncodeToString(digest[:]),
 	}
 	return event, event.Validate()

@@ -26,9 +26,13 @@ func TestSourceReadsCurrentAndFutureSchemaReadOnly(t *testing.T) {
 			content TEXT, updated_by TEXT, updated_at TEXT,
 			catalog_uuid TEXT, source_mode TEXT
 		);
+		CREATE TABLE intercept_callsigns (
+			frequency TEXT, group_code TEXT, unit_name TEXT, code TEXT, label TEXT
+		);
+		INSERT INTO intercept_callsigns VALUES('100.0', 'A', '1 мб 155 омбр', '123', 'Лаки');
 		INSERT INTO intercept_items VALUES(
 			7, 2, 'session', '1 мб 155 омбр', '100.0', 'A', 'source-7',
-			'данные', 'Иванов', '2026-10-18T10:00:00Z', 'catalog-1', 'deferred'
+			'12.00\n-Данные. (123)', 'Иванов', '2026-10-18T10:00:00Z', 'catalog-1', 'deferred'
 		);`)
 	if err != nil {
 		t.Fatalf("fixture: %v", err)
@@ -49,6 +53,10 @@ func TestSourceReadsCurrentAndFutureSchemaReadOnly(t *testing.T) {
 	}
 	if cursor.ID != 7 {
 		t.Fatalf("неожиданный курсор: %#v", cursor)
+	}
+	if len(items[0].Blocks) != 1 || len(items[0].Blocks[0].Callsigns) != 1 ||
+		items[0].Blocks[0].Callsigns[0].Label != "Лаки" {
+		t.Fatalf("позывные и блоки не прочитаны: %#v", items[0].Blocks)
 	}
 	if _, err := source.db.Exec("DELETE FROM intercept_items"); err == nil {
 		t.Fatal("источник EAVC должен быть открыт только для чтения")

@@ -25,6 +25,7 @@ type SourceItem struct {
 	Position   domain.Position
 	Mode       domain.SourceMode
 	Content    string
+	Blocks     []domain.ContentBlock
 	UpdatedBy  string
 	ObservedAt time.Time
 }

@@ -26,6 +26,7 @@ type Source struct {
 	db             *sql.DB
 	hasCatalogUUID bool
 	hasSourceMode  bool
+	hasCallsigns   bool
 }
 
 // Open проверяет файл и схему до запуска фонового чтения.
@@ -61,8 +62,14 @@ func Open(ctx context.Context, path string) (*Source, error) {
 		sort.Strings(missing)
 		return nil, fmt.Errorf("схема EAVC не поддерживается, отсутствуют поля: %s", strings.Join(missing, ", "))
 	}
+	hasCallsigns, err := hasTable(ctx, db, "intercept_callsigns")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Source{
 		db: db, hasCatalogUUID: columns["catalog_uuid"], hasSourceMode: columns["source_mode"],
+		hasCallsigns: hasCallsigns,
 	}, nil
 }
 
@@ -130,7 +137,112 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 	if err := rows.Err(); err != nil {
 		return nil, after, fmt.Errorf("прочитать записи EAVC: %w", err)
 	}
+	if err := rows.Close(); err != nil {
+		return nil, after, fmt.Errorf("закрыть чтение EAVC: %w", err)
+	}
+	for index := range items {
+		items[index].Blocks = domain.SplitContentBlocks(items[index].Content)
+		if source.hasCallsigns {
+			if err := source.enrichCallsigns(ctx, &items[index]); err != nil {
+				return nil, after, err
+			}
+		}
+	}
 	return items, cursor, nil
+}
+
+func (source *Source) enrichCallsigns(ctx context.Context, item *application.SourceItem) error {
+	codes := domain.ExtractCorrespondentCodes(item.Content)
+	if len(codes) == 0 {
+		return nil
+	}
+	labels := make(map[string]string)
+	lookup := func(where string, args []any, missing []string) error {
+		if len(missing) == 0 {
+			return nil
+		}
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(missing)), ",")
+		query := "SELECT code, label FROM intercept_callsigns WHERE " + where +
+			" AND code IN (" + placeholders + ")"
+		args = append(args, stringsToAny(missing)...)
+		rows, err := source.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("прочитать позывные EAVC: %w", err)
+		}
+		for rows.Next() {
+			var code, label sql.NullString
+			if err := rows.Scan(&code, &label); err != nil {
+				rows.Close()
+				return fmt.Errorf("декодировать позывной EAVC: %w", err)
+			}
+			if code.String != "" && label.String != "" {
+				if _, exists := labels[code.String]; !exists {
+					labels[code.String] = label.String
+				}
+			}
+		}
+		rowErr := rows.Err()
+		closeErr := rows.Close()
+		if rowErr != nil {
+			return rowErr
+		}
+		return closeErr
+	}
+	missing := func() []string {
+		result := make([]string, 0)
+		for _, code := range codes {
+			if labels[code] == "" {
+				result = append(result, code)
+			}
+		}
+		return result
+	}
+	frequency := strings.TrimSpace(item.Position.Frequency)
+	group := strings.TrimSpace(item.Position.GroupCode)
+	if frequency != "" && group != "" {
+		if err := lookup("frequency = ? AND group_code = ?", []any{frequency, group}, missing()); err != nil {
+			return err
+		}
+	}
+	unit := strings.TrimSpace(item.Position.UnitName)
+	if unit != "" {
+		if err := lookup("unit_name = ?", []any{unit}, missing()); err != nil {
+			return err
+		}
+	}
+	if err := lookup("1 = 1", nil, missing()); err != nil {
+		return err
+	}
+	for blockIndex := range item.Blocks {
+		for _, code := range domain.ExtractCorrespondentCodes(item.Blocks[blockIndex].Text) {
+			label := strings.TrimSpace(labels[code])
+			if label == "" {
+				label = "н/у"
+			}
+			item.Blocks[blockIndex].Callsigns = append(
+				item.Blocks[blockIndex].Callsigns, domain.Callsign{Code: code, Label: label},
+			)
+		}
+	}
+	return nil
+}
+
+func stringsToAny(values []string) []any {
+	result := make([]any, len(values))
+	for index := range values {
+		result[index] = values[index]
+	}
+	return result
+}
+
+func hasTable(ctx context.Context, db *sql.DB, table string) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table,
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("проверить таблицу %s: %w", table, err)
+	}
+	return count == 1, nil
 }
 
 func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {

@@ -506,7 +506,10 @@ func (server *Server) gateways(cfg config.Server) map[string]application.Deliver
 		case domain.DestinationTelegram:
 			api, err := telegram.New(destination.BotToken, nil)
 			if err == nil {
-				result[id] = &telegram.Destination{API: api, ChatID: destination.ChatID}
+				result[id] = &telegram.Destination{
+					API: api, ChatID: destination.ChatID,
+					StatePath: filepath.Join(server.BaseDir, "data", "telegram-"+safeID(id)+".json"),
+				}
 			}
 		case domain.DestinationWord:
 			result[id] = &docx.Destination{

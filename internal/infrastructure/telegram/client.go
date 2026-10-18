@@ -153,6 +153,27 @@ func (client *Client) SendText(ctx context.Context, chatID, threadID int64, text
 	return message, err
 }
 
+// SendHTML публикует подготовленное сообщение в формате Telegram HTML.
+func (client *Client) SendHTML(ctx context.Context, chatID, threadID int64, text string) (Message, error) {
+	request := map[string]any{
+		"chat_id": chatID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true,
+	}
+	if threadID > 0 {
+		request["message_thread_id"] = threadID
+	}
+	var message Message
+	err := client.callJSON(ctx, "sendMessage", request, &message)
+	return message, err
+}
+
+// EditHTML исправляет ранее опубликованный временной блок без создания дубля.
+func (client *Client) EditHTML(ctx context.Context, chatID, messageID int64, text string) error {
+	return client.callJSON(ctx, "editMessageText", map[string]any{
+		"chat_id": chatID, "message_id": messageID, "text": text,
+		"parse_mode": "HTML", "disable_web_page_preview": true,
+	}, nil)
+}
+
 func (client *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
 	return client.callJSON(ctx, "deleteMessage", map[string]any{
 		"chat_id": chatID, "message_id": messageID,
