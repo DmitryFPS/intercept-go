@@ -45,9 +45,14 @@ try {
         if ([string]::IsNullOrWhiteSpace([string]$status.version)) {
             throw "Приложение $($case.Exe) вернуло статус без версии"
         }
+		$diagnosticsUri = $case.Uri.Replace('/api/status', '/api/diagnostics')
+		$diagnostics = Invoke-WebRequest -Uri $diagnosticsUri -UseBasicParsing -TimeoutSec 5
+		if ($diagnostics.Headers['Content-Type'] -notlike 'application/zip*' -or $diagnostics.RawContentLength -lt 100) {
+			throw "Приложение $($case.Exe) не сформировало диагностический ZIP"
+		}
         Stop-Process -Id $process.Id -Force
         $process.WaitForExit()
-        $processes.Remove($process)
+        $processes.Remove($process) | Out-Null
     }
     Write-Host 'Smoke-тест переносимых архивов пройден.' -ForegroundColor Green
 }

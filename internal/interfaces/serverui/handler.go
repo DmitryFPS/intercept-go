@@ -42,7 +42,19 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/rules", handler.publishRules)
 	mux.HandleFunc("GET /api/rule-versions", handler.ruleVersions)
 	mux.HandleFunc("POST /api/rule-versions/{version}/restore", handler.restoreRules)
+	mux.HandleFunc("GET /api/diagnostics", handler.diagnostics)
 	return securityHeaders(mux)
+}
+
+func (handler Handler) diagnostics(writer http.ResponseWriter, request *http.Request) {
+	payload, err := handler.Server.Diagnostics(request.Context())
+	if err != nil {
+		localui.WriteJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writer.Header().Set("Content-Type", "application/zip")
+	writer.Header().Set("Content-Disposition", `attachment; filename="InterceptServer-diagnostics.zip"`)
+	writer.Write(payload)
 }
 
 func (handler Handler) ruleVersions(writer http.ResponseWriter, request *http.Request) {

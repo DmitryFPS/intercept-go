@@ -54,6 +54,42 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestServerStoreKeepsRuleHistoryForRestore(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first := serverTestRules()
+	if err := store.PublishRules(ctx, first, "первый"); err != nil {
+		t.Fatal(err)
+	}
+	second := serverTestRules()
+	second.Version = 2
+	second.Unknown["a"] = domain.RouteDecision{Action: domain.RouteSkip}
+	if err := store.PublishRules(ctx, second, "второй"); err != nil {
+		t.Fatal(err)
+	}
+	history, err := store.RuleHistory(ctx)
+	if err != nil || len(history) != 2 || history[0].Version != 2 || !history[0].Active || history[1].Active {
+		t.Fatalf("неожиданная история: %+v err=%v", history, err)
+	}
+	restored, err := store.RulesByVersion(ctx, 1)
+	if err != nil || restored.Unknown["a"].Action != domain.RouteReview {
+		t.Fatalf("не удалось прочитать старую версию: %+v err=%v", restored, err)
+	}
+	next, err := store.NextRuleVersion(ctx)
+	if err != nil || next != 3 {
+		t.Fatalf("следующая версия: %d err=%v", next, err)
+	}
+}
+
 func serverTestEvent() domain.Event {
 	now := time.Now().UTC()
 	return domain.Event{

@@ -41,6 +41,25 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	if _, err := service.Receive(context.Background(), packet); err == nil {
 		t.Fatal("чужой Telegram-бот должен быть отклонён")
 	}
+	packet.SenderBotID = 11
+	packet.ThreadID = 43
+	if _, err := service.Receive(context.Background(), packet); err == nil {
+		t.Fatal("чужая тема должна быть отклонена")
+	}
+	packet.ThreadID = 42
+	var changed protocol.Envelope
+	_ = json.Unmarshal(payload, &changed)
+	changed.KeyID = "чужой-ключ"
+	packet.Payload, _ = json.Marshal(changed)
+	if _, err := service.Receive(context.Background(), packet); err == nil {
+		t.Fatal("незарегистрированный ключ должен быть отклонён")
+	}
+	_ = json.Unmarshal(payload, &changed)
+	changed.Ciphertext = changed.Ciphertext[:len(changed.Ciphertext)-2] + "AA"
+	packet.Payload, _ = json.Marshal(changed)
+	if _, err := service.Receive(context.Background(), packet); err == nil {
+		t.Fatal("повреждённый шифротекст должен быть отклонён")
+	}
 	if store.accepted != 1 {
 		t.Fatal("отклонённый пакет не должен попадать в хранилище")
 	}

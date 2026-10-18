@@ -13,12 +13,14 @@ $clientRoot = Join-Path $distRoot 'InterceptClient'
 $serverRoot = Join-Path $distRoot 'InterceptServer'
 $env:GOPATH = Join-Path $repoRoot '.gopath'
 $env:GOCACHE = Join-Path $repoRoot '.gocache'
+$env:GOTMPDIR = Join-Path $repoRoot '.gotmp'
 $env:CGO_ENABLED = '0'
 $env:GOOS = 'windows'
 $env:GOARCH = 'amd64'
 
 Push-Location $repoRoot
 try {
+	New-Item -ItemType Directory -Force -Path $env:GOTMPDIR | Out-Null
     $unformatted = @(gofmt -l cmd internal)
     if ($unformatted.Count -ne 0) {
         throw "gofmt требуется для: $($unformatted -join ', ')"

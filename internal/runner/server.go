@@ -1,12 +1,14 @@
 package runner
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -318,6 +320,35 @@ func (server *Server) PublishRules(ctx context.Context, rules domain.RuleSet, au
 
 func (server *Server) RuleHistory(ctx context.Context) ([]stateDB.RuleVersion, error) {
 	return server.Store.RuleHistory(ctx)
+}
+
+// Diagnostics формирует архив состояния и журналов без конфигурации и секретов.
+func (server *Server) Diagnostics(ctx context.Context) ([]byte, error) {
+	var output bytes.Buffer
+	archive := zip.NewWriter(&output)
+	status, _ := json.MarshalIndent(server.Status(), "", "  ")
+	part, _ := archive.Create("status.json")
+	_, _ = part.Write(status)
+	history, err := server.RuleHistory(ctx)
+	if err == nil {
+		payload, _ := json.MarshalIndent(history, "", "  ")
+		part, _ = archive.Create("rule-versions.json")
+		_, _ = part.Write(payload)
+	}
+	for _, name := range []string{"server.log", "server.log.1", "server.log.2"} {
+		path := filepath.Join(server.BaseDir, "logs", name)
+		file, openErr := os.Open(path)
+		if openErr != nil {
+			continue
+		}
+		part, _ := archive.Create(filepath.Join("logs", name))
+		_, _ = io.Copy(part, io.LimitReader(file, 10*1024*1024))
+		file.Close()
+	}
+	if err := archive.Close(); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
 }
 
 func (server *Server) RestoreRules(ctx context.Context, version int64, author string) error {

@@ -5,6 +5,7 @@
 /.gocache/
 /.gomodcache/
 /.gopath/
+/.gotmp/
 *.log
 *.local.json
 *.secret.json
