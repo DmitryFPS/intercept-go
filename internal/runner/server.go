@@ -274,6 +274,7 @@ func (server *Server) AddClient(ctx context.Context, request config.ClientReques
 	request.BotUsername = me.Username
 	request.ServerBotUsername = cfg.Transport.BotUsername
 	request.ChatID = cfg.Transport.ChatID
+	request.InviteLink = cfg.Transport.InviteLink
 	if err := api.TestTopic(ctx, request.ChatID, request.ThreadID); err != nil {
 		return nil, fmt.Errorf("бот точки не может писать в указанную тему: %w", err)
 	}
@@ -294,7 +295,11 @@ func (server *Server) AddClient(ctx context.Context, request config.ClientReques
 	if err != nil {
 		return nil, fmt.Errorf("подготовить настройки точки: %w", err)
 	}
-	if err := secrets.Save(server.clientConfigPath(clientConfig.ClientID), payload); err != nil {
+	clientConfigPath := server.clientConfigPath(clientConfig.ClientID)
+	if err := os.MkdirAll(filepath.Dir(clientConfigPath), 0o700); err != nil {
+		return nil, fmt.Errorf("создать хранилище настроек точек: %w", err)
+	}
+	if err := secrets.Save(clientConfigPath, payload); err != nil {
 		return nil, fmt.Errorf("сохранить резервную копию настроек точки: %w", err)
 	}
 	server.Logger.Info("точка добавлена", "client_id", clientConfig.ClientID, "client_number", clientConfig.ClientNumber)

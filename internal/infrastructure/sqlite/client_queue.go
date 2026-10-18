@@ -67,7 +67,8 @@ INSERT INTO client_events(
 	uploaded_at, acknowledged_at
 )
 SELECT event_id, source_uuid, content_digest, payload_json, state, attempts,
-	next_attempt_at, created_at, telegram_message_id, last_error, created_at,
+	next_attempt_at, strftime('%Y-%m-%dT%H:%M:%fZ', datetime(created_at, '+30 minutes')),
+	telegram_message_id, last_error, created_at,
 	uploaded_at, acknowledged_at
 FROM client_events_v1;
 DROP TABLE client_events_v1;

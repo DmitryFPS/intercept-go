@@ -37,6 +37,7 @@ type ClientTransport struct {
 	ServerBotUsername string `json:"server_bot_username"`
 	ChatID            int64  `json:"chat_id"`
 	ThreadID          int64  `json:"thread_id"`
+	InviteLink        string `json:"invite_link,omitempty"`
 }
 
 type ClientCrypto struct {

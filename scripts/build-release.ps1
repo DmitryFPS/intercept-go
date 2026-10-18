@@ -16,6 +16,15 @@ if ([string]::IsNullOrWhiteSpace($localAppData)) {
     throw 'Windows не сообщил путь LocalAppData для кэша сборки.'
 }
 $buildCacheRoot = Join-Path $localAppData 'InterceptGoBuild'
+try {
+    New-Item -ItemType Directory -Force -Path $buildCacheRoot | Out-Null
+}
+catch {
+    # В ограниченной среде сборки AppData может быть закрыта. Кэш остаётся
+    # рядом с рабочей областью и по-прежнему не попадает в репозиторий.
+    $buildCacheRoot = Join-Path $workspaceRoot '.build-cache\release'
+    New-Item -ItemType Directory -Force -Path $buildCacheRoot | Out-Null
+}
 $clientRoot = Join-Path $distRoot 'InterceptClient'
 $serverRoot = Join-Path $distRoot 'InterceptServer'
 $env:GOPATH = Join-Path $buildCacheRoot 'gopath'

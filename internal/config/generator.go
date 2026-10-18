@@ -19,6 +19,7 @@ type ClientRequest struct {
 	BotToken          string
 	BotUsername       string
 	ServerBotUsername string
+	InviteLink        string
 	ChatID            int64
 	ThreadID          int64
 	CatchUpExisting   bool
@@ -52,6 +53,7 @@ func GenerateClient(request ClientRequest, now time.Time, random io.Reader) (Cli
 			BotToken: request.BotToken, BotUsername: request.BotUsername,
 			ServerBotUsername: request.ServerBotUsername,
 			ChatID:            request.ChatID, ThreadID: request.ThreadID,
+			InviteLink: strings.TrimSpace(request.InviteLink),
 		},
 		Cryptography: ClientCrypto{
 			KeyID: keyID, KeyBase64: base64.RawStdEncoding.EncodeToString(key),

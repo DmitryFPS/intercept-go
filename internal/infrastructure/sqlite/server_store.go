@@ -97,7 +97,8 @@ INSERT INTO delivery_jobs(
 	state, attempts, next_attempt_at, last_error, delivered_at
 )
 SELECT j.event_id, j.destination_id, j.delivery_json, j.destination_id,
-	e.received_at, e.received_at, j.state, j.attempts, j.next_attempt_at,
+	e.received_at, strftime('%Y-%m-%dT%H:%M:%fZ', datetime(e.received_at, '+30 minutes')),
+	j.state, j.attempts, j.next_attempt_at,
 	j.last_error, j.delivered_at
 FROM delivery_jobs_v1 j
 JOIN received_events e ON e.event_id = j.event_id;
