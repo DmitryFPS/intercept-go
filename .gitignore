@@ -4,6 +4,7 @@
 /.idea/
 /.gocache/
 /.gomodcache/
+/.gopath/
 *.log
 *.local.json
 *.secret.json
