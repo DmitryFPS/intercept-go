@@ -8,8 +8,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 
+	"intercept/internal/infrastructure/secrets"
 	"intercept/internal/interfaces/clientui"
 	"intercept/internal/interfaces/localui"
 	"intercept/internal/observability"
@@ -38,11 +40,27 @@ func main() {
 	application := runner.NewClient(baseDir, buildVersion(), logger)
 	application.Start(ctx)
 	handler := clientui.Handler{Client: application, Context: ctx}.Routes()
+	accessToken, err := secrets.LoadOrCreateToken(
+		filepath.Join(baseDir, "data", "client-ui-access.dat"), argumentValue("--access-token="),
+	)
+	if err != nil {
+		logger.Error("не удалось защитить локальный интерфейс", "error", err)
+		return
+	}
 	openBrowser := len(os.Args) < 2 || os.Args[1] != "--no-browser"
-	if err := localui.ListenAndServe(ctx, "127.0.0.1:17631", handler, openBrowser); err != nil {
+	if err := localui.ListenAndServe(ctx, "127.0.0.1:17631", handler, openBrowser, accessToken); err != nil {
 		logger.Error("локальный интерфейс завершён", "error", err)
 		_ = localui.OpenBrowser("http://127.0.0.1:17631")
 	}
+}
+
+func argumentValue(prefix string) string {
+	for _, argument := range os.Args[1:] {
+		if strings.HasPrefix(argument, prefix) {
+			return strings.TrimPrefix(argument, prefix)
+		}
+	}
+	return ""
 }
 
 func executableDir() (string, error) {

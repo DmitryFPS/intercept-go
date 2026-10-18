@@ -2,6 +2,7 @@ package localui
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,8 +16,10 @@ import (
 	"time"
 )
 
+const accessCookieName = "intercept_local_access"
+
 // ListenAndServe запускает интерфейс только на loopback-адресе.
-func ListenAndServe(ctx context.Context, address string, handler http.Handler, open bool) error {
+func ListenAndServe(ctx context.Context, address string, handler http.Handler, open bool, accessToken string) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return fmt.Errorf("запустить локальный интерфейс: %w", err)
@@ -27,13 +30,13 @@ func ListenAndServe(ctx context.Context, address string, handler http.Handler, o
 		return errors.New("интерфейс разрешено открывать только на этом компьютере")
 	}
 	server := &http.Server{
-		Handler: handler, ReadHeaderTimeout: 5 * time.Second,
+		Handler: protectLocalUI(listener.Addr().String(), accessToken, handler), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 90 * time.Second,
 	}
 	if open {
 		go func() {
 			time.Sleep(300 * time.Millisecond)
-			_ = OpenBrowser("http://" + listener.Addr().String())
+			_ = OpenBrowser("http://" + listener.Addr().String() + "/?access=" + url.QueryEscape(accessToken))
 		}()
 	}
 	go func() {
@@ -47,6 +50,50 @@ func ListenAndServe(ctx context.Context, address string, handler http.Handler, o
 		return nil
 	}
 	return err
+}
+
+func protectLocalUI(authority, token string, next http.Handler) http.Handler {
+	origin := "http://" + authority
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !constantEqual(request.Host, authority) {
+			http.Error(writer, "Интерфейс доступен только по локальному адресу программы.", http.StatusMisdirectedRequest)
+			return
+		}
+		if request.Method == http.MethodGet && request.URL.Path == "/" {
+			if supplied := request.URL.Query().Get("access"); supplied != "" {
+				if !constantEqual(supplied, token) {
+					http.Error(writer, "Неверная ссылка запуска.", http.StatusForbidden)
+					return
+				}
+				http.SetCookie(writer, &http.Cookie{
+					Name: accessCookieName, Value: token, Path: "/", HttpOnly: true,
+					SameSite: http.SameSiteStrictMode, MaxAge: 365 * 24 * 60 * 60,
+				})
+				http.Redirect(writer, request, "/", http.StatusSeeOther)
+				return
+			}
+		}
+		cookie, err := request.Cookie(accessCookieName)
+		if err != nil || !constantEqual(cookie.Value, token) {
+			http.Error(writer, "Запустите интерфейс двойным нажатием на EXE.", http.StatusUnauthorized)
+			return
+		}
+		if request.Method != http.MethodGet && request.Method != http.MethodHead {
+			if requestOrigin := request.Header.Get("Origin"); requestOrigin != origin {
+				http.Error(writer, "Запрос поступил с посторонней страницы.", http.StatusForbidden)
+				return
+			}
+			if site := request.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
+				http.Error(writer, "Межсайтовый запрос запрещён.", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func constantEqual(left, right string) bool {
+	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
 }
 
 func OpenBrowser(address string) error {
@@ -76,12 +123,7 @@ func ReadJSON(request *http.Request, target any, maxBytes int64) error {
 	if !strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "application/json") {
 		return errors.New("ожидается JSON")
 	}
-	if origin := request.Header.Get("Origin"); origin != "" {
-		parsed, err := url.Parse(origin)
-		if err != nil || !strings.EqualFold(parsed.Host, request.Host) {
-			return errors.New("запрос поступил с посторонней страницы")
-		}
-	}
+	// Origin и Host проверяет единый middleware до вызова обработчика.
 	decoder := json.NewDecoder(io.LimitReader(request.Body, maxBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

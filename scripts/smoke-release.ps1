@@ -13,8 +13,10 @@ $processes = [System.Collections.Generic.List[System.Diagnostics.Process]]::new(
 
 function Wait-LocalApi {
     param(
-        [string]$Uri,
-        [System.Diagnostics.Process]$Process
+        [string]$BootstrapUri,
+        [string]$StatusUri,
+        [System.Diagnostics.Process]$Process,
+        [Microsoft.PowerShell.Commands.WebRequestSession]$Session
     )
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
@@ -22,13 +24,32 @@ function Wait-LocalApi {
             throw "Приложение завершилось до запуска локального интерфейса: $($Process.StartInfo.FileName)"
         }
         try {
-            return Invoke-RestMethod -Uri $Uri -TimeoutSec 2
+            Invoke-WebRequest -Uri $BootstrapUri -WebSession $Session -UseBasicParsing -TimeoutSec 2 | Out-Null
+            return Invoke-RestMethod -Uri $StatusUri -WebSession $Session -TimeoutSec 2
         }
         catch {
             Start-Sleep -Milliseconds 250
         }
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "Локальный интерфейс не ответил: $Uri"
+    throw "Локальный интерфейс не ответил: $StatusUri"
+}
+
+function Test-TcpPort {
+    param([uri]$Uri)
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $task = $client.ConnectAsync($Uri.Host, $Uri.Port)
+        if ($task.Wait(500)) {
+            return $client.Connected
+        }
+        return $false
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Dispose()
+    }
 }
 
 try {
@@ -38,14 +59,8 @@ try {
         @{ Archive = 'InterceptServer-portable.zip'; Folder = 'Сервер Тест'; Exe = 'InterceptServer.exe'; Uri = 'http://127.0.0.1:17632/api/status' }
     )
     foreach ($case in $cases) {
-        try {
-            Invoke-RestMethod -Uri $case.Uri -TimeoutSec 1 | Out-Null
+        if (Test-TcpPort -Uri ([uri]$case.Uri)) {
             throw "Порт локального интерфейса уже занят: $($case.Uri). Закройте ранее запущенную программу."
-        }
-        catch {
-            if ($_.Exception.Message -like 'Порт локального интерфейса уже занят:*') {
-                throw
-            }
         }
         $archive = Join-Path $resolvedDist $case.Archive
         $target = Join-Path $smokeRoot $case.Folder
@@ -54,9 +69,12 @@ try {
         if ($null -eq $executable) {
             throw "В архиве $archive не найден $($case.Exe)"
         }
-        $process = Start-Process -FilePath $executable.FullName -ArgumentList '--no-browser' -WorkingDirectory $executable.DirectoryName -WindowStyle Hidden -PassThru
+        $accessToken = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))
+        $process = Start-Process -FilePath $executable.FullName -ArgumentList @('--no-browser', "--access-token=$accessToken") -WorkingDirectory $executable.DirectoryName -WindowStyle Hidden -PassThru
         $processes.Add($process)
-        $status = Wait-LocalApi -Uri $case.Uri -Process $process
+        $session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+        $bootstrapUri = $case.Uri.Replace('/api/status', '/?access=' + [uri]::EscapeDataString($accessToken))
+        $status = Wait-LocalApi -BootstrapUri $bootstrapUri -StatusUri $case.Uri -Process $process -Session $session
         if ($process.HasExited) {
             throw "Приложение $($case.Exe) завершилось во время smoke-теста"
         }
@@ -64,7 +82,7 @@ try {
             throw "Приложение $($case.Exe) вернуло статус без версии"
         }
 		$diagnosticsUri = $case.Uri.Replace('/api/status', '/api/diagnostics')
-		$diagnostics = Invoke-WebRequest -Uri $diagnosticsUri -UseBasicParsing -TimeoutSec 5
+		$diagnostics = Invoke-WebRequest -Uri $diagnosticsUri -WebSession $session -UseBasicParsing -TimeoutSec 5
 		if ($diagnostics.Headers['Content-Type'] -notlike 'application/zip*' -or $diagnostics.RawContentLength -lt 100) {
 			throw "Приложение $($case.Exe) не сформировало диагностический ZIP"
 		}
