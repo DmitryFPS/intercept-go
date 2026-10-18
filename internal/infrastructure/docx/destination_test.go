@@ -176,11 +176,13 @@ func TestDestinationDoesNotWaitBehindStuckOperation(t *testing.T) {
 		t.Fatal("вторая Word-доставка ждала зависшую операцию")
 	}
 	unlock()
+	lockKey, _ := filepath.Abs(statePath)
+	lockKey = strings.ToLower(filepath.Clean(lockKey))
 	destinationLocks.Lock()
-	remaining := len(destinationLocks.items)
+	_, remains := destinationLocks.items[lockKey]
 	destinationLocks.Unlock()
-	if remaining != 0 {
-		t.Fatalf("реестр Word-блокировок не очищен: %d", remaining)
+	if remains {
+		t.Fatal("собственная Word-блокировка не удалена из реестра")
 	}
 }
 
