@@ -22,3 +22,13 @@ func Load(path string) ([]byte, error) {
 	}
 	return payload, nil
 }
+
+// Protect сохраняет единый интерфейс платформенного хранилища.
+// Целевая Windows-сборка использует DPAPI.
+func Protect(plain []byte) ([]byte, error) {
+	return append([]byte(nil), plain...), nil
+}
+
+func Unprotect(protected []byte) ([]byte, error) {
+	return append([]byte(nil), protected...), nil
+}

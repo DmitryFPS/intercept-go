@@ -203,6 +203,16 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 	if err := Migrate(ctx, db, []string{serverMigration, serverDeliveryOrderMigration}); err != nil {
 		return nil, err
 	}
+	for _, item := range []struct{ table, column string }{
+		{"server_clients", "key_bytes"},
+		{"received_events", "payload_json"},
+		{"delivery_jobs", "delivery_json"},
+		{"rejected_packets", "payload"},
+	} {
+		if err := protectExistingColumn(ctx, db, item.table, item.column); err != nil {
+			return nil, fmt.Errorf("защитить хранилище сервера: %w", err)
+		}
+	}
 	return &ServerStore{db: db}, nil
 }
 
@@ -227,6 +237,10 @@ func (store *ServerStore) Client(ctx context.Context, id string) (application.Re
 	if err != nil {
 		return application.RegisteredClient{}, fmt.Errorf("прочитать точку: %w", err)
 	}
+	client.Key, err = unprotectDatabaseValue(client.Key)
+	if err != nil {
+		return application.RegisteredClient{}, fmt.Errorf("прочитать ключ точки: %w", err)
+	}
 	client.Active = active == 1
 	return client, nil
 }
@@ -242,7 +256,11 @@ func (store *ServerStore) SaveClient(ctx context.Context, client application.Reg
 	if client.Active {
 		active = 1
 	}
-	_, err := store.db.ExecContext(ctx, `
+	protectedKey, err := protectDatabaseValue(client.Key)
+	if err != nil {
+		return fmt.Errorf("защитить ключ точки: %w", err)
+	}
+	_, err = store.db.ExecContext(ctx, `
 		INSERT INTO server_clients(
 			client_id, client_number, name, sender_bot_id, sender_bot_username, chat_id,
 			thread_id, key_id, key_bytes, active, updated_at
@@ -253,7 +271,7 @@ func (store *ServerStore) SaveClient(ctx context.Context, client application.Reg
 			thread_id=excluded.thread_id, key_id=excluded.key_id,
 			key_bytes=excluded.key_bytes, active=excluded.active, updated_at=excluded.updated_at`,
 		client.ID, client.Number, client.Name, client.SenderBotID, client.SenderBotUsername,
-		client.ChatID, client.ThreadID, client.KeyID, client.Key, active,
+		client.ChatID, client.ThreadID, client.KeyID, protectedKey, active,
 		time.Now().UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -308,11 +326,15 @@ func (store *ServerStore) SaveValue(ctx context.Context, name, value string) err
 }
 
 func (store *ServerStore) Quarantine(ctx context.Context, packet application.IncomingPacket, reason string) error {
-	_, err := store.db.ExecContext(ctx, `
+	protectedPayload, err := protectDatabaseValue(packet.Payload)
+	if err != nil {
+		return fmt.Errorf("защитить пакет карантина: %w", err)
+	}
+	_, err = store.db.ExecContext(ctx, `
 		INSERT INTO rejected_packets(
 			sender_bot_id, sender_bot_username, chat_id, thread_id, reason, payload, received_at
 		) VALUES(?,?,?,?,?,?,?)`, packet.SenderBotID, packet.SenderBotUsername,
-		packet.ChatID, packet.ThreadID, reason, packet.Payload, time.Now().UTC().Format(time.RFC3339Nano))
+		packet.ChatID, packet.ThreadID, reason, protectedPayload, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("сохранить пакет в карантин: %w", err)
 	}
@@ -443,6 +465,10 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 	if err != nil {
 		return false, fmt.Errorf("кодировать событие: %w", err)
 	}
+	eventPayload, err = protectDatabaseValue(eventPayload)
+	if err != nil {
+		return false, fmt.Errorf("защитить событие: %w", err)
+	}
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("начать приём события: %w", err)
@@ -474,6 +500,10 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 		deliveryPayload, err := json.Marshal(delivery)
 		if err != nil {
 			return false, fmt.Errorf("кодировать задание доставки: %w", err)
+		}
+		deliveryPayload, err = protectDatabaseValue(deliveryPayload)
+		if err != nil {
+			return false, fmt.Errorf("защитить задание доставки: %w", err)
 		}
 		sourceAt := event.SourceAt.UTC()
 		if sourceAt.IsZero() {
@@ -535,10 +565,18 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 		if err := rows.Scan(&eventPayload, &deliveryPayload, &job.Attempts); err != nil {
 			return nil, fmt.Errorf("прочитать задание доставки: %w", err)
 		}
-		if err := json.Unmarshal(eventPayload, &job.Event); err != nil {
+		eventPlain, err := unprotectDatabaseValue(eventPayload)
+		if err != nil {
+			return nil, err
+		}
+		deliveryPlain, err := unprotectDatabaseValue(deliveryPayload)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(eventPlain, &job.Event); err != nil {
 			return nil, errors.New("сохранённое событие повреждено")
 		}
-		if err := json.Unmarshal(deliveryPayload, &job.Delivery); err != nil {
+		if err := json.Unmarshal(deliveryPlain, &job.Delivery); err != nil {
 			return nil, errors.New("сохранённое задание повреждено")
 		}
 		jobs = append(jobs, job)

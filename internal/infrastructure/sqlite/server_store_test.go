@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -30,6 +31,13 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	if err := store.SaveClient(ctx, client); err != nil {
 		t.Fatalf("client: %v", err)
 	}
+	var storedKey []byte
+	if err := db.QueryRowContext(ctx, "SELECT key_bytes FROM server_clients WHERE client_id=?", client.ID).Scan(&storedKey); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(storedKey, client.Key) || !bytes.HasPrefix(storedKey, protectedPrefix) {
+		t.Fatal("ключ клиента остался открытым в SQLite")
+	}
 	rules := serverTestRules()
 	if err := store.PublishRules(ctx, rules, "test"); err != nil {
 		t.Fatalf("rules: %v", err)
@@ -39,6 +47,13 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	accepted, err := store.Accept(ctx, event, plan)
 	if err != nil || !accepted {
 		t.Fatalf("accept: %v %v", accepted, err)
+	}
+	var storedEvent []byte
+	if err := db.QueryRowContext(ctx, "SELECT payload_json FROM received_events WHERE event_id=?", event.ID).Scan(&storedEvent); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(storedEvent, []byte(event.Content)) || !bytes.HasPrefix(storedEvent, protectedPrefix) {
+		t.Fatal("принятое событие осталось открытым в SQLite")
 	}
 	accepted, err = store.Accept(ctx, event, plan)
 	if err != nil || accepted {

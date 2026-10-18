@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -32,6 +33,15 @@ func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	}
 	if err := queue.Enqueue(context.Background(), event); err != nil {
 		t.Fatalf("enqueue: %v", err)
+	}
+	var storedPayload []byte
+	if err := db.QueryRowContext(context.Background(),
+		"SELECT payload_json FROM client_events WHERE event_id=?", event.ID,
+	).Scan(&storedPayload); err != nil {
+		t.Fatalf("прочитать сохранённое событие: %v", err)
+	}
+	if bytes.Contains(storedPayload, []byte(event.Content)) || !bytes.HasPrefix(storedPayload, protectedPrefix) {
+		t.Fatalf("событие осталось открытым в SQLite: %q", storedPayload)
 	}
 	duplicate := event
 	duplicate.ID = "event-2"

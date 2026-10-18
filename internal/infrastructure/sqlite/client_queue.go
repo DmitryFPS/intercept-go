@@ -148,6 +148,9 @@ func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
 	if err := Migrate(ctx, db, []string{clientMigration, clientExpiryMigration, clientSourceVersionMigration}); err != nil {
 		return nil, err
 	}
+	if err := protectExistingColumn(ctx, db, "client_events", "payload_json"); err != nil {
+		return nil, fmt.Errorf("защитить очередь клиента: %w", err)
+	}
 	return &ClientQueue{db: db}, nil
 }
 
@@ -158,6 +161,10 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("кодировать событие: %w", err)
+	}
+	payload, err = protectDatabaseValue(payload)
+	if err != nil {
+		return fmt.Errorf("защитить событие: %w", err)
 	}
 	sourceKey := strings.TrimSpace(event.Source.UUID)
 	if sourceKey == "" {
@@ -231,7 +238,11 @@ func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time)
 		if err := rows.Scan(&payload, &queued.Attempts); err != nil {
 			return nil, fmt.Errorf("прочитать событие очереди: %w", err)
 		}
-		if err := json.Unmarshal(payload, &queued.Event); err != nil {
+		plain, err := unprotectDatabaseValue(payload)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(plain, &queued.Event); err != nil {
 			return nil, fmt.Errorf("декодировать событие очереди: %w", err)
 		}
 		events = append(events, queued)
