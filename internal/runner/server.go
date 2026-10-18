@@ -79,10 +79,14 @@ type Server struct {
 	Store   *stateDB.ServerStore
 
 	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
 	status      ServerStatus
 	config      config.Server
 	workerStop  context.CancelFunc
+	workerDone  chan struct{}
 	rootContext context.Context
+	rootStop    context.CancelFunc
+	background  sync.WaitGroup
 }
 
 func NewServer(ctx context.Context, baseDir, version string, logger *slog.Logger) (*Server, error) {
@@ -116,24 +120,37 @@ func NewServer(ctx context.Context, baseDir, version string, logger *slog.Logger
 }
 
 func (server *Server) Start(ctx context.Context) {
+	rootContext, rootStop := context.WithCancel(ctx)
 	server.mu.Lock()
-	server.rootContext = ctx
+	server.rootContext = rootContext
+	server.rootStop = rootStop
 	server.mu.Unlock()
 	if _, err := os.Stat(server.configPath()); err == nil {
-		if err := server.restartWorker(ctx); err != nil {
+		if err := server.restartWorker(rootContext); err != nil {
 			server.fail("Ошибка настроек сервера", err)
 		}
 	}
-	go server.statusLoop(ctx)
-	go server.serverMaintenanceLoop(ctx)
+	server.background.Add(2)
+	go func() {
+		defer server.background.Done()
+		server.statusLoop(rootContext)
+	}()
+	go func() {
+		defer server.background.Done()
+		server.serverMaintenanceLoop(rootContext)
+	}()
 }
 
 func (server *Server) Close() {
 	server.mu.Lock()
-	if server.workerStop != nil {
-		server.workerStop()
-	}
+	rootStop := server.rootStop
+	server.rootStop = nil
 	server.mu.Unlock()
+	if rootStop != nil {
+		rootStop()
+	}
+	server.stopWorker()
+	server.background.Wait()
 	_ = server.Store.Close()
 }
 
@@ -159,7 +176,7 @@ func (server *Server) ConfigureTransport(ctx context.Context, setup TransportSet
 		return fmt.Errorf("проверка транспортной группы: %w", err)
 	}
 	server.mu.RLock()
-	destinations := server.config.Destinations
+	destinations := cloneDestinations(server.config.Destinations)
 	server.mu.RUnlock()
 	if destinations == nil {
 		destinations = make(map[string]config.DestinationConfig)
@@ -180,7 +197,7 @@ func (server *Server) ConfigureTransport(ctx context.Context, setup TransportSet
 
 func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup) error {
 	server.mu.RLock()
-	cfg := server.config
+	cfg := cloneServerConfig(server.config)
 	server.mu.RUnlock()
 	if !server.Status().Configured {
 		return errors.New("сначала настройте транспортную группу")
@@ -436,6 +453,8 @@ func (server *Server) SafeDestinations() map[string]map[string]any {
 }
 
 func (server *Server) restartWorker(parent context.Context) error {
+	server.lifecycleMu.Lock()
+	defer server.lifecycleMu.Unlock()
 	protected, err := secrets.Load(server.configPath())
 	if err != nil {
 		return err
@@ -444,13 +463,13 @@ func (server *Server) restartWorker(parent context.Context) error {
 	if err != nil {
 		return err
 	}
-	server.mu.Lock()
-	if server.workerStop != nil {
-		server.workerStop()
-	}
+	server.stopWorkerLocked()
 	workerContext, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	server.mu.Lock()
 	server.workerStop = cancel
-	server.config = cfg
+	server.workerDone = done
+	server.config = cloneServerConfig(cfg)
 	server.status.Configured = true
 	server.status.State = "starting"
 	server.status.Title = "Запуск сервера"
@@ -458,8 +477,31 @@ func (server *Server) restartWorker(parent context.Context) error {
 	server.status.InviteLink = cfg.Transport.InviteLink
 	server.status.Destinations = destinationIDs(cfg.Destinations)
 	server.mu.Unlock()
-	go server.run(workerContext, cfg)
+	go func() {
+		defer close(done)
+		server.run(workerContext, cfg)
+	}()
 	return nil
+}
+
+func (server *Server) stopWorker() {
+	server.lifecycleMu.Lock()
+	defer server.lifecycleMu.Unlock()
+	server.stopWorkerLocked()
+}
+
+func (server *Server) stopWorkerLocked() {
+	server.mu.Lock()
+	cancel, done := server.workerStop, server.workerDone
+	server.workerStop = nil
+	server.workerDone = nil
+	server.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 func (server *Server) run(ctx context.Context, cfg config.Server) {
@@ -690,4 +732,21 @@ func safeID(value string) string {
 		}
 		return '-'
 	}, value)
+}
+
+func cloneServerConfig(source config.Server) config.Server {
+	result := source
+	result.Destinations = cloneDestinations(source.Destinations)
+	return result
+}
+
+func cloneDestinations(source map[string]config.DestinationConfig) map[string]config.DestinationConfig {
+	if source == nil {
+		return nil
+	}
+	result := make(map[string]config.DestinationConfig, len(source))
+	for id, destination := range source {
+		result[id] = destination
+	}
+	return result
 }

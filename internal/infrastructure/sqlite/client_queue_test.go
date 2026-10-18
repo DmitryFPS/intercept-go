@@ -202,3 +202,39 @@ func TestClientQueuePurgesOnlyOldTerminalEvents(t *testing.T) {
 		t.Fatalf("неверные остатки очереди: %+v err=%v", stats, err)
 	}
 }
+
+func TestClientQueueConsumesLateAndDuplicateAcknowledgements(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "late", ClientID: "client", CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+		Source:   domain.SourceRecord{UUID: "source-late"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "данные", ContentDigest: "digest-late",
+	}
+	if err := queue.Enqueue(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkExpired(ctx, event.ID, now, domain.FreshnessExpired); err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []func() error{
+		func() error { return queue.MarkExpired(ctx, event.ID, now, domain.FreshnessExpired) },
+		func() error { return queue.MarkAcknowledged(ctx, event.ID, now) },
+		func() error { return queue.MarkAcknowledged(ctx, "already-cleaned", now) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatalf("позднее подтверждение заблокировало offset: %v", err)
+		}
+	}
+}

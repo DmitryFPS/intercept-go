@@ -53,8 +53,10 @@ type Client struct {
 	Logger  *slog.Logger
 
 	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
 	status      ClientStatus
 	workerStop  context.CancelFunc
+	workerDone  chan struct{}
 	rootContext context.Context
 }
 
@@ -76,11 +78,7 @@ func (client *Client) Start(ctx context.Context) {
 	}
 	go func() {
 		<-ctx.Done()
-		client.mu.Lock()
-		if client.workerStop != nil {
-			client.workerStop()
-		}
-		client.mu.Unlock()
+		client.stopWorker()
 	}()
 }
 
@@ -158,6 +156,8 @@ func (client *Client) Diagnostics() ([]byte, error) {
 }
 
 func (client *Client) restartWorker(parent context.Context) error {
+	client.lifecycleMu.Lock()
+	defer client.lifecycleMu.Unlock()
 	protected, err := secrets.Load(client.configPath())
 	if err != nil {
 		return err
@@ -166,20 +166,43 @@ func (client *Client) restartWorker(parent context.Context) error {
 	if err != nil {
 		return err
 	}
-	client.mu.Lock()
-	if client.workerStop != nil {
-		client.workerStop()
-	}
+	client.stopWorkerLocked()
 	workerContext, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	client.mu.Lock()
 	client.workerStop = cancel
+	client.workerDone = done
 	client.status = ClientStatus{
 		State: "starting", Title: "Запуск", Detail: "Проверяем базу EAVC и Telegram.",
 		Configured: true, ClientID: cfg.ClientID, ClientName: cfg.ClientName,
 		ClientNumber: cfg.ClientNumber, Version: client.Version,
 	}
 	client.mu.Unlock()
-	go client.run(workerContext, cfg)
+	go func() {
+		defer close(done)
+		client.run(workerContext, cfg)
+	}()
 	return nil
+}
+
+func (client *Client) stopWorker() {
+	client.lifecycleMu.Lock()
+	defer client.lifecycleMu.Unlock()
+	client.stopWorkerLocked()
+}
+
+func (client *Client) stopWorkerLocked() {
+	client.mu.Lock()
+	cancel, done := client.workerStop, client.workerDone
+	client.workerStop = nil
+	client.workerDone = nil
+	client.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 func (client *Client) run(ctx context.Context, cfg config.Client) {

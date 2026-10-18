@@ -40,6 +40,8 @@ const (
 	editedMark        = "(отредактировано)"
 )
 
+var errDestinationBusy = errors.New("предыдущая операция Word ещё выполняется")
+
 // Destination создаёт DOCX по внешнему шаблону и доставляет его атомарно.
 type Destination struct {
 	TemplatePath string
@@ -49,9 +51,17 @@ type Destination struct {
 	Prefix       string
 	Username     string
 	Password     string
-
-	mu sync.Mutex
 }
+
+type destinationLock struct {
+	mutex sync.Mutex
+	refs  int
+}
+
+var destinationLocks = struct {
+	sync.Mutex
+	items map[string]*destinationLock
+}{items: make(map[string]*destinationLock)}
 
 type state struct {
 	LastNumber int                    `json:"last_number"`
@@ -68,18 +78,34 @@ type blockRecord struct {
 }
 
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, _ domain.PlannedDelivery) error {
-	destination.mu.Lock()
-	defer destination.mu.Unlock()
-
-	if destination.Prefix == "" {
-		destination.Prefix = "СТНД"
+	settings := *destination
+	if settings.Prefix == "" {
+		settings.Prefix = "СТНД"
 	}
-	if destination.Network == "" {
-		destination.Network = defaultNetwork
+	if settings.Network == "" {
+		settings.Network = defaultNetwork
 	}
-	if destination.TemplatePath == "" || destination.Folder == "" || destination.StatePath == "" {
+	if settings.TemplatePath == "" || settings.Folder == "" || settings.StatePath == "" {
 		return errors.New("Word-направление настроено не полностью")
 	}
+	unlock, acquired := tryDestinationLock(settings.StatePath)
+	if !acquired {
+		return errDestinationBusy
+	}
+	result := make(chan error, 1)
+	go func() {
+		defer unlock()
+		result <- settings.deliver(ctx, event)
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("операция Word превысила допустимое время: %w", ctx.Err())
+	}
+}
+
+func (destination Destination) deliver(ctx context.Context, event domain.Event) error {
 	if _, err := os.Stat(destination.Folder); err != nil {
 		if err := share.Connect(ctx, destination.Folder, destination.Username, destination.Password); err != nil {
 			return err
@@ -161,6 +187,39 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		return err
 	}
 	return nil
+}
+
+func tryDestinationLock(path string) (func(), bool) {
+	key, err := filepath.Abs(path)
+	if err != nil {
+		key = filepath.Clean(path)
+	}
+	key = strings.ToLower(filepath.Clean(key))
+	destinationLocks.Lock()
+	entry := destinationLocks.items[key]
+	if entry == nil {
+		entry = &destinationLock{}
+		destinationLocks.items[key] = entry
+	}
+	entry.refs++
+	destinationLocks.Unlock()
+	if !entry.mutex.TryLock() {
+		releaseDestinationLock(key, entry, false)
+		return nil, false
+	}
+	return func() { releaseDestinationLock(key, entry, true) }, true
+}
+
+func releaseDestinationLock(key string, entry *destinationLock, held bool) {
+	if held {
+		entry.mutex.Unlock()
+	}
+	destinationLocks.Lock()
+	entry.refs--
+	if entry.refs == 0 {
+		delete(destinationLocks.items, key)
+	}
+	destinationLocks.Unlock()
 }
 
 // Document содержит данные одного Word-документа без привязки к файлам.

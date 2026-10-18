@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/xml"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -153,6 +154,33 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 	}
 	if xml := documentXML(t, files[0]); !strings.Contains(xml, editedMark) || !strings.Contains(xml, "Первый исправлен") {
 		t.Fatal("изменённый документ не перезаписан с пометкой")
+	}
+}
+
+func TestDestinationDoesNotWaitBehindStuckOperation(t *testing.T) {
+	t.Parallel()
+	statePath := filepath.Join(t.TempDir(), "word-state.json")
+	unlock, acquired := tryDestinationLock(statePath)
+	if !acquired {
+		t.Fatal("не удалось захватить тестовую блокировку")
+	}
+	destination := Destination{
+		TemplatePath: "template.docx", Folder: "out", StatePath: statePath,
+	}
+	started := time.Now()
+	err := destination.Deliver(context.Background(), domain.Event{}, domain.PlannedDelivery{})
+	if !errors.Is(err, errDestinationBusy) {
+		t.Fatalf("ожидалась занятая операция Word: %v", err)
+	}
+	if time.Since(started) > 100*time.Millisecond {
+		t.Fatal("вторая Word-доставка ждала зависшую операцию")
+	}
+	unlock()
+	destinationLocks.Lock()
+	remaining := len(destinationLocks.items)
+	destinationLocks.Unlock()
+	if remaining != 0 {
+		t.Fatalf("реестр Word-блокировок не очищен: %d", remaining)
 	}
 }
 

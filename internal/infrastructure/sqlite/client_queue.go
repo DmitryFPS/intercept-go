@@ -271,7 +271,7 @@ func (queue *ClientQueue) MarkExpired(ctx context.Context, eventID string, at ti
 		SET state='expired', expired_at=?, last_error=?
 		WHERE event_id=? AND state IN ('pending', 'uploaded')`,
 		at.UTC().Format(time.RFC3339Nano), reason, eventID)
-	return changedExactlyOnce(result, err, "отметить просроченное событие")
+	return terminalTransition(queue.db, ctx, result, err, eventID, "отметить просроченное событие")
 }
 
 func (queue *ClientQueue) MarkAcknowledged(ctx context.Context, eventID string, at time.Time) error {
@@ -281,18 +281,37 @@ func (queue *ClientQueue) MarkAcknowledged(ctx context.Context, eventID string, 
 		WHERE event_id = ? AND state IN ('pending', 'uploaded')`,
 		at.UTC().Format(time.RFC3339Nano), eventID,
 	)
-	if err == nil {
-		count, countErr := result.RowsAffected()
-		if countErr == nil && count == 0 {
-			var exists int
-			if queryErr := queue.db.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM client_events WHERE event_id = ? AND state = 'acknowledged'", eventID,
-			).Scan(&exists); queryErr == nil && exists == 1 {
-				return nil
-			}
-		}
+	return terminalTransition(queue.db, ctx, result, err, eventID, "подтвердить событие")
+}
+
+// terminalTransition не позволяет старому или повторному подтверждению
+// отравить Telegram offset. Уже завершённая либо очищенная запись безопасно
+// считается обработанной: изменить активную очередь таким ответом невозможно.
+func terminalTransition(
+	db *sql.DB, ctx context.Context, result sql.Result, err error, eventID, operation string,
+) error {
+	if err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
 	}
-	return changedExactlyOnce(result, err, "подтвердить событие")
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s: определить число строк: %w", operation, err)
+	}
+	if count == 1 {
+		return nil
+	}
+	var state string
+	err = db.QueryRowContext(ctx, "SELECT state FROM client_events WHERE event_id=?", eventID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%s: проверить завершённое событие: %w", operation, err)
+	}
+	if state == "acknowledged" || state == "expired" {
+		return nil
+	}
+	return fmt.Errorf("%s: событие находится в неожиданном состоянии %q", operation, state)
 }
 
 func (queue *ClientQueue) MarkRetry(ctx context.Context, eventID string, next time.Time, reason string) error {
