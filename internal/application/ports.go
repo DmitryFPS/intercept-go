@@ -66,6 +66,7 @@ type ServerStore interface {
 // RegisteredClient — доверенная запись точки на сервере.
 type RegisteredClient struct {
 	ID                string
+	Number            string
 	Name              string
 	SenderBotID       int64
 	SenderBotUsername string

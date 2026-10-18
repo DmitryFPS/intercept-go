@@ -30,7 +30,7 @@ func TestClientConfigRejectsUnknownFieldsAndBadKey(t *testing.T) {
 
 func validClientConfig() Client {
 	return Client{
-		Schema: ClientSchemaV1, GeneratedAt: time.Now(), ClientID: "textile", ClientName: "Текстиль",
+		Schema: ClientSchemaV1, GeneratedAt: time.Now(), ClientID: "textile", ClientNumber: "001", ClientName: "Текстиль",
 		EAVC: EAVC{SQLitePath: `C:\EAVC\main.sqlite`},
 		Transport: ClientTransport{
 			BotToken: "123456789:abcdefghijklmnopqrstuvwxyzABCDE", BotUsername: "textile_bot",

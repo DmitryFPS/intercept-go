@@ -142,6 +142,17 @@ func (client *Client) SendMessage(ctx context.Context, chatID int64, username, t
 	return message, err
 }
 
+// SendText публикует текст в указанную группу и тему.
+func (client *Client) SendText(ctx context.Context, chatID, threadID int64, text string) (Message, error) {
+	request := map[string]any{"chat_id": chatID, "text": text}
+	if threadID > 0 {
+		request["message_thread_id"] = threadID
+	}
+	var message Message
+	err := client.callJSON(ctx, "sendMessage", request, &message)
+	return message, err
+}
+
 func (client *Client) GetUpdates(ctx context.Context, offset int64, timeoutSeconds int) ([]Update, error) {
 	var updates []Update
 	err := client.callJSON(ctx, "getUpdates", map[string]any{

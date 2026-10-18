@@ -25,7 +25,7 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	store := &memoryServerStore{}
 	service := ServerService{
 		Clients: memoryRegistry{client: RegisteredClient{
-			ID: "textile", Name: "Текстиль", SenderBotID: 11, SenderBotUsername: "textile_bot",
+			ID: "textile", Number: "001", Name: "Текстиль", SenderBotID: 11, SenderBotUsername: "textile_bot",
 			ChatID: -1001, ThreadID: 42, KeyID: "key-1", Key: key, Active: true,
 		}},
 		Rules: memoryRules{rules: serverServiceRules()}, Store: store,

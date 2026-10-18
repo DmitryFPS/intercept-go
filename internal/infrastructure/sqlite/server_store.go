@@ -15,6 +15,7 @@ import (
 const serverMigration = `
 CREATE TABLE server_clients (
 	client_id TEXT PRIMARY KEY,
+	client_number TEXT NOT NULL UNIQUE,
 	name TEXT NOT NULL,
 	sender_bot_id INTEGER NOT NULL,
 	sender_bot_username TEXT NOT NULL,
@@ -74,10 +75,10 @@ func (store *ServerStore) Client(ctx context.Context, id string) (application.Re
 	var client application.RegisteredClient
 	var active int
 	err := store.db.QueryRowContext(ctx, `
-		SELECT client_id, name, sender_bot_id, sender_bot_username, chat_id,
+		SELECT client_id, client_number, name, sender_bot_id, sender_bot_username, chat_id,
 			thread_id, key_id, key_bytes, active
 		FROM server_clients WHERE client_id = ?`, id).Scan(
-		&client.ID, &client.Name, &client.SenderBotID, &client.SenderBotUsername,
+		&client.ID, &client.Number, &client.Name, &client.SenderBotID, &client.SenderBotUsername,
 		&client.ChatID, &client.ThreadID, &client.KeyID, &client.Key, &active,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -91,7 +92,7 @@ func (store *ServerStore) Client(ctx context.Context, id string) (application.Re
 }
 
 func (store *ServerStore) SaveClient(ctx context.Context, client application.RegisteredClient) error {
-	if client.ID == "" || client.Name == "" || client.SenderBotID == 0 || client.ChatID == 0 || client.ThreadID <= 0 {
+	if client.ID == "" || client.Number == "" || client.Name == "" || client.SenderBotID == 0 || client.ChatID == 0 || client.ThreadID <= 0 {
 		return errors.New("запись точки заполнена не полностью")
 	}
 	if len(client.Key) != 32 || client.KeyID == "" {
@@ -103,15 +104,15 @@ func (store *ServerStore) SaveClient(ctx context.Context, client application.Reg
 	}
 	_, err := store.db.ExecContext(ctx, `
 		INSERT INTO server_clients(
-			client_id, name, sender_bot_id, sender_bot_username, chat_id,
+			client_id, client_number, name, sender_bot_id, sender_bot_username, chat_id,
 			thread_id, key_id, key_bytes, active, updated_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(client_id) DO UPDATE SET
-			name=excluded.name, sender_bot_id=excluded.sender_bot_id,
+			client_number=excluded.client_number, name=excluded.name, sender_bot_id=excluded.sender_bot_id,
 			sender_bot_username=excluded.sender_bot_username, chat_id=excluded.chat_id,
 			thread_id=excluded.thread_id, key_id=excluded.key_id,
 			key_bytes=excluded.key_bytes, active=excluded.active, updated_at=excluded.updated_at`,
-		client.ID, client.Name, client.SenderBotID, client.SenderBotUsername,
+		client.ID, client.Number, client.Name, client.SenderBotID, client.SenderBotUsername,
 		client.ChatID, client.ThreadID, client.KeyID, client.Key, active,
 		time.Now().UTC().Format(time.RFC3339Nano),
 	)

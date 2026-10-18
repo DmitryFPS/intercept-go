@@ -19,6 +19,7 @@ type Client struct {
 	Schema       string          `json:"schema"`
 	GeneratedAt  time.Time       `json:"generated_at"`
 	ClientID     string          `json:"client_id"`
+	ClientNumber string          `json:"client_number"`
 	ClientName   string          `json:"client_name"`
 	EAVC         EAVC            `json:"eavc"`
 	Transport    ClientTransport `json:"transport"`
@@ -53,7 +54,7 @@ func (cfg Client) Validate() error {
 	if cfg.Schema != ClientSchemaV1 {
 		return fmt.Errorf("неподдерживаемая схема настроек %q", cfg.Schema)
 	}
-	if strings.TrimSpace(cfg.ClientID) == "" || strings.TrimSpace(cfg.ClientName) == "" {
+	if strings.TrimSpace(cfg.ClientID) == "" || strings.TrimSpace(cfg.ClientNumber) == "" || strings.TrimSpace(cfg.ClientName) == "" {
 		return errors.New("не заданы ID или название точки")
 	}
 	if strings.TrimSpace(cfg.EAVC.SQLitePath) == "" {

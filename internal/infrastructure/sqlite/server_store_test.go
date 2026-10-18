@@ -24,7 +24,7 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 		t.Fatalf("store: %v", err)
 	}
 	client := application.RegisteredClient{
-		ID: "textile", Name: "Текстиль", SenderBotID: 12, SenderBotUsername: "textile_bot",
+		ID: "textile", Number: "001", Name: "Текстиль", SenderBotID: 12, SenderBotUsername: "textile_bot",
 		ChatID: -1001, ThreadID: 10, KeyID: "key-1", Key: make([]byte, 32), Active: true,
 	}
 	if err := store.SaveClient(ctx, client); err != nil {
