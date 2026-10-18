@@ -11,6 +11,7 @@ import (
 	"intercept/internal/domain"
 )
 
+// После перезапуска очередь сохраняется, а повторно найденный перехват не добавляется второй раз.
 func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	t.Parallel()
 
@@ -84,6 +85,7 @@ func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	}
 }
 
+// Пока ранний перехват ждёт повторной отправки, более поздний перехват того же топика не должен его обогнать.
 func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {
 	t.Parallel()
 
@@ -136,6 +138,7 @@ func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {
 	}
 }
 
+// Новая редакция сохраняется даже тогда, когда оператор вернул текст к одному из прежних вариантов.
 func TestClientQueueAllowsContentToReturnToEarlierValueInNewSourceVersion(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -171,6 +174,7 @@ func TestClientQueueAllowsContentToReturnToEarlierValueInNewSourceVersion(t *tes
 	}
 }
 
+// Очистка удаляет только давно завершённые записи и сохраняет свежие, ожидающие и ошибочные события.
 func TestClientQueuePurgesOnlyOldTerminalEvents(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -213,6 +217,7 @@ func TestClientQueuePurgesOnlyOldTerminalEvents(t *testing.T) {
 	}
 }
 
+// Запоздалое или повторное подтверждение сервера безопасно завершает нужное событие и не портит очередь.
 func TestClientQueueConsumesLateAndDuplicateAcknowledgements(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

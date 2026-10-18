@@ -12,6 +12,7 @@ import (
 	"intercept/internal/application"
 )
 
+// Сервер отвергает файл от неизвестного бота ещё до загрузки его содержимого.
 func TestServerReceiverRejectsUnknownBotBeforeDownload(t *testing.T) {
 	t.Parallel()
 	var downloads atomic.Int32

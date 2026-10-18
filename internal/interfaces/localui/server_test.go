@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// Панель управления открывается только локально и только по выданной программой ссылке с секретным ключом.
 func TestProtectLocalUI(t *testing.T) {
 	const (
 		authority = "127.0.0.1:17631"

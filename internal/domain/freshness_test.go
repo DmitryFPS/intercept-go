@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// Перехват ровно на границе 30 минут ещё разрешён к отправке, а более старый уже должен быть отброшен.
 func TestFreshnessThirtyMinuteBoundary(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
@@ -35,6 +36,7 @@ func TestFreshnessThirtyMinuteBoundary(t *testing.T) {
 	}
 }
 
+// Перехват без времени, с ошибочным временем или временем из будущего нельзя считать пригодным к отправке.
 func TestFreshnessRejectsMissingInvalidAndFutureTime(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)

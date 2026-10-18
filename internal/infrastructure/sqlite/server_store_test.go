@@ -11,6 +11,7 @@ import (
 	"intercept/internal/domain"
 )
 
+// Повторно полученный пакет учитывается один раз, а незавершённый приём не оставляет половину данных.
 func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -69,6 +70,7 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	}
 }
 
+// После изменения маршрутов сервер хранит предыдущую версию правил, чтобы её можно было восстановить.
 func TestServerStoreKeepsRuleHistoryForRestore(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -105,6 +107,7 @@ func TestServerStoreKeepsRuleHistoryForRestore(t *testing.T) {
 	}
 }
 
+// Неизвестный отправитель попадает в карантин, а карантин сразу удерживается в заданных пределах.
 func TestServerStoreAuthorizesTransportAndCapsQuarantineImmediately(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -155,6 +158,7 @@ func TestServerStoreAuthorizesTransportAndCapsQuarantineImmediately(t *testing.T
 	}
 }
 
+// В одном топике сообщения идут по порядку, но задержка этого топика не останавливает остальные.
 func TestServerStorePreservesOrderInsideTopicWithoutBlockingOtherTopics(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -222,6 +226,7 @@ func TestServerStorePreservesOrderInsideTopicWithoutBlockingOtherTopics(t *testi
 	}
 }
 
+// Плановая очистка сохраняет ожидающие и свежие записи, удаляя только устаревшие завершённые данные.
 func TestServerStoreMaintenanceKeepsPendingAndRecentData(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

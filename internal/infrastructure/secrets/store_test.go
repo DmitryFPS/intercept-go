@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// Секретные данные после сохранения должны читаться без искажений и не лежать на диске открытым текстом.
 func TestStoreRoundTrip(t *testing.T) {
 	t.Parallel()
 

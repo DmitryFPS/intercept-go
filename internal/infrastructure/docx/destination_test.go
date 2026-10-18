@@ -16,6 +16,7 @@ import (
 	"intercept/internal/domain"
 )
 
+// Каждый временной блок перехвата создаёт один Word-документ, а повторная обработка не порождает копий.
 func TestDestinationBuildsOneDocumentPerTimeBlockWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 
@@ -64,6 +65,7 @@ func TestDestinationBuildsOneDocumentPerTimeBlockWithoutDuplicates(t *testing.T)
 	}
 }
 
+// Отложенный перехват сохраняет пометку в названии радиосети и выглядит как документ старой программы.
 func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 	t.Parallel()
 
@@ -118,6 +120,7 @@ func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 	}
 }
 
+// После правки перехвата старые документы удаляются, а вместо них появляются документы с новым содержимым и пометкой о редакции.
 func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 	t.Parallel()
 
@@ -157,6 +160,7 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 	}
 }
 
+// Если работа с одним документом зависла, документ для другого направления должен создаться без ожидания.
 func TestDestinationDoesNotWaitBehindStuckOperation(t *testing.T) {
 	t.Parallel()
 	statePath := filepath.Join(t.TempDir(), "word-state.json")
@@ -186,6 +190,7 @@ func TestDestinationDoesNotWaitBehindStuckOperation(t *testing.T) {
 	}
 }
 
+// Подозрительно большой шаблон Word отклоняется до распаковки и не может занять всю память или диск.
 func TestBuildRejectsDecompressionBomb(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "oversized.docx")

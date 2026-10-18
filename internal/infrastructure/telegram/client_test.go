@@ -10,6 +10,7 @@ import (
 	"testing"
 )
 
+// Клиент отправляет пакет именно в настроенный транспортный чат и в топик своей точки.
 func TestTelegramClientSendsDocumentToExactTopic(t *testing.T) {
 	t.Parallel()
 
@@ -50,6 +51,7 @@ func TestTelegramClientSendsDocumentToExactTopic(t *testing.T) {
 	}
 }
 
+// Даже при ошибке Telegram секретный токен бота не должен попасть в журнал или сообщение оператору.
 func TestTelegramClientDoesNotExposeTokenInError(t *testing.T) {
 	t.Parallel()
 

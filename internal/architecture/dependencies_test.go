@@ -13,6 +13,7 @@ import (
 // TestDependencyDirection не даёт инфраструктуре незаметно просочиться в центр
 // приложения. Такой тест полезнее диаграммы: он падает в том же коммите, где
 // нарушено направление зависимостей.
+// Внутренняя логика программы не должна зависеть от Telegram, SQLite, Word и экранных форм.
 func TestDependencyDirection(t *testing.T) {
 	t.Parallel()
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))

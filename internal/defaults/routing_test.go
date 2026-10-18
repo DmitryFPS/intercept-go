@@ -7,6 +7,7 @@ import (
 	"intercept/internal/domain"
 )
 
+// Начальные правила должны точно соответствовать согласованным топикам Шабашки, Аэродрома и отправке документов.
 func TestInitialRulesMatchApprovedExceptions(t *testing.T) {
 	t.Parallel()
 	rules, err := InitialRules()

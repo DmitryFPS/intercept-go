@@ -10,6 +10,7 @@ import (
 	"intercept/internal/protocol"
 )
 
+// Если файл передан в транспортный чат, он остаётся в очереди до отдельного подтверждения сервера.
 func TestClientServiceSeparatesUploadFromServerAcknowledgement(t *testing.T) {
 	t.Parallel()
 
@@ -47,6 +48,7 @@ func TestClientServiceSeparatesUploadFromServerAcknowledgement(t *testing.T) {
 	}
 }
 
+// При первом запуске клиент запоминает старые записи EAVC и отправляет только появившиеся после запуска.
 func TestClientServiceSkipsExistingRowsOnFirstStart(t *testing.T) {
 	t.Parallel()
 

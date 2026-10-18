@@ -8,6 +8,7 @@ import (
 	"intercept/internal/domain"
 )
 
+// Сервер должен прочитать неизменённый пакет и отвергнуть его, если содержимое было подменено после отправки.
 func TestEnvelopeRoundTripAndTamperProtection(t *testing.T) {
 	t.Parallel()
 

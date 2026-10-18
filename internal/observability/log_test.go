@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// Журнал не должен раскрывать токены и ключи, а старые записи должны переноситься в ограниченное число архивов.
 func TestLoggerRedactsSecretsAndRotates(t *testing.T) {
 	t.Parallel()
 

@@ -13,6 +13,7 @@ import (
 	"intercept/internal/protocol"
 )
 
+// Сервер принимает файл только от зарегистрированного бота и не доверяет одному имени клиента внутри файла.
 func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	t.Parallel()
 
@@ -66,6 +67,7 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	}
 }
 
+// Ошибка одной конечной группы не должна мешать отправке того же перехвата в остальные назначенные места.
 func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 	t.Parallel()
 
@@ -89,6 +91,7 @@ func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 	}
 }
 
+// Зависшая отправка в один топик не должна останавливать сообщения для другого топика.
 func TestDeliveryServiceDoesNotLetSlowStreamBlockAnother(t *testing.T) {
 	t.Parallel()
 	queue := &memoryDeliveryQueue{jobs: []DeliveryJob{

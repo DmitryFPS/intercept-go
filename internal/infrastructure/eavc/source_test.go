@@ -11,6 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Клиент читает нужные поля из действующей и расширенной базы EAVC, не изменяя саму базу.
 func TestSourceReadsCurrentAndFutureSchemaReadOnly(t *testing.T) {
 	t.Parallel()
 
@@ -63,6 +64,7 @@ func TestSourceReadsCurrentAndFutureSchemaReadOnly(t *testing.T) {
 	}
 }
 
+// Название с конечной пометкой «отложенный режим» распознаётся как обычный отложенный перехват.
 func TestSourceInfersDeferredModeFromUnitName(t *testing.T) {
 	t.Parallel()
 

@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+// Клиент отклоняет файл настроек с неизвестными полями или испорченным ключом, чтобы не работать частично и непредсказуемо.
 func TestClientConfigRejectsUnknownFieldsAndBadKey(t *testing.T) {
 	t.Parallel()
 

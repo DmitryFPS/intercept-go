@@ -19,6 +19,7 @@ type recordingGateway struct {
 	events []domain.Event
 }
 
+// Одновременные пакеты от трёх точек принимаются независимо и ни одна точка не блокирует другие.
 func TestThreePointsCanBeAcceptedConcurrently(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -102,6 +103,7 @@ func (gateway *recordingGateway) Deliver(_ context.Context, event domain.Event, 
 	return nil
 }
 
+// Настоящий зашифрованный пакет проходит весь путь до назначений и при повторном получении не рассылается заново.
 func TestEncryptedPacketIsAcceptedRoutedAndDeliveredOnce(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

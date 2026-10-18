@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// Номер события должен содержать время создания и соответствовать принятому формату UUID версии 7.
 func TestUUIDv7ContainsTimestampVersionAndVariant(t *testing.T) {
 	t.Parallel()
 

@@ -2,6 +2,7 @@ package domain
 
 import "testing"
 
+// Несколько сообщений с одинаковым временем должны сохраниться отдельными блоками и в исходном порядке.
 func TestSplitContentBlocksKeepsOrderAndDuplicateTimes(t *testing.T) {
 	t.Parallel()
 	blocks := SplitContentBlocks("заголовок\n12.00\n-Первое (123)\n12.00\n-Второе (456)")

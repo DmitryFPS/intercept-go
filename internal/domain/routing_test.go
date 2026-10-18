@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// Ошибку оператора в пробелах нельзя незаметно исправлять: такое название должно остаться неизвестным.
 func TestNormalizeUnitNameDoesNotRepairMissingSpaces(t *testing.T) {
 	t.Parallel()
 
@@ -18,6 +19,7 @@ func TestNormalizeUnitNameDoesNotRepairMissingSpaces(t *testing.T) {
 	}
 }
 
+// Неизвестное подразделение уходит только по явно настроенному правилу для новых и ошибочных названий.
 func TestRuleSetRoutesUnknownOnlyByUnknownRow(t *testing.T) {
 	t.Parallel()
 
@@ -41,6 +43,7 @@ func TestRuleSetRoutesUnknownOnlyByUnknownRow(t *testing.T) {
 	}
 }
 
+// Перехват, назначенный только в Шабашку, не должен создавать документ для удалённой точки.
 func TestRuleSetDoesNotCreateWordForShabashkaPosition(t *testing.T) {
 	t.Parallel()
 
@@ -57,6 +60,7 @@ func TestRuleSetDoesNotCreateWordForShabashkaPosition(t *testing.T) {
 	}
 }
 
+// Пометка «отложенный режим» не блокирует перехват и не меняет назначенные ему группы и документы.
 func TestDeferredSuffixKeepsNormalDestinations(t *testing.T) {
 	t.Parallel()
 
@@ -75,6 +79,7 @@ func TestDeferredSuffixKeepsNormalDestinations(t *testing.T) {
 	}
 }
 
+// Для поиска правила снимается только конечная пометка «отложенный режим», остальное название остаётся без изменений.
 func TestRoutingUnitNameRemovesOnlyTrailingDeferredMarker(t *testing.T) {
 	t.Parallel()
 

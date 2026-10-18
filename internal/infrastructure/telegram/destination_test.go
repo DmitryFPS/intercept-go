@@ -14,6 +14,7 @@ import (
 	"intercept/internal/domain"
 )
 
+// Неизвестное название выделяется заметной пометкой, а исходный ввод оператора остаётся виден без исправлений.
 func TestFormatReviewIsVisibleAndKeepsOriginalName(t *testing.T) {
 	t.Parallel()
 
@@ -32,6 +33,7 @@ func TestFormatReviewIsVisibleAndKeepsOriginalName(t *testing.T) {
 	}
 }
 
+// Сообщение сохраняет привычные заголовок и позывные в том же виде, что использовала старая программа.
 func TestFormatEventMatchesLegacyHeaderAndCallsigns(t *testing.T) {
 	t.Parallel()
 	event := domain.Event{
@@ -52,6 +54,7 @@ func TestFormatEventMatchesLegacyHeaderAndCallsigns(t *testing.T) {
 	}
 }
 
+// При изменении перехвата существующие сообщения редактируются или удаляются, а дубликаты не создаются.
 func TestDestinationEditsAndDeletesBlocksWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 	var methods []string
@@ -104,6 +107,7 @@ func TestDestinationEditsAndDeletesBlocksWithoutDuplicates(t *testing.T) {
 	}
 }
 
+// Новое сообщение создаётся только когда Telegram окончательно запретил правку старого; временная ошибка приводит к повтору.
 func TestDestinationSendsReplacementOnlyAfterTerminalEditError(t *testing.T) {
 	t.Parallel()
 	var methods []string
@@ -147,6 +151,7 @@ func TestDestinationSendsReplacementOnlyAfterTerminalEditError(t *testing.T) {
 	}
 }
 
+// Сведения о давно отправленных сообщениях удаляются, а свежие остаются доступными для последующего редактирования.
 func TestDestinationStateDropsRecordsOlderThanRetention(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "state.json")

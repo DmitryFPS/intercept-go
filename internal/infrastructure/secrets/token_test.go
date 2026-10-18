@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// Одна установка программы повторно использует тот же защищённый ключ доступа к локальной панели.
 func TestLoadOrCreateTokenPersistsProtectedValue(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "access.dat")
 	first, err := LoadOrCreateToken(path, "")
@@ -21,6 +22,7 @@ func TestLoadOrCreateTokenPersistsProtectedValue(t *testing.T) {
 	}
 }
 
+// Слишком короткий вручную заданный ключ доступа отклоняется как небезопасный.
 func TestLoadOrCreateTokenRejectsShortOverride(t *testing.T) {
 	if _, err := LoadOrCreateToken(filepath.Join(t.TempDir(), "access.dat"), "short"); err == nil {
 		t.Fatal("короткий тестовый токен должен быть отклонён")
