@@ -3,6 +3,7 @@ package application
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -62,7 +63,9 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 		t.Fatal("незарегистрированный ключ должен быть отклонён")
 	}
 	_ = json.Unmarshal(payload, &changed)
-	changed.Ciphertext = changed.Ciphertext[:len(changed.Ciphertext)-2] + "AA"
+	ciphertext, _ := base64.RawStdEncoding.DecodeString(changed.Ciphertext)
+	ciphertext[len(ciphertext)-1] ^= 0xff
+	changed.Ciphertext = base64.RawStdEncoding.EncodeToString(ciphertext)
 	packet.Payload, _ = json.Marshal(changed)
 	if _, err := service.Receive(context.Background(), packet); err == nil {
 		t.Fatal("повреждённый шифротекст должен быть отклонён")
