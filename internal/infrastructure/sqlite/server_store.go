@@ -49,6 +49,7 @@ func (store *ServerStore) Close() error {
 	return store.db.Close()
 }
 
+// Client возвращает одну зарегистрированную точку вместе с расшифрованным ключом.
 func (store *ServerStore) Client(ctx context.Context, id string) (application.RegisteredClient, error) {
 	var client application.RegisteredClient
 	var active int
@@ -73,6 +74,7 @@ func (store *ServerStore) Client(ctx context.Context, id string) (application.Re
 	return client, nil
 }
 
+// SaveClient создаёт или безопасно обновляет регистрацию одной точки.
 func (store *ServerStore) SaveClient(ctx context.Context, client application.RegisteredClient) error {
 	if client.ID == "" || client.Number == "" || client.Name == "" ||
 		client.SenderBotID == 0 || client.ChatID == 0 || client.ThreadID <= 0 {
@@ -132,6 +134,7 @@ func normalizeTelegramUsername(value string) string {
 	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(value), "@"))
 }
 
+// Clients возвращает список точек без извлечения их ключей из хранилища.
 func (store *ServerStore) Clients(ctx context.Context) ([]application.RegisteredClient, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT client_id, client_number, name, sender_bot_id, sender_bot_username,
@@ -158,6 +161,7 @@ func (store *ServerStore) Clients(ctx context.Context) ([]application.Registered
 	return clients, rows.Err()
 }
 
+// Value читает небольшой технический параметр сервера.
 func (store *ServerStore) Value(ctx context.Context, name string) (string, bool, error) {
 	var value string
 	err := store.db.QueryRowContext(ctx, "SELECT value FROM server_values WHERE name=?", name).Scan(&value)
@@ -170,6 +174,7 @@ func (store *ServerStore) Value(ctx context.Context, name string) (string, bool,
 	return value, true, nil
 }
 
+// SaveValue сохраняет небольшой технический параметр сервера.
 func (store *ServerStore) SaveValue(ctx context.Context, name, value string) error {
 	_, err := store.db.ExecContext(ctx, `
 		INSERT INTO server_values(name,value) VALUES(?,?)
@@ -177,6 +182,7 @@ func (store *ServerStore) SaveValue(ctx context.Context, name, value string) err
 	return err
 }
 
+// Quarantine сохраняет отклонённый пакет в защищённом ограниченном хранилище.
 func (store *ServerStore) Quarantine(ctx context.Context, packet application.IncomingPacket, reason string) error {
 	protectedPayload, err := protectDatabaseValue(packet.Payload)
 	if err != nil {

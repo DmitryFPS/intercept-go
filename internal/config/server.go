@@ -48,6 +48,7 @@ type DestinationConfig struct {
 	Password string                 `json:"password,omitempty"`
 }
 
+// Validate проверяет транспорт и все направления до запуска сервера.
 func (cfg Server) Validate() error {
 	if cfg.Schema != ServerSchemaV1 {
 		return fmt.Errorf("неподдерживаемая схема сервера %q", cfg.Schema)

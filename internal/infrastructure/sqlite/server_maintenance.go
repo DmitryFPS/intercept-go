@@ -87,6 +87,7 @@ func (store *ServerStore) Compact(ctx context.Context) error {
 	return compact(ctx, store.db)
 }
 
+// Stats считает состояния сервера без чтения содержимого перехватов.
 func (store *ServerStore) Stats(ctx context.Context) (ServerStats, error) {
 	var stats ServerStats
 	queries := []struct {

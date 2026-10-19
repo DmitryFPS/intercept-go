@@ -70,6 +70,7 @@ type ClientAuthenticity struct {
 	Signature       string `json:"signature"`
 }
 
+// Validate проверяет полноту настроек до их сохранения или запуска клиента.
 func (cfg Client) Validate() error {
 	if cfg.Schema != ClientSchemaV2 {
 		return fmt.Errorf("неподдерживаемая схема настроек %q", cfg.Schema)
@@ -129,6 +130,7 @@ func (cfg Client) EAVCTimeZone() string {
 	return "Europe/Moscow"
 }
 
+// IssuerPublicKey возвращает проверенный открытый ключ сервера-издателя.
 func (cfg Client) IssuerPublicKey() (ed25519.PublicKey, error) {
 	key, err := base64.RawStdEncoding.DecodeString(cfg.Authenticity.IssuerPublicKey)
 	if err != nil || len(key) != ed25519.PublicKeySize {
@@ -199,6 +201,7 @@ func SameIssuer(left, right ed25519.PublicKey) bool {
 	return len(left) == len(right) && subtle.ConstantTimeCompare(left, right) == 1
 }
 
+// Key декодирует индивидуальный ключ шифрования транспортных пакетов точки.
 func (cfg Client) Key() ([]byte, error) {
 	key, err := base64.RawStdEncoding.DecodeString(cfg.Cryptography.KeyBase64)
 	if err != nil {

@@ -25,6 +25,7 @@ type RotatingWriter struct {
 	size int64
 }
 
+// Write добавляет запись и заранее ограничивает размер текущего журнала.
 func (writer *RotatingWriter) Write(payload []byte) (int, error) {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
@@ -49,6 +50,7 @@ func (writer *RotatingWriter) Write(payload []byte) (int, error) {
 	return written, err
 }
 
+// Close закрывает файл журнала при штатной остановке программы.
 func (writer *RotatingWriter) Close() error {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
@@ -113,10 +115,12 @@ func NewLogger(path, component string) (*slog.Logger, io.Closer, error) {
 
 type redactingHandler struct{ next slog.Handler }
 
+// Enabled передаёт проверку уровня базовому обработчику журнала.
 func (handler *redactingHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return handler.next.Enabled(ctx, level)
 }
 
+// Handle скрывает секреты во всех полях перед записью на диск.
 func (handler *redactingHandler) Handle(ctx context.Context, record slog.Record) error {
 	clean := slog.NewRecord(record.Time, record.Level, redact(record.Message), record.PC)
 	record.Attrs(func(attribute slog.Attr) bool {
@@ -126,6 +130,7 @@ func (handler *redactingHandler) Handle(ctx context.Context, record slog.Record)
 	return handler.next.Handle(ctx, clean)
 }
 
+// WithAttrs очищает постоянные поля до их привязки к журналу.
 func (handler *redactingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	clean := make([]slog.Attr, 0, len(attrs))
 	for _, attribute := range attrs {
@@ -153,6 +158,7 @@ func redactAttribute(attribute slog.Attr) slog.Attr {
 	return attribute
 }
 
+// WithGroup сохраняет стандартное группирование структурированных полей.
 func (handler *redactingHandler) WithGroup(name string) slog.Handler {
 	return &redactingHandler{next: handler.next.WithGroup(name)}
 }

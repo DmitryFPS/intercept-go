@@ -54,6 +54,7 @@ func (transport *ClientTransport) SendProbe(ctx context.Context, clientID string
 	return probeID, nil
 }
 
+// Send загружает один зашифрованный пакет в тему зарегистрированной точки.
 func (transport *ClientTransport) Send(ctx context.Context, envelope protocol.Envelope) (int64, error) {
 	payload, err := json.Marshal(envelope)
 	if err != nil {
@@ -69,6 +70,7 @@ func (transport *ClientTransport) Send(ctx context.Context, envelope protocol.En
 	return message.MessageID, nil
 }
 
+// Acknowledgements принимает только машинные ответы указанного серверного бота.
 func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset int64) ([]application.Acknowledgement, int64, error) {
 	updates, err := transport.API.GetUpdates(ctx, offset, 20)
 	if err != nil {

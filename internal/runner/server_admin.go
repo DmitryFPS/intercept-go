@@ -199,6 +199,7 @@ func (server *Server) AddClient(ctx context.Context, request config.ClientReques
 	return payload, nil
 }
 
+// Clients возвращает зарегистрированные точки без их ключей шифрования.
 func (server *Server) Clients(ctx context.Context) ([]application.RegisteredClient, error) {
 	return server.Store.Clients(ctx)
 }
@@ -221,10 +222,12 @@ func (server *Server) ClientConfig(ctx context.Context, clientID string) ([]byte
 	return payload, client, nil
 }
 
+// Rules возвращает действующую опубликованную матрицу маршрутов.
 func (server *Server) Rules(ctx context.Context) (domain.RuleSet, error) {
 	return server.Store.ActiveRules(ctx)
 }
 
+// PublishRules проверяет и публикует матрицу как новую целостную версию.
 func (server *Server) PublishRules(ctx context.Context, rules domain.RuleSet, author string) error {
 	canonical, err := canonicalRules(rules)
 	if err != nil {
@@ -241,10 +244,12 @@ func (server *Server) PublishRules(ctx context.Context, rules domain.RuleSet, au
 	return server.Store.PublishRules(ctx, rules, author)
 }
 
+// RuleHistory показывает версии маршрутов без раскрытия секретных настроек.
 func (server *Server) RuleHistory(ctx context.Context) ([]stateDB.RuleVersion, error) {
 	return server.Store.RuleHistory(ctx)
 }
 
+// RestoreRules публикует выбранную старую матрицу как новую версию.
 func (server *Server) RestoreRules(ctx context.Context, version int64, author string) error {
 	rules, err := server.Store.RulesByVersion(ctx, version)
 	if err != nil {
@@ -277,6 +282,7 @@ func canonicalRules(rules domain.RuleSet) (domain.RuleSet, error) {
 	return rules, nil
 }
 
+// SafeDestinations возвращает направления без токенов и паролей.
 func (server *Server) SafeDestinations() map[string]map[string]any {
 	server.mu.RLock()
 	defer server.mu.RUnlock()

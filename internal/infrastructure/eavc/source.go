@@ -73,6 +73,7 @@ func Open(ctx context.Context, path string) (*Source, error) {
 	}, nil
 }
 
+// Close освобождает соединение с базой EAVC, не изменяя её файл.
 func (source *Source) Close() error {
 	return source.db.Close()
 }

@@ -115,6 +115,7 @@ func NewServer(ctx context.Context, baseDir, version string, logger *slog.Logger
 	return server, nil
 }
 
+// Start запускает приём, доставку и обслуживание до отмены контекста.
 func (server *Server) Start(ctx context.Context) {
 	rootContext, rootStop := context.WithCancel(ctx)
 	server.mu.Lock()
@@ -137,6 +138,7 @@ func (server *Server) Start(ctx context.Context) {
 	}()
 }
 
+// Close штатно останавливает фоновые процессы и закрывает хранилище.
 func (server *Server) Close() {
 	server.mu.Lock()
 	rootStop := server.rootStop
@@ -150,6 +152,7 @@ func (server *Server) Close() {
 	_ = server.Store.Close()
 }
 
+// Status возвращает безопасный снимок состояния для экрана администратора.
 func (server *Server) Status() ServerStatus {
 	server.mu.RLock()
 	defer server.mu.RUnlock()

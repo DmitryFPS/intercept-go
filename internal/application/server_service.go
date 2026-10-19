@@ -43,6 +43,8 @@ type ServerService struct {
 	DeliveryWindow time.Duration
 }
 
+// Receive проверяет происхождение и содержимое пакета, после чего надёжно
+// сохраняет событие вместе с рассчитанными маршрутами.
 func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket) (PacketResult, error) {
 	if len(packet.Payload) == 0 || len(packet.Payload) > 4*1024*1024 {
 		return PacketResult{}, errors.New("недопустимый размер транспортного пакета")
@@ -140,6 +142,8 @@ type DeliveryService struct {
 	Logger         *slog.Logger
 }
 
+// RunOnce выполняет доступные задания параллельно, сохраняя независимое
+// состояние каждого получателя.
 func (service *DeliveryService) RunOnce(ctx context.Context, limit int) (int, error) {
 	if service.Now == nil {
 		service.Now = time.Now

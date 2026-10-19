@@ -115,6 +115,7 @@ func backfillClientStreamKeys(ctx context.Context, db *sql.DB) error {
 	return tx.Commit()
 }
 
+// Enqueue сохраняет событие до любых сетевых действий и подавляет точный повтор.
 func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error {
 	if err := event.Validate(); err != nil {
 		return err
@@ -171,6 +172,7 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 	return nil
 }
 
+// Pending выбирает только головы независимых очередей подразделений.
 func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time) ([]application.QueuedEvent, error) {
 	if limit <= 0 || limit > 1000 {
 		return nil, errors.New("лимит очереди должен быть от 1 до 1000")
@@ -222,6 +224,7 @@ func clientStreamKey(event domain.Event) string {
 	return "name:" + domain.NormalizeUnitName(domain.RoutingUnitName(event.Position.UnitName))
 }
 
+// MarkUploaded запоминает загрузку в транспорт, не считая её приёмом сервером.
 func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, telegramMessageID int64) error {
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
@@ -234,6 +237,7 @@ func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, tele
 	return changedExactlyOnce(result, err, "отметить загрузку")
 }
 
+// ExpireDue завершает события, которые уже нельзя впервые передавать.
 func (queue *ClientQueue) ExpireDue(ctx context.Context, now time.Time) (int, error) {
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
@@ -248,6 +252,7 @@ func (queue *ClientQueue) ExpireDue(ctx context.Context, now time.Time) (int, er
 	return int(count), err
 }
 
+// MarkExpired сохраняет окончательную причину отказа от передачи события.
 func (queue *ClientQueue) MarkExpired(ctx context.Context, eventID string, at time.Time, reason string) error {
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
@@ -257,6 +262,7 @@ func (queue *ClientQueue) MarkExpired(ctx context.Context, eventID string, at ti
 	return terminalTransition(queue.db, ctx, result, err, eventID, "отметить просроченное событие")
 }
 
+// MarkAcknowledged завершает событие только после ответа сервера.
 func (queue *ClientQueue) MarkAcknowledged(ctx context.Context, eventID string, at time.Time) error {
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
@@ -297,6 +303,7 @@ func terminalTransition(
 	return fmt.Errorf("%s: событие находится в неожиданном состоянии %q", operation, state)
 }
 
+// MarkRetry сохраняет ошибку и время следующей разрешённой попытки.
 func (queue *ClientQueue) MarkRetry(ctx context.Context, eventID string, next time.Time, reason string) error {
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
@@ -307,6 +314,7 @@ func (queue *ClientQueue) MarkRetry(ctx context.Context, eventID string, next ti
 	return changedExactlyOnce(result, err, "запланировать повтор")
 }
 
+// Cursor возвращает последнюю надёжно обработанную позицию чтения EAVC.
 func (queue *ClientQueue) Cursor(ctx context.Context, name string) (application.Cursor, error) {
 	var cursor application.Cursor
 	err := queue.db.QueryRowContext(ctx,
@@ -321,6 +329,7 @@ func (queue *ClientQueue) Cursor(ctx context.Context, name string) (application.
 	return cursor, nil
 }
 
+// SaveCursor атомарно сохраняет новую позицию чтения EAVC.
 func (queue *ClientQueue) SaveCursor(ctx context.Context, name string, cursor application.Cursor) error {
 	_, err := queue.db.ExecContext(ctx, `
 		INSERT INTO client_cursors(name, updated_at, record_id) VALUES(?, ?, ?)
@@ -333,6 +342,7 @@ func (queue *ClientQueue) SaveCursor(ctx context.Context, name string, cursor ap
 	return nil
 }
 
+// Value читает небольшой технический параметр клиента.
 func (queue *ClientQueue) Value(ctx context.Context, name string) (string, bool, error) {
 	var value string
 	err := queue.db.QueryRowContext(ctx, "SELECT value FROM client_values WHERE name = ?", name).Scan(&value)
@@ -345,6 +355,7 @@ func (queue *ClientQueue) Value(ctx context.Context, name string) (string, bool,
 	return value, true, nil
 }
 
+// SaveValue сохраняет небольшой технический параметр клиента.
 func (queue *ClientQueue) SaveValue(ctx context.Context, name, value string) error {
 	_, err := queue.db.ExecContext(ctx, `
 		INSERT INTO client_values(name, value) VALUES(?, ?)
@@ -355,6 +366,7 @@ func (queue *ClientQueue) SaveValue(ctx context.Context, name, value string) err
 	return nil
 }
 
+// Stats считает состояния очереди без раскрытия содержимого перехватов.
 func (queue *ClientQueue) Stats(ctx context.Context) (ClientStats, error) {
 	rows, err := queue.db.QueryContext(ctx, "SELECT state, COUNT(*) FROM client_events GROUP BY state")
 	if err != nil {

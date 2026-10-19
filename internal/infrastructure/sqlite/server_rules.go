@@ -19,6 +19,7 @@ type RuleVersion struct {
 	Active    bool      `json:"active"`
 }
 
+// ActiveRules возвращает единственную действующую версию маршрутов.
 func (store *ServerStore) ActiveRules(ctx context.Context) (domain.RuleSet, error) {
 	var payload []byte
 	err := store.db.QueryRowContext(ctx,
@@ -40,6 +41,7 @@ func (store *ServerStore) ActiveRules(ctx context.Context) (domain.RuleSet, erro
 	return rules, nil
 }
 
+// RuleHistory возвращает версии маршрутов от новой к старой.
 func (store *ServerStore) RuleHistory(ctx context.Context) ([]RuleVersion, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT version, author, created_at, active
@@ -63,6 +65,7 @@ func (store *ServerStore) RuleHistory(ctx context.Context) ([]RuleVersion, error
 	return result, rows.Err()
 }
 
+// RulesByVersion загружает выбранную сохранённую матрицу маршрутов.
 func (store *ServerStore) RulesByVersion(ctx context.Context, version int64) (domain.RuleSet, error) {
 	var payload []byte
 	if err := store.db.QueryRowContext(ctx,
@@ -79,6 +82,7 @@ func (store *ServerStore) RulesByVersion(ctx context.Context, version int64) (do
 	return rules, nil
 }
 
+// NextRuleVersion выдаёт следующий последовательный номер публикации.
 func (store *ServerStore) NextRuleVersion(ctx context.Context) (int64, error) {
 	var version int64
 	if err := store.db.QueryRowContext(ctx,
@@ -89,6 +93,7 @@ func (store *ServerStore) NextRuleVersion(ctx context.Context) (int64, error) {
 	return version, nil
 }
 
+// PublishRules атомарно отключает прежнюю и включает новую версию маршрутов.
 func (store *ServerStore) PublishRules(ctx context.Context, rules domain.RuleSet, author string) error {
 	if err := rules.Validate(); err != nil {
 		return err

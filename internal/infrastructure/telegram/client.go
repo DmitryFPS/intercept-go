@@ -92,6 +92,7 @@ func NewWithBaseURL(token, baseURL string, httpClient *http.Client) (*Client, er
 	return &Client{token: token, baseURL: strings.TrimRight(baseURL, "/"), httpClient: httpClient}, nil
 }
 
+// GetMe проверяет токен и возвращает неизменяемый ID бота.
 func (client *Client) GetMe(ctx context.Context) (User, error) {
 	var user User
 	if err := client.callJSON(ctx, "getMe", nil, &user); err != nil {
@@ -100,10 +101,12 @@ func (client *Client) GetMe(ctx context.Context) (User, error) {
 	return user, nil
 }
 
+// DeleteWebhook освобождает Bot API для получения обновлений методом polling.
 func (client *Client) DeleteWebhook(ctx context.Context, dropPending bool) error {
 	return client.callJSON(ctx, "deleteWebhook", map[string]any{"drop_pending_updates": dropPending}, nil)
 }
 
+// SendDocument загружает ограниченный программой служебный файл в группу.
 func (client *Client) SendDocument(ctx context.Context, chatID, threadID int64, filename string, payload []byte, caption string) (Message, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -140,6 +143,7 @@ func (client *Client) SendDocument(ctx context.Context, chatID, threadID int64, 
 	return message, nil
 }
 
+// SendMessage отправляет личное машинное подтверждение указанному боту.
 func (client *Client) SendMessage(ctx context.Context, chatID int64, username, text string) (Message, error) {
 	target := any(chatID)
 	if strings.TrimSpace(username) != "" {
@@ -182,6 +186,7 @@ func (client *Client) EditHTML(ctx context.Context, chatID, messageID int64, tex
 	}, nil)
 }
 
+// DeleteMessage удаляет обработанный служебный либо проверочный материал.
 func (client *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
 	return client.callJSON(ctx, "deleteMessage", map[string]any{
 		"chat_id": chatID, "message_id": messageID,
@@ -198,6 +203,7 @@ func (client *Client) TestTopic(ctx context.Context, chatID, threadID int64) err
 	return nil
 }
 
+// GetUpdates читает очередную порцию обновлений с долговременным смещением.
 func (client *Client) GetUpdates(ctx context.Context, offset int64, timeoutSeconds int) ([]Update, error) {
 	var updates []Update
 	err := client.callJSON(ctx, "getUpdates", map[string]any{
@@ -206,6 +212,7 @@ func (client *Client) GetUpdates(ctx context.Context, offset int64, timeoutSecon
 	return updates, err
 }
 
+// GetFile получает проверяемый Telegram-путь служебного файла.
 func (client *Client) GetFile(ctx context.Context, fileID string) (File, error) {
 	var file File
 	if err := client.callJSON(ctx, "getFile", map[string]any{"file_id": fileID}, &file); err != nil {
@@ -214,6 +221,7 @@ func (client *Client) GetFile(ctx context.Context, fileID string) (File, error) 
 	return file, nil
 }
 
+// DownloadFile скачивает файл с жёстким ограничением размера.
 func (client *Client) DownloadFile(ctx context.Context, filePath string, maxBytes int64) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		client.baseURL+"/file/bot"+client.token+"/"+strings.TrimLeft(filePath, "/"), nil)

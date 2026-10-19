@@ -161,6 +161,7 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 	return true, nil
 }
 
+// PendingDeliveries выбирает головы независимых очередей конечных получателей.
 func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now time.Time) ([]application.DeliveryJob, error) {
 	if limit <= 0 || limit > 1000 {
 		return nil, errors.New("лимит заданий должен быть от 1 до 1000")
@@ -216,6 +217,7 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 	return jobs, rows.Err()
 }
 
+// MarkDelivered окончательно фиксирует успешную доставку одному получателю.
 func (store *ServerStore) MarkDelivered(ctx context.Context, eventID, destinationID string, at time.Time) error {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE delivery_jobs SET state='delivered', delivered_at=?, last_error=''
@@ -224,6 +226,7 @@ func (store *ServerStore) MarkDelivered(ctx context.Context, eventID, destinatio
 	return changedExactlyOnce(result, err, "подтвердить внешнюю доставку")
 }
 
+// MarkDeliveryExpired завершает направление после истечения серверного окна.
 func (store *ServerStore) MarkDeliveryExpired(
 	ctx context.Context, eventID, destinationID string, at time.Time, reason string,
 ) error {
@@ -234,6 +237,7 @@ func (store *ServerStore) MarkDeliveryExpired(
 	return changedExactlyOnce(result, err, "завершить просроченную доставку")
 }
 
+// MarkDeliveryRetry сохраняет ошибку отдельного направления и время повтора.
 func (store *ServerStore) MarkDeliveryRetry(ctx context.Context, eventID, destinationID string, next time.Time, reason string) error {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE delivery_jobs

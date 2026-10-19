@@ -25,6 +25,7 @@ type Handler struct {
 	Context context.Context
 }
 
+// Routes собирает экран администратора и закрытые локальные API сервера.
 func (handler Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(assets, "assets")

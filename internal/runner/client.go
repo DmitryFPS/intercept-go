@@ -54,6 +54,8 @@ func NewClient(baseDir, version string, logger *slog.Logger) *Client {
 	}
 }
 
+// Start загружает сохранённые настройки и поддерживает рабочий процесс до
+// отмены переданного контекста.
 func (client *Client) Start(ctx context.Context) {
 	client.mu.Lock()
 	client.rootContext = ctx
@@ -69,6 +71,7 @@ func (client *Client) Start(ctx context.Context) {
 	}()
 }
 
+// Status возвращает безопасный снимок состояния для экрана оператора.
 func (client *Client) Status() ClientStatus {
 	client.mu.RLock()
 	defer client.mu.RUnlock()
