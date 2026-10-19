@@ -19,6 +19,7 @@ type ClientQueue struct {
 	db *sql.DB
 }
 
+// ClientStats содержит счётчики, безопасные для экрана оператора.
 type ClientStats struct {
 	Pending      int `json:"pending"`
 	Uploaded     int `json:"uploaded"`
@@ -49,6 +50,7 @@ func (queue *ClientQueue) Compact(ctx context.Context) error {
 	return compact(ctx, queue.db)
 }
 
+// NewClientQueue применяет миграции и открывает долговечную очередь точки.
 func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
 	if err := Migrate(ctx, db, []string{
 		clientMigration, clientExpiryMigration, clientSourceVersionMigration, clientStreamMigration,

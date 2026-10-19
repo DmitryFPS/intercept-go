@@ -15,6 +15,7 @@ import (
 	"intercept/internal/domain"
 )
 
+// SchemaV1 обозначает текущий формат зашифрованного транспортного конверта.
 const SchemaV1 = "intercept-envelope/v1"
 
 // Envelope — безопасный внешний формат файла, передаваемого через Telegram.

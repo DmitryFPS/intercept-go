@@ -39,12 +39,14 @@ type ServerStatus struct {
 	Destinations []string            `json:"destinations"`
 }
 
+// TransportSetup содержит поля первого экрана настройки транспорта.
 type TransportSetup struct {
 	BotToken   string `json:"bot_token"`
 	ChatID     int64  `json:"chat_id"`
 	InviteLink string `json:"invite_link"`
 }
 
+// DestinationSetup содержит проверяемые поля нового внешнего направления.
 type DestinationSetup struct {
 	ID       string                 `json:"id"`
 	Name     string                 `json:"name"`
@@ -61,6 +63,7 @@ type DestinationSetup struct {
 
 // Server владеет жизненным циклом центральной программы. Прикладные правила
 // находятся в application/domain, а здесь остаются только сборка и координация.
+// Server координирует жизненный цикл, не реализуя правила предметной области.
 type Server struct {
 	BaseDir string
 	Version string
@@ -79,6 +82,7 @@ type Server struct {
 	signingKey  ed25519.PrivateKey
 }
 
+// NewServer открывает состояние и создаёт начальные правила при первом запуске.
 func NewServer(ctx context.Context, baseDir, version string, logger *slog.Logger) (*Server, error) {
 	db, err := stateDB.OpenState(filepath.Join(baseDir, "data", "server.db"))
 	if err != nil {

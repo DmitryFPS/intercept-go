@@ -26,6 +26,7 @@ func Freshness(updatedAt string, observedAt, now time.Time, maxAge time.Duration
 
 // FreshnessInLocation трактует время без смещения в часовом поясе рабочего места.
 // Строки с явным смещением продолжают разбираться без каких-либо преобразований.
+// FreshnessInLocation вычисляет срок с учётом часового пояса старой EAVC.
 func FreshnessInLocation(updatedAt string, observedAt, now time.Time, maxAge time.Duration, location *time.Location) (time.Time, time.Time, string) {
 	if location == nil {
 		location = time.UTC

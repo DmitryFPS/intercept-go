@@ -7,9 +7,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
+
+var telegramTokenPattern = regexp.MustCompile(`\b[0-9]{6,}:[A-Za-z0-9_-]{20,}\b`)
 
 // RotatingWriter ограничивает размер журналов без фоновых процессов.
 type RotatingWriter struct {
@@ -139,6 +142,7 @@ func (handler *redactingHandler) WithGroup(name string) slog.Handler {
 }
 
 func redact(value string) string {
+	value = telegramTokenPattern.ReplaceAllString(value, "***")
 	fields := strings.Fields(value)
 	for index, field := range fields {
 		if colon := strings.IndexByte(field, ':'); colon >= 6 && colon < len(field)-20 {

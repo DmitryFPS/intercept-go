@@ -19,6 +19,7 @@ import (
 //go:embed assets/*
 var assets embed.FS
 
+// Handler предоставляет локальному экрану только административные сценарии сервера.
 type Handler struct {
 	Server  *runner.Server
 	Context context.Context

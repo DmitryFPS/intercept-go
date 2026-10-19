@@ -1,10 +1,24 @@
 package localui
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+// После одного JSON-объекта тело должно закончиться, иначе запрос мог быть
+// сформирован двусмысленно или содержать случайно склеенные настройки.
+func TestReadJSONRejectsTrailingObject(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(`{"value":1}{"value":2}`))
+	request.Header.Set("Content-Type", "application/json")
+	var target struct {
+		Value int `json:"value"`
+	}
+	if err := ReadJSON(request, &target, 1024); err == nil {
+		t.Fatal("лишний JSON не был отклонён")
+	}
+}
 
 // Панель управления открывается только локально и только по выданной программой ссылке с секретным ключом.
 func TestProtectLocalUI(t *testing.T) {

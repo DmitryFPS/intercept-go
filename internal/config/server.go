@@ -12,6 +12,7 @@ import (
 	"intercept/internal/domain"
 )
 
+// ServerSchemaV1 обозначает текущий формат внутренних настроек сервера.
 const ServerSchemaV1 = "intercept-server-config/v1"
 
 // Server содержит секретные настройки транспорта и внешних направлений.
@@ -24,6 +25,7 @@ type Server struct {
 	Destinations           map[string]DestinationConfig `json:"destinations"`
 }
 
+// ServerTransport описывает закрытую группу, через которую приходят точки.
 type ServerTransport struct {
 	BotToken    string `json:"bot_token"`
 	BotUsername string `json:"bot_username"`
@@ -31,8 +33,8 @@ type ServerTransport struct {
 	InviteLink  string `json:"invite_link,omitempty"`
 }
 
-// DestinationConfig содержит только параметры адаптера; решение о доставке
-// находится в версионируемой матрице маршрутов.
+// DestinationConfig содержит технические параметры одного получателя. Решение
+// о доставке находится в отдельно версионируемой матрице маршрутов.
 type DestinationConfig struct {
 	Kind     domain.DestinationKind `json:"kind"`
 	BotToken string                 `json:"bot_token,omitempty"`
@@ -91,6 +93,7 @@ func (cfg Server) DeliveryTimeout() time.Duration {
 	return time.Duration(minutes) * time.Minute
 }
 
+// DecodeServer читает серверные настройки и запрещает неизвестные поля.
 func DecodeServer(reader io.Reader) (Server, error) {
 	payload, err := io.ReadAll(io.LimitReader(reader, 2*1024*1024))
 	if err != nil {

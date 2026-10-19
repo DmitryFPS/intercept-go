@@ -69,7 +69,9 @@ func Discover(ctx context.Context, roots []string, recursive bool) ([]Candidate,
 			continue
 		}
 		if recursive {
-			walkCandidates(ctx, root, seen, &result)
+			if err := walkCandidates(ctx, root, seen, &result); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		for _, path := range nearbyCandidates(root) {
@@ -93,8 +95,8 @@ func nearbyCandidates(root string) []string {
 	}
 }
 
-func walkCandidates(ctx context.Context, root string, seen map[string]bool, result *[]Candidate) {
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+func walkCandidates(ctx context.Context, root string, seen map[string]bool, result *[]Candidate) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

@@ -3,12 +3,35 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type failingRoundTripper struct{ message string }
+
+func (transport failingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New(transport.message)
+}
+
+// Сетевая ошибка стандартной библиотеки может содержать полный URL Bot API;
+// токен должен быть удалён ещё до передачи ошибки в журнал.
+func TestTelegramClientRemovesTokenFromTransportError(t *testing.T) {
+	t.Parallel()
+	const token = "123456789:abcdefghijklmnopqrstuvwxyzABCDE"
+	httpClient := &http.Client{Transport: failingRoundTripper{message: "Post https://api.telegram.org/bot" + token + "/getMe: offline"}}
+	client, err := New(token, httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetMe(context.Background())
+	if err == nil || strings.Contains(err.Error(), token) {
+		t.Fatalf("токен остался в ошибке: %v", err)
+	}
+}
 
 // Клиент отправляет пакет именно в настроенный транспортный чат и в топик своей точки.
 func TestTelegramClientSendsDocumentToExactTopic(t *testing.T) {

@@ -96,6 +96,7 @@ func (event Event) PositionKey() string {
 
 // RoutingUnitName убирает только служебную пометку отложенного перехвата.
 // Исходное название в событии не меняется и полностью попадает в Telegram и Word.
+// RoutingUnitName возвращает название, используемое только для поиска маршрута.
 func RoutingUnitName(value string) string {
 	return strings.TrimSpace(deferredSuffix.ReplaceAllString(strings.TrimSpace(value), ""))
 }

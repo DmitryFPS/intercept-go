@@ -45,6 +45,7 @@ type Client struct {
 	rootContext context.Context
 }
 
+// NewClient собирает переносимое приложение вокруг выбранной рабочей папки.
 func NewClient(baseDir, version string, logger *slog.Logger) *Client {
 	return &Client{
 		BaseDir: baseDir, Version: version, Logger: logger,

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"intercept/internal/config"
 	"intercept/internal/infrastructure/secrets"
@@ -85,7 +86,27 @@ func (client *Client) CheckTransport(ctx context.Context) error {
 		status.Title = "Проверяем связь"
 		status.Detail = "Тестовый пакет отправлен. Ожидаем ответ сервера."
 	})
+	go client.reportTransportCheckTimeout(client.applicationContext())
 	return nil
+}
+
+func (client *Client) reportTransportCheckTimeout(ctx context.Context) {
+	timer := time.NewTimer(35 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+	client.update(func(status *ClientStatus) {
+		if status.LastTransportCheck != nil || status.Title != "Проверяем связь" {
+			return
+		}
+		status.State = "waiting"
+		status.Title = "Сервер не подтвердил проверку"
+		status.Detail = "Проверьте Bot-to-Bot у обоих ботов, транспортную группу, тему точки и запущен ли сервер."
+		status.TelegramOK = false
+	})
 }
 
 // Diagnostics собирает сведения, которые оператор может передать для поиска ошибки.
@@ -126,7 +147,7 @@ func (client *Client) verifyTrustedIssuer(cfg config.Client) ([]byte, bool, erro
 	}
 	trusted, err := secrets.Load(client.trustedIssuerPath())
 	if err != nil {
-		if errors.Is(rootCause(err), os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) {
 			return append([]byte(nil), issuer...), true, nil
 		}
 		return nil, false, fmt.Errorf("прочитать доверенный ключ сервера: %w", err)
@@ -135,14 +156,4 @@ func (client *Client) verifyTrustedIssuer(cfg config.Client) ([]byte, bool, erro
 		return nil, false, errors.New("файл выпущен другим сервером; обратитесь к администратору")
 	}
 	return append([]byte(nil), issuer...), false, nil
-}
-
-func rootCause(err error) error {
-	for {
-		unwrapped := errors.Unwrap(err)
-		if unwrapped == nil {
-			return err
-		}
-		err = unwrapped
-	}
 }

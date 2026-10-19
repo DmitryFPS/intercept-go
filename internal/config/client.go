@@ -15,6 +15,7 @@ import (
 	_ "time/tzdata"
 )
 
+// ClientSchemaV2 обозначает текущий формат подписанного файла точки.
 const ClientSchemaV2 = "intercept-client-config/v2"
 
 // Client содержит все настройки точки, подготовленные администратором.
@@ -31,11 +32,13 @@ type Client struct {
 	Authenticity ClientAuthenticity `json:"authenticity"`
 }
 
+// EAVC описывает источник данных, не смешивая его путь с настройками Telegram.
 type EAVC struct {
 	SQLitePath string `json:"sqlite_path"`
 	TimeZone   string `json:"time_zone"`
 }
 
+// ClientTransport содержит адрес транспортной группы и личного бота точки.
 type ClientTransport struct {
 	BotToken          string `json:"bot_token"`
 	BotUsername       string `json:"bot_username"`
@@ -45,11 +48,13 @@ type ClientTransport struct {
 	InviteLink        string `json:"invite_link,omitempty"`
 }
 
+// ClientCrypto содержит индивидуальный ключ шифрования одной точки.
 type ClientCrypto struct {
 	KeyID     string `json:"key_id"`
 	KeyBase64 string `json:"key_base64"`
 }
 
+// ClientPolling задаёт интервалы чтения, размер порции и срок события.
 type ClientPolling struct {
 	EAVCSeconds        int  `json:"eavc_seconds"`
 	BatchSize          int  `json:"batch_size"`
@@ -210,6 +215,7 @@ func ReadClientFile(path string) (Client, error) {
 	return DecodeClient(io.LimitReader(file, 1024*1024))
 }
 
+// DecodeClient читает, проверяет и подтверждает подпись клиентского JSON.
 func DecodeClient(reader io.Reader) (Client, error) {
 	payload, err := io.ReadAll(reader)
 	if err != nil {

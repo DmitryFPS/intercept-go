@@ -21,6 +21,7 @@ type ServerStore struct {
 	db *sql.DB
 }
 
+// NewServerStore применяет миграции и защищает чувствительные столбцы.
 func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 	if err := Migrate(ctx, db, []string{serverMigration, serverDeliveryOrderMigration}); err != nil {
 		return nil, err

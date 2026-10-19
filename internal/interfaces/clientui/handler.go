@@ -15,6 +15,7 @@ import (
 //go:embed assets/*
 var assets embed.FS
 
+// Handler связывает локальный экран клиента с его прикладным объектом.
 type Handler struct {
 	Client  *runner.Client
 	Context context.Context

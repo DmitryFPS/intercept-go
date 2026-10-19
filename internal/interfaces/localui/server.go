@@ -31,7 +31,7 @@ func ListenAndServe(ctx context.Context, address string, handler http.Handler, o
 	}
 	server := &http.Server{
 		Handler: protectLocalUI(listener.Addr().String(), accessToken, handler), ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 30 * time.Second, WriteTimeout: 90 * time.Second,
+		ReadTimeout: 3 * time.Minute, WriteTimeout: 3 * time.Minute,
 	}
 	if open {
 		go func() {
@@ -96,6 +96,7 @@ func constantEqual(left, right string) bool {
 	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
 }
 
+// OpenBrowser открывает локальный адрес стандартным браузером операционной системы.
 func OpenBrowser(address string) error {
 	var command *exec.Cmd
 	switch runtime.GOOS {
@@ -109,6 +110,7 @@ func OpenBrowser(address string) error {
 	return command.Start()
 }
 
+// WriteJSON отправляет ответ без кэширования чувствительного состояния.
 func WriteJSON(writer http.ResponseWriter, status int, value any) {
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
@@ -116,6 +118,7 @@ func WriteJSON(writer http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(writer).Encode(value)
 }
 
+// ReadJSON ограничивает размер, запрещает лишние поля и посторонние данные.
 func ReadJSON(request *http.Request, target any, maxBytes int64) error {
 	if request.Method != http.MethodPost && request.Method != http.MethodPut {
 		return errors.New("метод не поддерживается")
@@ -128,6 +131,10 @@ func ReadJSON(request *http.Request, target any, maxBytes int64) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("некорректный JSON: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("после JSON найдены лишние данные")
 	}
 	return nil
 }

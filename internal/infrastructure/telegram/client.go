@@ -25,18 +25,21 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// User содержит только поля Telegram-пользователя, нужные транспорту.
 type User struct {
 	ID       int64  `json:"id"`
 	IsBot    bool   `json:"is_bot"`
 	Username string `json:"username"`
 }
 
+// Chat представляет группу, канал или личный диалог Telegram.
 type Chat struct {
 	ID    int64  `json:"id"`
 	Type  string `json:"type"`
 	Title string `json:"title"`
 }
 
+// Document описывает файл до его безопасного скачивания.
 type Document struct {
 	FileID   string `json:"file_id"`
 	FileName string `json:"file_name"`
@@ -44,6 +47,7 @@ type Document struct {
 	FileSize int64  `json:"file_size"`
 }
 
+// Message содержит используемую часть сообщения Telegram.
 type Message struct {
 	MessageID       int64     `json:"message_id"`
 	MessageThreadID int64     `json:"message_thread_id"`
@@ -55,22 +59,26 @@ type Message struct {
 	Document        *Document `json:"document"`
 }
 
+// Update объединяет обычные сообщения и публикации каналов.
 type Update struct {
 	UpdateID    int64    `json:"update_id"`
 	Message     *Message `json:"message"`
 	ChannelPost *Message `json:"channel_post"`
 }
 
+// File содержит путь, выданный Telegram после проверки file_id.
 type File struct {
 	FileID   string `json:"file_id"`
 	FileSize int64  `json:"file_size"`
 	FilePath string `json:"file_path"`
 }
 
+// New создаёт клиент официального Telegram Bot API.
 func New(token string, httpClient *http.Client) (*Client, error) {
 	return NewWithBaseURL(token, defaultBaseURL, httpClient)
 }
 
+// NewWithBaseURL позволяет тестам подменить Telegram локальным HTTP-сервером.
 func NewWithBaseURL(token, baseURL string, httpClient *http.Client) (*Client, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("не задан токен Telegram-бота")
@@ -214,7 +222,7 @@ func (client *Client) DownloadFile(ctx context.Context, filePath string, maxByte
 	}
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("скачать файл Telegram: %w", err)
+		return nil, fmt.Errorf("скачать файл Telegram: %s", client.safeError(err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -257,7 +265,7 @@ func (client *Client) callJSON(ctx context.Context, method string, input any, ou
 func (client *Client) do(request *http.Request, output any) error {
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("Telegram %s: %w", methodName(request.URL.Path), err)
+		return fmt.Errorf("Telegram %s: %s", methodName(request.URL.Path), client.safeError(err))
 	}
 	defer response.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, 4*1024*1024))
@@ -281,6 +289,13 @@ func (client *Client) do(request *http.Request, output any) error {
 		}
 	}
 	return nil
+}
+
+func (client *Client) safeError(err error) string {
+	if err == nil {
+		return "неизвестная ошибка"
+	}
+	return strings.ReplaceAll(err.Error(), client.token, "***")
 }
 
 func (client *Client) methodURL(method string) string {

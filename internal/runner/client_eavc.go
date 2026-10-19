@@ -87,7 +87,7 @@ func (client *Client) resolveEAVCPath(ctx context.Context, cfg config.Client) (s
 func (client *Client) savedEAVCPath(ctx context.Context) (string, error) {
 	payload, err := secrets.Load(client.localSettingsPath())
 	if err != nil {
-		if errors.Is(rootCause(err), os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) {
 			return "", nil
 		}
 		return "", err

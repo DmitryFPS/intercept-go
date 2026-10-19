@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// ServerStats содержит сводные счётчики без содержимого перехватов.
 type ServerStats struct {
 	Clients   int `json:"clients"`
 	Events    int `json:"events"`

@@ -12,6 +12,7 @@ import (
 
 // LoadOrCreateToken хранит локальный пароль интерфейса под защитой DPAPI.
 // Override используется только автоматической проверкой переносимого выпуска.
+// LoadOrCreateToken создаёт постоянный случайный ключ доступа к локальному интерфейсу.
 func LoadOrCreateToken(path, override string) (string, error) {
 	if override = strings.TrimSpace(override); override != "" {
 		if len(override) < 32 {
@@ -25,7 +26,7 @@ func LoadOrCreateToken(path, override string) (string, error) {
 			return "", errors.New("сохранённый токен интерфейса повреждён")
 		}
 		return token, nil
-	} else if !errors.Is(rootCause(err), os.ErrNotExist) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 	raw := make([]byte, 32)
@@ -40,14 +41,4 @@ func LoadOrCreateToken(path, override string) (string, error) {
 		return "", err
 	}
 	return token, nil
-}
-
-func rootCause(err error) error {
-	for {
-		unwrapped := errors.Unwrap(err)
-		if unwrapped == nil {
-			return err
-		}
-		err = unwrapped
-	}
 }

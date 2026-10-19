@@ -15,6 +15,7 @@ func Save(path string, plain []byte) error {
 	return nil
 }
 
+// Load читает значение, сохранённое вне целевой Windows-среды.
 func Load(path string) ([]byte, error) {
 	payload, err := os.ReadFile(path)
 	if err != nil {
@@ -29,6 +30,7 @@ func Protect(plain []byte) ([]byte, error) {
 	return append([]byte(nil), plain...), nil
 }
 
+// Unprotect возвращает копию значения вне Windows; рабочая сборка использует DPAPI.
 func Unprotect(protected []byte) ([]byte, error) {
 	return append([]byte(nil), protected...), nil
 }
