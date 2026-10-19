@@ -120,6 +120,29 @@ func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 	}
 }
 
+// Исправленный документ явно показывает московское время правки, чтобы на
+// принимающей стороне его не приняли за повтор исходного перехвата.
+func TestEditedDocumentContainsEditTime(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	payload, err := Build(template, Document{
+		Unit: "позиция", Content: "12.00\n-Текст", Edited: true,
+		EditedAt: time.Date(2026, 10, 19, 15, 30, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "edited.docx")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if xml := documentXML(t, path); !strings.Contains(xml, "(отредактировано в 18:30)") {
+		t.Fatalf("в документе нет времени редактирования: %s", xml)
+	}
+}
+
 // После правки перехвата старые документы удаляются, а вместо них появляются документы с новым содержимым и пометкой о редакции.
 func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 	t.Parallel()
@@ -155,7 +178,7 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 	if filepath.Base(files[0]) != firstName {
 		t.Fatalf("правка создала новый номер вместо перезаписи: до=%q после=%q", firstName, filepath.Base(files[0]))
 	}
-	if xml := documentXML(t, files[0]); !strings.Contains(xml, editedMark) || !strings.Contains(xml, "Первый исправлен") {
+	if xml := documentXML(t, files[0]); !strings.Contains(xml, "(отредактировано в ") || !strings.Contains(xml, "Первый исправлен") {
 		t.Fatal("изменённый документ не перезаписан с пометкой")
 	}
 }

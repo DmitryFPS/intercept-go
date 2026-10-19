@@ -19,6 +19,21 @@ func TestNormalizeUnitNameDoesNotRepairMissingSpaces(t *testing.T) {
 	}
 }
 
+// UUID будущего каталога не должен отключать уже настроенное точное правило по
+// названию, пока администратор не добавил отдельное правило UUID.
+func TestRoutingFallsBackToNameWhenCatalogRuleIsAbsent(t *testing.T) {
+	rules := testRuleSet()
+	event := testEvent("1 мб 155 омбр")
+	event.Position.CatalogUUID = "new-catalog-id"
+	plan, err := rules.Resolve(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Recognized || plan.PositionKey != "name:1 мб 155 омбр" {
+		t.Fatalf("правило по имени не применилось: %+v", plan)
+	}
+}
+
 // Неизвестное подразделение уходит только по явно настроенному правилу для новых и ошибочных названий.
 func TestRuleSetRoutesUnknownOnlyByUnknownRow(t *testing.T) {
 	t.Parallel()

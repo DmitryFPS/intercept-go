@@ -67,6 +67,40 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	}
 }
 
+// Своевременно принятый пакет получает отдельные десять минут на внешние
+// Telegram- и Word-доставки, даже если клиент прислал его у границы 30 минут.
+func TestServerServiceStartsDeliveryWindowAfterAcceptance(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	key := bytes.Repeat([]byte{0x42}, 32)
+	event := serverServiceEvent()
+	event.ExpiresAt = now.Add(time.Second)
+	envelope, err := protocol.Seal(event, "key-1", key, now, bytes.NewReader(make([]byte, 12)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(envelope)
+	store := &memoryServerStore{}
+	service := ServerService{
+		Clients: memoryRegistry{client: RegisteredClient{
+			ID: "textile", SenderBotID: 11, SenderBotUsername: "textile_bot",
+			ChatID: -1001, ThreadID: 42, KeyID: "key-1", Key: key, Active: true,
+		}},
+		Rules: memoryRules{rules: serverServiceRules()}, Store: store,
+		Now: func() time.Time { return now }, DeliveryWindow: 10 * time.Minute,
+	}
+	_, err = service.Receive(context.Background(), IncomingPacket{
+		SenderBotID: 11, SenderBotUsername: "textile_bot", ChatID: -1001,
+		ThreadID: 42, Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := now.Add(10 * time.Minute); !store.event.ExpiresAt.Equal(want) {
+		t.Fatalf("срок доставки %s, ожидался %s", store.event.ExpiresAt, want)
+	}
+}
+
 // Ошибка одной конечной группы не должна мешать отправке того же перехвата в остальные назначенные места.
 func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 	t.Parallel()
@@ -144,10 +178,14 @@ func (rules memoryRules) PublishRules(_ context.Context, _ domain.RuleSet, _ str
 	return nil
 }
 
-type memoryServerStore struct{ accepted int }
+type memoryServerStore struct {
+	accepted int
+	event    domain.Event
+}
 
-func (store *memoryServerStore) Accept(_ context.Context, _ domain.Event, _ domain.DeliveryPlan) (bool, error) {
+func (store *memoryServerStore) Accept(_ context.Context, event domain.Event, _ domain.DeliveryPlan) (bool, error) {
 	store.accepted++
+	store.event = event
 	return true, nil
 }
 

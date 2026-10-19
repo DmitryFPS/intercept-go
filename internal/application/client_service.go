@@ -113,9 +113,9 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 	if _, err := service.Queue.ExpireDue(ctx, now); err != nil {
 		return 0, err
 	}
-	// Одна точка отправляет события строго по порядку. Следующее событие не
-	// обгоняет предыдущее, пока оно не подтверждено или не просрочено.
-	events, err := service.Queue.Pending(ctx, 1, now)
+	// Одновременно выбираются первые события разных подразделений. Внутри одного
+	// подразделения более поздний перехват всё равно ждёт подтверждения раннего.
+	events, err := service.Queue.Pending(ctx, 4, now)
 	if err != nil {
 		return 0, err
 	}

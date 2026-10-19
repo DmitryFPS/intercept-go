@@ -107,8 +107,9 @@ func TestDestinationEditsAndDeletesBlocksWithoutDuplicates(t *testing.T) {
 	}
 }
 
-// Новое сообщение создаётся только когда Telegram окончательно запретил правку старого; временная ошибка приводит к повтору.
-func TestDestinationSendsReplacementOnlyAfterTerminalEditError(t *testing.T) {
+// Если Telegram окончательно запретил правку старого сообщения, новое не
+// создаётся: исправление не должно выглядеть как новый перехват.
+func TestDestinationDoesNotReplaceMessageAfterTerminalEditError(t *testing.T) {
 	t.Parallel()
 	var methods []string
 	nextID := int64(100)
@@ -145,7 +146,7 @@ func TestDestinationSendsReplacementOnlyAfterTerminalEditError(t *testing.T) {
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"sendMessage", "editMessageText", "sendMessage"}
+	want := []string{"sendMessage", "editMessageText"}
 	if strings.Join(methods, ",") != strings.Join(want, ",") {
 		t.Fatalf("неожиданные действия Telegram: %v", methods)
 	}

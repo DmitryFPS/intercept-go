@@ -140,6 +140,15 @@ func (rules RuleSet) Resolve(event Event) (DeliveryPlan, error) {
 
 	key := event.PositionKey()
 	decisions, recognized := rules.Positions[key]
+	// Старая EAVC не знает catalog_uuid. Если будущая версия передаст UUID, но
+	// администратор ещё не создал для него правило, действующее правило по имени
+	// продолжит работать и событие не станет ошибочно неопознанным.
+	if !recognized && strings.TrimSpace(event.Position.CatalogUUID) != "" {
+		nameKey := "name:" + NormalizeUnitName(RoutingUnitName(event.Position.UnitName))
+		if byName, exists := rules.Positions[nameKey]; exists {
+			key, decisions, recognized = nameKey, byName, true
+		}
+	}
 	level := "position"
 	if !recognized {
 		decisions = rules.Unknown

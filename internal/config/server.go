@@ -16,11 +16,12 @@ const ServerSchemaV1 = "intercept-server-config/v1"
 
 // Server содержит секретные настройки транспорта и внешних направлений.
 type Server struct {
-	Schema       string                       `json:"schema"`
-	UpdatedAt    time.Time                    `json:"updated_at"`
-	Listen       string                       `json:"listen"`
-	Transport    ServerTransport              `json:"transport"`
-	Destinations map[string]DestinationConfig `json:"destinations"`
+	Schema                 string                       `json:"schema"`
+	UpdatedAt              time.Time                    `json:"updated_at"`
+	Listen                 string                       `json:"listen"`
+	DeliveryTimeoutMinutes int                          `json:"delivery_timeout_minutes,omitempty"`
+	Transport              ServerTransport              `json:"transport"`
+	Destinations           map[string]DestinationConfig `json:"destinations"`
 }
 
 type ServerTransport struct {
@@ -51,6 +52,9 @@ func (cfg Server) Validate() error {
 	if strings.TrimSpace(cfg.Listen) == "" {
 		return errors.New("не задан локальный адрес интерфейса")
 	}
+	if cfg.DeliveryTimeoutMinutes != 0 && (cfg.DeliveryTimeoutMinutes < 1 || cfg.DeliveryTimeoutMinutes > 60) {
+		return errors.New("срок доставки сервером должен быть от 1 до 60 минут")
+	}
 	if !validBotToken(cfg.Transport.BotToken) || cfg.Transport.ChatID == 0 {
 		return errors.New("транспортный бот или группа настроены неверно")
 	}
@@ -75,6 +79,16 @@ func (cfg Server) Validate() error {
 		}
 	}
 	return nil
+}
+
+// DeliveryTimeout сохраняет десятиминутное окно для ранее созданных настроек,
+// в которых новое поле ещё отсутствует.
+func (cfg Server) DeliveryTimeout() time.Duration {
+	minutes := cfg.DeliveryTimeoutMinutes
+	if minutes == 0 {
+		minutes = 10
+	}
+	return time.Duration(minutes) * time.Minute
 }
 
 func DecodeServer(reader io.Reader) (Server, error) {

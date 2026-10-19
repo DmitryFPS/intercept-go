@@ -50,7 +50,9 @@ func (queue *ClientQueue) Compact(ctx context.Context) error {
 }
 
 func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
-	if err := Migrate(ctx, db, []string{clientMigration, clientExpiryMigration, clientSourceVersionMigration}); err != nil {
+	if err := Migrate(ctx, db, []string{
+		clientMigration, clientExpiryMigration, clientSourceVersionMigration, clientStreamMigration,
+	}); err != nil {
 		return nil, err
 	}
 	if err := protectExistingColumn(ctx, db, "client_events", "payload_json"); err != nil {
@@ -99,11 +101,11 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 	}
 	_, err = queue.db.ExecContext(ctx, `
 		INSERT INTO client_events(
-			event_id, source_uuid, source_version, content_digest, payload_json, state,
+			event_id, source_uuid, source_version, stream_key, content_digest, payload_json, state,
 			next_attempt_at, expires_at, created_at, expired_at, last_error
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_uuid, source_version, content_digest) DO NOTHING`,
-		event.ID, sourceKey, sourceVersion, event.ContentDigest, payload, state,
+		event.ID, sourceKey, sourceVersion, clientStreamKey(event), event.ContentDigest, payload, state,
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
 		expiresAt.Format(time.RFC3339Nano),
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
@@ -127,6 +129,7 @@ func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time)
 			AND NOT EXISTS (
 				SELECT 1 FROM client_events earlier
 				WHERE earlier.state IN ('pending', 'uploaded')
+					AND earlier.stream_key = client_events.stream_key
 					AND (earlier.created_at < client_events.created_at OR
 						(earlier.created_at = client_events.created_at AND earlier.event_id < client_events.event_id))
 			)
@@ -153,6 +156,16 @@ func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time)
 		events = append(events, queued)
 	}
 	return events, rows.Err()
+}
+
+// clientStreamKey ограничивает строгий порядок одним подразделением. Если в
+// будущей EAVC появится стабильный каталог, переименование позиции не разделит
+// её очередь; в текущей EAVC используется нормализованное точное название.
+func clientStreamKey(event domain.Event) string {
+	if catalogUUID := strings.TrimSpace(event.Position.CatalogUUID); catalogUUID != "" {
+		return "catalog:" + strings.ToLower(catalogUUID)
+	}
+	return "name:" + domain.NormalizeUnitName(domain.RoutingUnitName(event.Position.UnitName))
 }
 
 func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, telegramMessageID int64) error {

@@ -94,3 +94,11 @@ FROM client_events_v2;
 DROP TABLE client_events_v2;
 CREATE INDEX client_events_pending_idx ON client_events(state, next_attempt_at, created_at);
 `
+
+const clientStreamMigration = `
+ALTER TABLE client_events ADD COLUMN stream_key TEXT NOT NULL DEFAULT '';
+UPDATE client_events SET stream_key=source_uuid WHERE stream_key='';
+DROP INDEX client_events_pending_idx;
+CREATE INDEX client_events_pending_idx
+	ON client_events(state, stream_key, next_attempt_at, created_at, event_id);
+`

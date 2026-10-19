@@ -90,7 +90,10 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			)
 		},
 	}
-	reception := &application.ServerService{Clients: server.Store, Rules: server.Store, Store: server.Store}
+	reception := &application.ServerService{
+		Clients: server.Store, Rules: server.Store, Store: server.Store,
+		DeliveryWindow: cfg.DeliveryTimeout(),
+	}
 	delivery := &application.DeliveryService{
 		Queue: server.Store, Gateways: server.gateways(cfg), Now: time.Now,
 		MaxConcurrent: 4, AttemptTimeout: 20 * time.Second, Logger: server.Logger,
@@ -184,6 +187,7 @@ func (server *Server) gateways(cfg config.Server) map[string]application.Deliver
 				result[id] = &telegram.Destination{
 					API: api, ChatID: destination.ChatID,
 					StatePath: filepath.Join(server.BaseDir, "data", "telegram-"+safeID(id)+".json"),
+					Logger:    server.Logger,
 				}
 			}
 		case domain.DestinationWord:

@@ -138,6 +138,51 @@ func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {
 	}
 }
 
+// Если одно подразделение временно не отправляется, первое событие другого
+// подразделения всё равно должно выйти из очереди этой же точки.
+func TestClientQueueDoesNotBlockAnotherPosition(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := domain.Event{
+		ID: "blocked", ClientID: "textile", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source:   domain.SourceRecord{UUID: "source-1"},
+		Position: domain.Position{UnitName: "первое подразделение"},
+		Mode:     domain.SourceModeNormal, Content: "первое", ContentDigest: "digest-1",
+	}
+	second := first
+	second.ID = "independent"
+	second.Source.UUID = "source-2"
+	second.Position.UnitName = "другое подразделение"
+	second.ContentDigest = "digest-2"
+	second.CreatedAt = now.Add(time.Second)
+	if err := queue.Enqueue(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Enqueue(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkRetry(ctx, first.ID, now.Add(time.Minute), "нет связи"); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := queue.Pending(ctx, 4, now.Add(10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Event.ID != second.ID {
+		t.Fatalf("ожидалось независимое событие, получено %#v", jobs)
+	}
+}
+
 // Новая редакция сохраняется даже тогда, когда оператор вернул текст к одному из прежних вариантов.
 func TestClientQueueAllowsContentToReturnToEarlierValueInNewSourceVersion(t *testing.T) {
 	t.Parallel()

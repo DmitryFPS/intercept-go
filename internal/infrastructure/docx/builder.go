@@ -47,6 +47,7 @@ type Document struct {
 	Content   string
 	Callsigns []domain.Callsign
 	Edited    bool
+	EditedAt  time.Time
 }
 
 // Build сохраняет служебные части шаблона и заменяет только тело документа.
@@ -157,7 +158,11 @@ func buildBody(document Document) []byte {
 	}
 	if document.Edited {
 		paragraphs.WriteString(styledParagraph(nil, false, "left"))
-		paragraphs.WriteString(styledParagraph([]styledRun{{Text: editedMark}}, false, "left"))
+		mark := editedMark
+		if !document.EditedAt.IsZero() {
+			mark = "(отредактировано в " + document.EditedAt.In(time.FixedZone("MSK", 3*60*60)).Format("15:04") + ")"
+		}
+		paragraphs.WriteString(styledParagraph([]styledRun{{Text: mark}}, false, "left"))
 	}
 	body := `<w:body>` + styledParagraph(nil, false, "left") +
 		`<w:tbl><w:tblPr><w:tblStyle w:val="a3"/><w:tblW w:w="11055" w:type="dxa"/><w:tblInd w:w="-34" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="11055"/></w:tblGrid>` +
@@ -278,6 +283,7 @@ func styledRow(paragraphs string, verticalCenter bool) string {
 
 func renderDigest(document Document) string {
 	document.Edited = false
+	document.EditedAt = time.Time{}
 	payload, _ := json.Marshal(document)
 	return digestText(string(payload))
 }

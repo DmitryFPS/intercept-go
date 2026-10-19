@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ type Destination struct {
 	API       *Client
 	ChatID    int64
 	StatePath string
+	Logger    *slog.Logger
 
 	mu    sync.Mutex
 	locks map[string]*itemLockEntry
@@ -153,17 +155,25 @@ func (destination *Destination) upsertBlock(
 	if len(chunks) < common {
 		common = len(chunks)
 	}
+	terminalFailure := false
 	for index := 0; index < common; index++ {
 		if err := destination.API.EditHTML(ctx, destination.ChatID, ids[index], chunks[index]); err != nil {
 			if !terminalEditError(err) {
 				return nil, err
 			}
-			message, sendErr := destination.API.SendHTML(ctx, destination.ChatID, threadID, chunks[index])
-			if sendErr != nil {
-				return nil, sendErr
+			if destination.Logger != nil {
+				destination.Logger.Warn("Telegram больше не разрешает изменить старое сообщение",
+					"chat_id", destination.ChatID, "thread_id", threadID,
+					"message_id", ids[index], "error", err,
+				)
 			}
-			ids[index] = message.MessageID
+			// Новое сообщение намеренно не создаётся: иначе исправление старого
+			// перехвата появится в топике как новое и нарушит хронологию.
+			terminalFailure = true
 		}
+	}
+	if terminalFailure {
+		return append([]int64(nil), oldIDs...), nil
 	}
 	if len(ids) > len(chunks) {
 		if err := destination.deleteMessages(ctx, ids[len(chunks):]); err != nil {

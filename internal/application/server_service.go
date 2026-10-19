@@ -34,10 +34,11 @@ type PacketResult struct {
 
 // ServerService проверяет входные пакеты и создаёт независимые задания.
 type ServerService struct {
-	Clients ClientRegistry
-	Rules   RuleRepository
-	Store   ServerStore
-	Now     func() time.Time
+	Clients        ClientRegistry
+	Rules          RuleRepository
+	Store          ServerStore
+	Now            func() time.Time
+	DeliveryWindow time.Duration
 }
 
 func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket) (PacketResult, error) {
@@ -77,7 +78,8 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	if service.Now == nil {
 		service.Now = time.Now
 	}
-	if event.Expired(service.Now()) {
+	now := service.Now().UTC()
+	if event.Expired(now) {
 		return PacketResult{
 			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
 			Status: "expired",
@@ -91,6 +93,14 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	if err != nil {
 		return PacketResult{}, fmt.Errorf("построить маршрут: %w", err)
 	}
+	deliveryWindow := service.DeliveryWindow
+	if deliveryWindow <= 0 {
+		deliveryWindow = 10 * time.Minute
+	}
+	// После своевременного приёма транспорт больше не отвечает за срок. Сервер
+	// получает собственное ограниченное окно, чтобы завершить внешние доставки.
+	event.ExpiresAt = now.Add(deliveryWindow)
+	event.FreshnessIssue = ""
 	accepted, err := service.Store.Accept(ctx, event, plan)
 	if err != nil {
 		return PacketResult{}, err
