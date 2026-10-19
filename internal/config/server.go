@@ -58,7 +58,7 @@ func (cfg Server) Validate() error {
 	if cfg.DeliveryTimeoutMinutes != 0 && (cfg.DeliveryTimeoutMinutes < 1 || cfg.DeliveryTimeoutMinutes > 60) {
 		return errors.New("срок доставки сервером должен быть от 1 до 60 минут")
 	}
-	if !validBotToken(cfg.Transport.BotToken) || cfg.Transport.ChatID == 0 {
+	if !validBotToken(cfg.Transport.BotToken) || cfg.Transport.BotID <= 0 || cfg.Transport.ChatID == 0 {
 		return errors.New("транспортный бот или группа настроены неверно")
 	}
 	if strings.TrimSpace(cfg.Transport.BotUsername) == "" {

@@ -47,7 +47,7 @@ func TestGenerateClientUsesPortableEAVCDefaults(t *testing.T) {
 	random := bytes.NewReader(make([]byte, 128))
 	cfg, err := GenerateClient(ClientRequest{
 		Number: "001", Name: "Текстиль", BotToken: "123456:abcdefghijklmnopqrstuv",
-		BotUsername: "point_bot", ServerBotUsername: "server_bot",
+		BotUsername: "point_bot", ServerBotID: 77, ServerBotUsername: "server_bot",
 		ChatID: -1001, ThreadID: 10,
 	}, time.Now(), random)
 	if err != nil {
@@ -67,7 +67,7 @@ func validClientConfig() Client {
 		EAVC: EAVC{SQLitePath: `C:\EAVC\main.sqlite`},
 		Transport: ClientTransport{
 			BotToken: "123456789:abcdefghijklmnopqrstuvwxyzABCDE", BotUsername: "textile_bot",
-			ServerBotUsername: "intercept_server_bot", ChatID: -100123, ThreadID: 42,
+			ServerBotID: 77, ServerBotUsername: "intercept_server_bot", ChatID: -100123, ThreadID: 42,
 		},
 		Cryptography: ClientCrypto{KeyID: "key-1", KeyBase64: base64.RawStdEncoding.EncodeToString(make([]byte, 32))},
 		Polling:      ClientPolling{EAVCSeconds: 2, BatchSize: 100, MaxEventAgeMinutes: 30},

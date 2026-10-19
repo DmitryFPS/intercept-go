@@ -89,8 +89,9 @@ func (cfg Client) Validate() error {
 	if cfg.Transport.ChatID == 0 || cfg.Transport.ThreadID <= 0 {
 		return errors.New("не заданы транспортная группа или тема точки")
 	}
-	if strings.TrimSpace(cfg.Transport.BotUsername) == "" || strings.TrimSpace(cfg.Transport.ServerBotUsername) == "" {
-		return errors.New("не заданы имена транспортных ботов")
+	if cfg.Transport.ServerBotID <= 0 || strings.TrimSpace(cfg.Transport.BotUsername) == "" ||
+		strings.TrimSpace(cfg.Transport.ServerBotUsername) == "" {
+		return errors.New("не заданы идентификаторы транспортных ботов")
 	}
 	key, err := cfg.Key()
 	if err != nil {
