@@ -71,6 +71,24 @@ func TestClientServiceSkipsExistingRowsOnFirstStart(t *testing.T) {
 	}
 }
 
+// Ответ на проверку связи сохраняется отдельно и не пытается подтвердить
+// отсутствующее рабочее событие в очереди.
+func TestClientServiceStoresTransportProbeSeparately(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC().Truncate(time.Second)
+	queue := newMemoryClientState()
+	sender := &memorySender{acks: []Acknowledgement{{EventID: "probe-id", AcceptedAt: now, Status: "probe"}}}
+	service := ClientService{Queue: queue, State: queue, Sender: sender}
+	count, err := service.ReceiveAcknowledgements(context.Background())
+	if err != nil || count != 1 {
+		t.Fatalf("ответ проверки не обработан: count=%d err=%v", count, err)
+	}
+	probeAt, exists, err := service.LastTransportProbe(context.Background())
+	if err != nil || !exists || !probeAt.Equal(now) {
+		t.Fatalf("время проверки не сохранено: %s exists=%v err=%v", probeAt, exists, err)
+	}
+}
+
 type memorySource struct {
 	items []SourceItem
 }

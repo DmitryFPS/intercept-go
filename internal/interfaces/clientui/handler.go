@@ -30,8 +30,19 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/config/import", handler.importConfig)
 	mux.HandleFunc("POST /api/eavc/search", handler.searchEAVC)
 	mux.HandleFunc("POST /api/eavc/select", handler.selectEAVC)
+	mux.HandleFunc("POST /api/transport/check", handler.checkTransport)
 	mux.HandleFunc("GET /api/diagnostics", handler.diagnostics)
 	return securityHeaders(mux)
+}
+
+func (handler Handler) checkTransport(writer http.ResponseWriter, request *http.Request) {
+	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+	defer cancel()
+	if err := handler.Client.CheckTransport(ctx); err != nil {
+		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	localui.WriteJSON(writer, http.StatusAccepted, map[string]bool{"sent": true})
 }
 
 func (handler Handler) searchEAVC(writer http.ResponseWriter, request *http.Request) {

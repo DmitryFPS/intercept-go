@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -12,8 +13,10 @@ import (
 )
 
 const (
-	acknowledgementPrefixV1 = "IC-ACK/1 "
-	acknowledgementPrefixV2 = "IC-ACK/2 "
+	acknowledgementPrefixV1    = "IC-ACK/1 "
+	acknowledgementPrefixV2    = "IC-ACK/2 "
+	probeAcknowledgementPrefix = "IC-PROBE-ACK/1 "
+	probeSchema                = "IC-PROBE/1"
 )
 
 // ClientTransport передаёт конверты точки и принимает подтверждения сервера.
@@ -22,6 +25,32 @@ type ClientTransport struct {
 	ChatID            int64
 	ThreadID          int64
 	ServerBotUsername string
+}
+
+type probePayload struct {
+	Schema   string `json:"schema"`
+	ClientID string `json:"client_id"`
+	ProbeID  string `json:"probe_id"`
+}
+
+// SendProbe отправляет безопасный служебный файл, который сервер подтверждает
+// напрямую клиентскому боту. Конечные группы такой файл никогда не получают.
+func (transport *ClientTransport) SendProbe(ctx context.Context, clientID string) (string, error) {
+	probeID, err := protocol.UUIDv7(time.Now().UTC(), rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(probePayload{Schema: probeSchema, ClientID: clientID, ProbeID: probeID})
+	if err != nil {
+		return "", err
+	}
+	_, err = transport.API.SendDocument(
+		ctx, transport.ChatID, transport.ThreadID, probeID+".icprobe", payload, "Проверка связи Intercept",
+	)
+	if err != nil {
+		return "", err
+	}
+	return probeID, nil
 }
 
 func (transport *ClientTransport) Send(ctx context.Context, envelope protocol.Envelope) (int64, error) {
@@ -61,6 +90,9 @@ func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset i
 		status := "accepted"
 		eventID := ""
 		switch {
+		case strings.HasPrefix(message.Text, probeAcknowledgementPrefix):
+			eventID = strings.TrimSpace(strings.TrimPrefix(message.Text, probeAcknowledgementPrefix))
+			status = "probe"
 		case strings.HasPrefix(message.Text, acknowledgementPrefixV2):
 			parts := strings.Fields(strings.TrimPrefix(message.Text, acknowledgementPrefixV2))
 			if len(parts) != 2 || (parts[1] != "accepted" && parts[1] != "expired") {
@@ -85,4 +117,8 @@ func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset i
 // AcknowledgementText возвращает единый машинно-читаемый ответ сервера.
 func AcknowledgementText(eventID, status string) string {
 	return acknowledgementPrefixV2 + eventID + " " + status
+}
+
+func probeAcknowledgementText(probeID string) string {
+	return probeAcknowledgementPrefix + probeID
 }

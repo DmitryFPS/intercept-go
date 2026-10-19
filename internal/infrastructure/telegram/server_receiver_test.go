@@ -55,3 +55,45 @@ func TestServerReceiverRejectsUnknownBotBeforeDownload(t *testing.T) {
 		t.Fatal("сервер запросил файл неизвестного бота")
 	}
 }
+
+// Проверочный файл от зарегистрированной точки распознаётся отдельно и не
+// передаётся в обработку рабочих перехватов.
+func TestServerReceiverRecognizesTransportProbe(t *testing.T) {
+	t.Parallel()
+	probeID := "018f22d2-3f5c-7abc-8123-0123456789ab"
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": []any{map[string]any{
+				"update_id": 8, "message": map[string]any{
+					"message_id": 16, "message_thread_id": 9,
+					"from":     map[string]any{"id": 101, "is_bot": true, "username": "textile_bot"},
+					"chat":     map[string]any{"id": -1001, "type": "supergroup"},
+					"document": map[string]any{"file_id": "probe", "file_name": probeID + ".icprobe", "file_size": 100},
+				},
+			}}})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": map[string]any{"file_path": "probe.json"}})
+		case strings.Contains(request.URL.Path, "/file/bot"):
+			_ = json.NewEncoder(writer).Encode(probePayload{Schema: probeSchema, ClientID: "textile", ProbeID: probeID})
+		default:
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+		}
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := ServerReceiver{
+		API: client, ChatID: -1001, MaxBytes: 1024,
+		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+	}
+	packets, _, err := receiver.Packets(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packets) != 1 || packets[0].ProbeID != probeID {
+		t.Fatalf("проверка не распознана: %#v", packets)
+	}
+}

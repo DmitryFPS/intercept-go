@@ -119,6 +119,17 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			continue
 		}
 		for _, packet := range packets {
+			if packet.ProbeID != "" {
+				if err := receiver.AcknowledgeProbe(ctx, packet.SenderBotUsername, packet.ProbeID); err != nil {
+					server.Logger.Warn("не удалось подтвердить проверку связи",
+						"sender_bot", packet.SenderBotUsername, "error", err)
+				} else {
+					server.Logger.Info("двусторонняя связь с точкой проверена",
+						"sender_bot", packet.SenderBotUsername, "thread_id", packet.ThreadID)
+				}
+				server.deleteTransportPacket(ctx, receiver, packet.MessageID)
+				continue
+			}
 			result, err := reception.Receive(ctx, packet)
 			if err != nil {
 				server.Logger.Warn("пакет помещён в карантин", "error", err, "sender_bot_id", packet.SenderBotID)

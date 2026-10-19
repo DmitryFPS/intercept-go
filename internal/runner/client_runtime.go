@@ -206,11 +206,16 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 		}
 		if count > 0 {
 			now := time.Now().UTC()
+			probeAt, probeExists, _ := service.LastTransportProbe(ctx)
 			client.update(func(status *ClientStatus) {
 				status.State = "running"
 				status.Title = "Программа работает"
 				status.Detail = "Сервер подтвердил получение данных."
 				status.LastAcknowledged = &now
+				if probeExists {
+					status.LastTransportCheck = &probeAt
+					status.Detail = "Двусторонняя связь с сервером проверена."
+				}
 			})
 		}
 		client.refreshStats(ctx, queue)

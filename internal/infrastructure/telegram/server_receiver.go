@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -37,7 +38,8 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 		if message == nil || message.Chat.ID != receiver.ChatID || message.Document == nil || message.From == nil {
 			continue
 		}
-		if !message.From.IsBot || !strings.HasSuffix(strings.ToLower(message.Document.FileName), ".icevent") {
+		filename := strings.ToLower(message.Document.FileName)
+		if !message.From.IsBot || (!strings.HasSuffix(filename, ".icevent") && !strings.HasSuffix(filename, ".icprobe")) {
 			continue
 		}
 		if message.Document.FileSize <= 0 || message.Document.FileSize > receiver.MaxBytes {
@@ -68,9 +70,23 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			return packets, offset, err
 		}
 		packet.Payload = payload
+		if strings.HasSuffix(filename, ".icprobe") {
+			var probe probePayload
+			if err := json.Unmarshal(payload, &probe); err != nil || probe.Schema != probeSchema ||
+				strings.TrimSpace(probe.ClientID) == "" || !validProbeID(probe.ProbeID) {
+				_ = receiver.API.DeleteMessage(ctx, receiver.ChatID, message.MessageID)
+				continue
+			}
+			packet.ProbeID = probe.ProbeID
+		}
 		packets = append(packets, packet)
 	}
 	return packets, next, nil
+}
+
+func validProbeID(value string) bool {
+	value = strings.TrimSpace(value)
+	return len(value) >= 32 && len(value) <= 64 && !strings.ContainsAny(value, " \r\n\t")
 }
 
 // DeletePacket удаляет уже сохранённый транспортный файл из служебной группы.
@@ -91,5 +107,15 @@ func (receiver *ServerReceiver) Acknowledge(ctx context.Context, botUsername, ev
 		return errors.New("для подтверждения задан неизвестный статус")
 	}
 	_, err := receiver.API.SendMessage(ctx, 0, botUsername, AcknowledgementText(eventID, status))
+	return err
+}
+
+// AcknowledgeProbe завершает двустороннюю проверку Bot-to-Bot без постановки
+// тестового сообщения в рабочие маршруты.
+func (receiver *ServerReceiver) AcknowledgeProbe(ctx context.Context, botUsername, probeID string) error {
+	if strings.TrimSpace(botUsername) == "" || !validProbeID(probeID) {
+		return errors.New("для проверки связи не задан бот или идентификатор")
+	}
+	_, err := receiver.API.SendMessage(ctx, 0, botUsername, probeAcknowledgementText(probeID))
 	return err
 }

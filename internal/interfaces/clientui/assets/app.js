@@ -30,6 +30,7 @@ async function refresh() {
     element('dbText').textContent = status.database_ok ? 'Последнее чтение: ' + formatTime(status.last_database_read) : 'Нет подключения';
     element('tgText').textContent = status.telegram_ok ? 'Последняя загрузка: ' + formatTime(status.last_upload) : 'Нет подключения';
     element('ackText').textContent = status.last_acknowledged ? 'Последнее: ' + formatTime(status.last_acknowledged) : 'Ещё не получено';
+	if (status.last_transport_check) element('ackText').textContent = 'Связь проверена: ' + formatTime(status.last_transport_check);
     element('pending').textContent = status.queue?.pending || 0;
     element('uploaded').textContent = status.queue?.uploaded || 0;
     element('acknowledged').textContent = status.queue?.acknowledged || 0;
@@ -113,6 +114,15 @@ element('quickSearch').addEventListener('click', () => searchEAVC(false));
 element('fullSearch').addEventListener('click', () => searchEAVC(true));
 element('cancelSearch').addEventListener('click', () => searchController?.abort());
 element('saveEavc').addEventListener('click', () => selectEAVC(element('eavcPath').value));
+element('checkTransport').addEventListener('click', async () => {
+  element('message').textContent = 'Отправляем проверочный пакет…';
+  try {
+    await requestJSON('/api/transport/check', {method: 'POST'});
+    element('message').textContent = 'Пакет отправлен. Ответ сервера появится в блоке «Подтверждение сервера».';
+  } catch (error) {
+    element('message').textContent = error.message;
+  }
+});
 
 refresh();
 setInterval(refresh, 3000);

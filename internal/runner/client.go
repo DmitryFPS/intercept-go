@@ -13,21 +13,22 @@ import (
 
 // ClientStatus содержит только безопасные для экрана и диагностики данные.
 type ClientStatus struct {
-	State            string              `json:"state"`
-	Title            string              `json:"title"`
-	Detail           string              `json:"detail"`
-	Configured       bool                `json:"configured"`
-	ClientID         string              `json:"client_id,omitempty"`
-	ClientName       string              `json:"client_name,omitempty"`
-	ClientNumber     string              `json:"client_number,omitempty"`
-	DatabaseOK       bool                `json:"database_ok"`
-	TelegramOK       bool                `json:"telegram_ok"`
-	LastDatabaseRead *time.Time          `json:"last_database_read,omitempty"`
-	LastUpload       *time.Time          `json:"last_upload,omitempty"`
-	LastAcknowledged *time.Time          `json:"last_acknowledged,omitempty"`
-	EAVCPath         string              `json:"eavc_path,omitempty"`
-	Queue            stateDB.ClientStats `json:"queue"`
-	Version          string              `json:"version"`
+	State              string              `json:"state"`
+	Title              string              `json:"title"`
+	Detail             string              `json:"detail"`
+	Configured         bool                `json:"configured"`
+	ClientID           string              `json:"client_id,omitempty"`
+	ClientName         string              `json:"client_name,omitempty"`
+	ClientNumber       string              `json:"client_number,omitempty"`
+	DatabaseOK         bool                `json:"database_ok"`
+	TelegramOK         bool                `json:"telegram_ok"`
+	LastDatabaseRead   *time.Time          `json:"last_database_read,omitempty"`
+	LastUpload         *time.Time          `json:"last_upload,omitempty"`
+	LastAcknowledged   *time.Time          `json:"last_acknowledged,omitempty"`
+	LastTransportCheck *time.Time          `json:"last_transport_check,omitempty"`
+	EAVCPath           string              `json:"eavc_path,omitempty"`
+	Queue              stateDB.ClientStats `json:"queue"`
+	Version            string              `json:"version"`
 }
 
 // Client управляет жизненным циклом переносимого приложения.

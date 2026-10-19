@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	eavcCursorName      = "eavc"
-	eavcInitializedName = "eavc_initialized"
-	transportOffsetName = "transport_offset"
+	eavcCursorName         = "eavc"
+	eavcInitializedName    = "eavc_initialized"
+	transportOffsetName    = "transport_offset"
+	lastTransportProbeName = "last_transport_probe"
 )
 
 // ClientService объединяет сценарии чтения EAVC, очереди и транспорта.
@@ -179,6 +180,12 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int,
 		return 0, err
 	}
 	for _, acknowledgement := range acknowledgements {
+		if acknowledgement.Status == "probe" {
+			if err := service.State.SaveValue(ctx, lastTransportProbeName, acknowledgement.AcceptedAt.Format(time.RFC3339Nano)); err != nil {
+				return 0, err
+			}
+			continue
+		}
 		var err error
 		if acknowledgement.Status == "expired" {
 			err = service.Queue.MarkExpired(ctx, acknowledgement.EventID, acknowledgement.AcceptedAt, domain.FreshnessExpired)
@@ -201,6 +208,20 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int,
 		}
 	}
 	return len(acknowledgements), nil
+}
+
+// LastTransportProbe возвращает время последней полной проверки клиент → сервер
+// → клиент. Отсутствие значения означает, что проверка ещё не завершалась.
+func (service *ClientService) LastTransportProbe(ctx context.Context) (time.Time, bool, error) {
+	raw, exists, err := service.State.Value(ctx, lastTransportProbeName)
+	if err != nil || !exists {
+		return time.Time{}, exists, err
+	}
+	value, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("прочитать время проверки транспорта: %w", err)
+	}
+	return value, true, nil
 }
 
 func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {

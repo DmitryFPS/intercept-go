@@ -22,6 +22,7 @@ type IncomingPacket struct {
 	ThreadID          int64
 	MessageID         int64
 	Payload           []byte
+	ProbeID           string
 }
 
 // PacketResult нужен приёмнику для безопасного подтверждения клиенту.

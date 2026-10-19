@@ -57,6 +57,37 @@ func (client *Client) ImportConfig(ctx context.Context, payload []byte) error {
 	return nil
 }
 
+// CheckTransport отправляет служебный пакет. Зелёное подтверждение появится
+// только после того, как сервер увидит пакет и ответит клиентскому боту.
+func (client *Client) CheckTransport(ctx context.Context) error {
+	protected, err := secrets.Load(client.configPath())
+	if err != nil {
+		return errors.New("сначала загрузите настройки точки")
+	}
+	cfg, err := config.DecodeClient(bytes.NewReader(protected))
+	if err != nil {
+		return err
+	}
+	api, err := telegram.New(cfg.Transport.BotToken, nil)
+	if err != nil {
+		return err
+	}
+	transport := &telegram.ClientTransport{
+		API: api, ChatID: cfg.Transport.ChatID, ThreadID: cfg.Transport.ThreadID,
+		ServerBotUsername: cfg.Transport.ServerBotUsername,
+	}
+	if _, err := transport.SendProbe(ctx, cfg.ClientID); err != nil {
+		return fmt.Errorf("отправить проверку связи: %w", err)
+	}
+	client.update(func(status *ClientStatus) {
+		status.LastTransportCheck = nil
+		status.State = "starting"
+		status.Title = "Проверяем связь"
+		status.Detail = "Тестовый пакет отправлен. Ожидаем ответ сервера."
+	})
+	return nil
+}
+
 // Diagnostics собирает сведения, которые оператор может передать для поиска ошибки.
 func (client *Client) Diagnostics() ([]byte, error) {
 	var output bytes.Buffer
