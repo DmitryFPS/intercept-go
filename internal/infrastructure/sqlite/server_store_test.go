@@ -49,6 +49,10 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	if err != nil || !accepted {
 		t.Fatalf("accept: %v %v", accepted, err)
 	}
+	known, err := store.KnownEvent(ctx, event.ID, event.ContentDigest)
+	if err != nil || !known {
+		t.Fatalf("known event: %v %v", known, err)
+	}
 	var storedEvent []byte
 	if err := db.QueryRowContext(ctx, "SELECT payload_json FROM received_events WHERE event_id=?", event.ID).Scan(&storedEvent); err != nil {
 		t.Fatal(err)
@@ -65,6 +69,9 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 		t.Fatalf("jobs: %#v %v", jobs, err)
 	}
 	event.ContentDigest = "changed"
+	if _, err := store.KnownEvent(ctx, event.ID, event.ContentDigest); err == nil {
+		t.Fatal("проверка известного UUID должна обнаруживать другое содержимое")
+	}
 	if _, err := store.Accept(ctx, event, plan); err == nil {
 		t.Fatal("один UUID с другим содержимым должен быть конфликтом")
 	}

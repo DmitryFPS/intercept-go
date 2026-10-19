@@ -80,6 +80,19 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 		service.Now = time.Now
 	}
 	now := service.Now().UTC()
+	// Подтверждаем уже сохранённый пакет даже после истечения исходных 30 минут.
+	// Такое возможно, если первое подтверждение Telegram потерялось. Проверка
+	// дайджеста не позволяет подменить содержимое под известным UUID.
+	known, err := service.Store.KnownEvent(ctx, event.ID, event.ContentDigest)
+	if err != nil {
+		return PacketResult{}, err
+	}
+	if known {
+		return PacketResult{
+			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
+			Status: "accepted",
+		}, nil
+	}
 	if event.Expired(now) {
 		return PacketResult{
 			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,

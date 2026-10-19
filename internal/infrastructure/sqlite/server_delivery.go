@@ -12,6 +12,25 @@ import (
 	"intercept/internal/domain"
 )
 
+// KnownEvent проверяет, был ли пакет уже надёжно принят. Совпавший UUID с
+// другим содержимым считается конфликтом, а не повторной доставкой.
+func (store *ServerStore) KnownEvent(ctx context.Context, eventID, contentDigest string) (bool, error) {
+	var existingDigest string
+	err := store.db.QueryRowContext(ctx,
+		"SELECT content_digest FROM received_events WHERE event_id = ?", eventID,
+	).Scan(&existingDigest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("проверить принятое событие: %w", err)
+	}
+	if existingDigest != contentDigest {
+		return false, errors.New("конфликт: UUID события уже принят с другим содержимым")
+	}
+	return true, nil
+}
+
 // Accept атомарно сохраняет событие и все задания, рассчитанные маршрутизатором.
 func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan domain.DeliveryPlan) (bool, error) {
 	eventPayload, err := json.Marshal(event)

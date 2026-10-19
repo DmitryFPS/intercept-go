@@ -68,8 +68,9 @@ type Acknowledgement struct {
 	Status     string
 }
 
-// ServerStore атомарно сохраняет входное событие и его задания доставки.
+// ServerStore распознаёт ранее принятые события и атомарно сохраняет новые.
 type ServerStore interface {
+	KnownEvent(ctx context.Context, eventID, contentDigest string) (known bool, err error)
 	Accept(ctx context.Context, event domain.Event, plan domain.DeliveryPlan) (accepted bool, err error)
 }
 

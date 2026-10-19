@@ -101,6 +101,46 @@ func TestServerServiceStartsDeliveryWindowAfterAcceptance(t *testing.T) {
 	}
 }
 
+// Если первое подтверждение потерялось, сервер повторно подтверждает уже
+// сохранённое событие, даже когда его исходные 30 минут успели закончиться.
+func TestServerServiceAcknowledgesKnownEventAfterTransportDeadline(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	key := bytes.Repeat([]byte{0x53}, 32)
+	event := serverServiceEvent()
+	event.ExpiresAt = now.Add(time.Minute)
+	envelope, err := protocol.Seal(event, "key-1", key, now, bytes.NewReader(make([]byte, 12)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(envelope)
+	store := &memoryServerStore{}
+	service := ServerService{
+		Clients: memoryRegistry{client: RegisteredClient{
+			ID: "textile", SenderBotID: 11, SenderBotUsername: "textile_bot",
+			ChatID: -1001, ThreadID: 42, KeyID: "key-1", Key: key, Active: true,
+		}},
+		Rules: memoryRules{rules: serverServiceRules()}, Store: store,
+		Now: func() time.Time { return now },
+	}
+	packet := IncomingPacket{
+		SenderBotID: 11, SenderBotUsername: "textile_bot", ChatID: -1001,
+		ThreadID: 42, Payload: payload,
+	}
+	first, err := service.Receive(context.Background(), packet)
+	if err != nil || !first.Accepted {
+		t.Fatalf("первый приём: %#v %v", first, err)
+	}
+	now = now.Add(31 * time.Minute)
+	repeated, err := service.Receive(context.Background(), packet)
+	if err != nil || repeated.Status != "accepted" || repeated.Accepted {
+		t.Fatalf("повтор после срока: %#v %v", repeated, err)
+	}
+	if store.accepted != 1 {
+		t.Fatalf("повтор создал вторую запись: %d", store.accepted)
+	}
+}
+
 // Ошибка одной конечной группы не должна мешать отправке того же перехвата в остальные назначенные места.
 func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 	t.Parallel()
@@ -181,6 +221,16 @@ func (rules memoryRules) PublishRules(_ context.Context, _ domain.RuleSet, _ str
 type memoryServerStore struct {
 	accepted int
 	event    domain.Event
+}
+
+func (store *memoryServerStore) KnownEvent(_ context.Context, eventID, contentDigest string) (bool, error) {
+	if store.accepted == 0 || store.event.ID != eventID {
+		return false, nil
+	}
+	if store.event.ContentDigest != contentDigest {
+		return false, errors.New("конфликт содержимого")
+	}
+	return true, nil
 }
 
 func (store *memoryServerStore) Accept(_ context.Context, event domain.Event, _ domain.DeliveryPlan) (bool, error) {
