@@ -17,6 +17,8 @@ func TestLoggerRedactsSecretsAndRotates(t *testing.T) {
 	handler := slog.NewJSONHandler(writer, nil)
 	logger := slog.New(&redactingHandler{next: handler})
 	logger.Info("ошибка 123456:abcdefghijklmnopqrstuvwxyzABCDE", "bot_token", "secret")
+	logger.With("password", "bound-secret").Info("проверка",
+		slog.Group("transport", "api_key", "nested-secret"))
 	logger.Info(strings.Repeat("x", 120))
 	writer.Close()
 	for _, candidate := range []string{path, path + ".1"} {

@@ -183,6 +183,60 @@ func TestClientQueueDoesNotBlockAnotherPosition(t *testing.T) {
 	}
 }
 
+// Обновление ранней тестовой сборки пересчитывает неверные UUID-потоки из
+// содержимого событий и восстанавливает порядок одного подразделения.
+func TestClientQueueRepairsLegacyStreamKeys(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := OpenState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := domain.Event{
+		ID: "legacy-1", ClientID: "point", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source: domain.SourceRecord{UUID: "source-1"}, Position: domain.Position{UnitName: "одно подразделение"},
+		Mode: domain.SourceModeNormal, Content: "первое", ContentDigest: "digest-1",
+	}
+	second := first
+	second.ID, second.Source.UUID, second.ContentDigest = "legacy-2", "source-2", "digest-2"
+	second.CreatedAt = now.Add(time.Second)
+	if err := queue.Enqueue(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Enqueue(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE client_events SET stream_key=source_uuid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version=5"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	db, err = OpenState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err = NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkRetry(ctx, first.ID, now.Add(time.Minute), "нет связи"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := queue.Pending(ctx, 10, now.Add(10*time.Second))
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("старая очередь не восстановила порядок: %#v, %v", pending, err)
+	}
+}
+
 // Новая редакция сохраняется даже тогда, когда оператор вернул текст к одному из прежних вариантов.
 func TestClientQueueAllowsContentToReturnToEarlierValueInNewSourceVersion(t *testing.T) {
 	t.Parallel()

@@ -233,6 +233,53 @@ func TestServerStorePreservesOrderInsideTopicWithoutBlockingOtherTopics(t *testi
 	}
 }
 
+// Ошибка Word-документа одного подразделения не должна задерживать документы
+// остальных подразделений того же удалённого получателя.
+func TestServerStoreSeparatesWordQueuesByPosition(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	destination := domain.Destination{ID: "word-39", Name: "39-ка", Kind: domain.DestinationWord, Enabled: true}
+	accept := func(id, source, position string, at time.Time) {
+		event := serverTestEvent()
+		event.ID, event.Source.UUID, event.ContentDigest = id, source, "digest-"+id
+		event.Position.UnitName = position
+		event.CreatedAt, event.SourceAt, event.ExpiresAt = at, at, now.Add(30*time.Minute)
+		plan := domain.DeliveryPlan{EventID: id, RuleSetVersion: 1, Deliveries: []domain.PlannedDelivery{{
+			Destination: destination, Decision: domain.RouteDecision{Action: domain.RouteDeliver},
+		}}}
+		if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+			t.Fatalf("принять %s: %v, %v", id, accepted, acceptErr)
+		}
+	}
+	accept("first", "source-1", "подразделение А", now)
+	accept("same-position", "source-2", "подразделение А", now.Add(time.Second))
+	accept("other-position", "source-3", "подразделение Б", now.Add(time.Second))
+	if err := store.MarkDeliveryRetry(ctx, "first", destination.ID, now.Add(time.Minute), "файл занят"); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.PendingDeliveries(ctx, 10, now.Add(10*time.Second))
+	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "other-position" {
+		t.Fatalf("ожидался документ другого подразделения: %#v, %v", jobs, err)
+	}
+}
+
 // Плановая очистка сохраняет ожидающие и свежие записи, удаляя только устаревшие завершённые данные.
 func TestServerStoreMaintenanceKeepsPendingAndRecentData(t *testing.T) {
 	t.Parallel()

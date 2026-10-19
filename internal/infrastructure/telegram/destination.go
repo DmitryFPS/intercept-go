@@ -155,9 +155,13 @@ func (destination *Destination) upsertBlock(
 	if len(chunks) < common {
 		common = len(chunks)
 	}
-	terminalFailure := false
 	for index := 0; index < common; index++ {
 		if err := destination.API.EditHTML(ctx, destination.ChatID, ids[index], chunks[index]); err != nil {
+			if unchangedEditError(err) {
+				// Telegram уже содержит нужный текст. Обычно это означает, что
+				// предыдущая попытка успела выполниться до разрыва связи.
+				continue
+			}
 			if !terminalEditError(err) {
 				return nil, err
 			}
@@ -168,12 +172,10 @@ func (destination *Destination) upsertBlock(
 				)
 			}
 			// Новое сообщение намеренно не создаётся: иначе исправление старого
-			// перехвата появится в топике как новое и нарушит хронологию.
-			terminalFailure = true
+			// перехвата появится в топике как новое и нарушит хронологию. Ошибка
+			// остаётся видимой, а состояние не помечается синхронизированным.
+			return nil, fmt.Errorf("старое сообщение Telegram невозможно исправить: %w", err)
 		}
-	}
-	if terminalFailure {
-		return append([]int64(nil), oldIDs...), nil
 	}
 	if len(ids) > len(chunks) {
 		if err := destination.deleteMessages(ctx, ids[len(chunks):]); err != nil {
@@ -214,4 +216,8 @@ func terminalEditError(err error) bool {
 	return strings.Contains(message, "message to edit not found") ||
 		strings.Contains(message, "message can't be edited") ||
 		strings.Contains(message, "message_id_invalid")
+}
+
+func unchangedEditError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "message is not modified")
 }

@@ -39,6 +39,11 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	if err != nil || !result.Accepted || store.accepted != 1 {
 		t.Fatalf("receive: %#v %v", result, err)
 	}
+	packet.Payload = append(append([]byte(nil), payload...), []byte("{}")...)
+	if _, err := service.Receive(context.Background(), packet); err == nil {
+		t.Fatal("дополнительный JSON после конверта должен быть отклонён")
+	}
+	packet.Payload = payload
 	packet.SenderBotID = 12
 	if _, err := service.Receive(context.Background(), packet); err == nil {
 		t.Fatal("чужой Telegram-бот должен быть отклонён")

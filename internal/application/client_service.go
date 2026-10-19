@@ -20,6 +20,7 @@ const (
 	eavcInitializedName    = "eavc_initialized"
 	transportOffsetName    = "transport_offset"
 	lastTransportProbeName = "last_transport_probe"
+	lastTransportProbeID   = "last_transport_probe_id"
 )
 
 // ClientService объединяет сценарии чтения EAVC, очереди и транспорта.
@@ -184,6 +185,9 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int,
 			if err := service.State.SaveValue(ctx, lastTransportProbeName, acknowledgement.AcceptedAt.Format(time.RFC3339Nano)); err != nil {
 				return 0, err
 			}
+			if err := service.State.SaveValue(ctx, lastTransportProbeID, acknowledgement.EventID); err != nil {
+				return 0, err
+			}
 			continue
 		}
 		var err error
@@ -210,18 +214,22 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int,
 	return len(acknowledgements), nil
 }
 
-// LastTransportProbe возвращает время последней полной проверки клиент → сервер
-// → клиент. Отсутствие значения означает, что проверка ещё не завершалась.
-func (service *ClientService) LastTransportProbe(ctx context.Context) (time.Time, bool, error) {
+// LastTransportProbe возвращает идентификатор и время последней полной
+// проверки клиент → сервер → клиент.
+func (service *ClientService) LastTransportProbe(ctx context.Context) (string, time.Time, bool, error) {
 	raw, exists, err := service.State.Value(ctx, lastTransportProbeName)
 	if err != nil || !exists {
-		return time.Time{}, exists, err
+		return "", time.Time{}, exists, err
 	}
 	value, err := time.Parse(time.RFC3339Nano, raw)
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("прочитать время проверки транспорта: %w", err)
+		return "", time.Time{}, false, fmt.Errorf("прочитать время проверки транспорта: %w", err)
 	}
-	return value, true, nil
+	probeID, idExists, err := service.State.Value(ctx, lastTransportProbeID)
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	return probeID, value, idExists, nil
 }
 
 func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {

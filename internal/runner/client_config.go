@@ -75,22 +75,25 @@ func (client *Client) CheckTransport(ctx context.Context) error {
 	}
 	transport := &telegram.ClientTransport{
 		API: api, ChatID: cfg.Transport.ChatID, ThreadID: cfg.Transport.ThreadID,
+		ServerBotID:       cfg.Transport.ServerBotID,
 		ServerBotUsername: cfg.Transport.ServerBotUsername,
 	}
-	if _, err := transport.SendProbe(ctx, cfg.ClientID); err != nil {
+	probeID, err := transport.SendProbe(ctx, cfg.ClientID)
+	if err != nil {
 		return fmt.Errorf("отправить проверку связи: %w", err)
 	}
 	client.update(func(status *ClientStatus) {
+		client.pendingProbeID = probeID
 		status.LastTransportCheck = nil
 		status.State = "starting"
 		status.Title = "Проверяем связь"
 		status.Detail = "Тестовый пакет отправлен. Ожидаем ответ сервера."
 	})
-	go client.reportTransportCheckTimeout(client.applicationContext())
+	go client.reportTransportCheckTimeout(client.applicationContext(), probeID)
 	return nil
 }
 
-func (client *Client) reportTransportCheckTimeout(ctx context.Context) {
+func (client *Client) reportTransportCheckTimeout(ctx context.Context, probeID string) {
 	timer := time.NewTimer(35 * time.Second)
 	defer timer.Stop()
 	select {
@@ -99,7 +102,7 @@ func (client *Client) reportTransportCheckTimeout(ctx context.Context) {
 	case <-timer.C:
 	}
 	client.update(func(status *ClientStatus) {
-		if status.LastTransportCheck != nil || status.Title != "Проверяем связь" {
+		if client.pendingProbeID != probeID || status.LastTransportCheck != nil {
 			return
 		}
 		status.State = "waiting"

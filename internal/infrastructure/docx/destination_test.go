@@ -213,6 +213,17 @@ func TestDestinationDoesNotWaitBehindStuckOperation(t *testing.T) {
 	}
 }
 
+// Настраиваемые подпись и номер получателя не могут превратить имя документа
+// в путь за пределами общей папки.
+func TestDocumentNameRemovesPathSeparatorsFromConfiguredParts(t *testing.T) {
+	t.Parallel()
+	destination := Destination{Prefix: `..\СТНД/`, Network: `../39\`, Folder: t.TempDir()}
+	name := destination.documentName(15, `../подразделение\`)
+	if filepath.Base(name) != name || strings.ContainsAny(name, `/\`) {
+		t.Fatalf("небезопасное имя документа: %q", name)
+	}
+}
+
 // Подозрительно большой шаблон Word отклоняется до распаковки и не может занять всю память или диск.
 func TestBuildRejectsDecompressionBomb(t *testing.T) {
 	t.Parallel()

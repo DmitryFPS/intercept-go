@@ -120,21 +120,37 @@ func (handler *redactingHandler) Enabled(ctx context.Context, level slog.Level) 
 func (handler *redactingHandler) Handle(ctx context.Context, record slog.Record) error {
 	clean := slog.NewRecord(record.Time, record.Level, redact(record.Message), record.PC)
 	record.Attrs(func(attribute slog.Attr) bool {
-		name := strings.ToLower(attribute.Key)
-		if strings.Contains(name, "token") || strings.Contains(name, "password") || strings.Contains(name, "key") {
-			clean.AddAttrs(slog.String(attribute.Key, "***"))
-		} else if attribute.Value.Kind() == slog.KindString {
-			clean.AddAttrs(slog.String(attribute.Key, redact(attribute.Value.String())))
-		} else {
-			clean.AddAttrs(attribute)
-		}
+		clean.AddAttrs(redactAttribute(attribute))
 		return true
 	})
 	return handler.next.Handle(ctx, clean)
 }
 
 func (handler *redactingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &redactingHandler{next: handler.next.WithAttrs(attrs)}
+	clean := make([]slog.Attr, 0, len(attrs))
+	for _, attribute := range attrs {
+		clean = append(clean, redactAttribute(attribute))
+	}
+	return &redactingHandler{next: handler.next.WithAttrs(clean)}
+}
+
+func redactAttribute(attribute slog.Attr) slog.Attr {
+	name := strings.ToLower(attribute.Key)
+	if strings.Contains(name, "token") || strings.Contains(name, "password") || strings.Contains(name, "key") {
+		return slog.String(attribute.Key, "***")
+	}
+	if attribute.Value.Kind() == slog.KindString {
+		return slog.String(attribute.Key, redact(attribute.Value.String()))
+	}
+	if attribute.Value.Kind() == slog.KindGroup {
+		children := attribute.Value.Group()
+		clean := make([]any, 0, len(children))
+		for _, child := range children {
+			clean = append(clean, redactAttribute(child))
+		}
+		return slog.Group(attribute.Key, clean...)
+	}
+	return attribute
 }
 
 func (handler *redactingHandler) WithGroup(name string) slog.Handler {

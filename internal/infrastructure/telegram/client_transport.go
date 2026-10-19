@@ -24,6 +24,7 @@ type ClientTransport struct {
 	API               *Client
 	ChatID            int64
 	ThreadID          int64
+	ServerBotID       int64
 	ServerBotUsername string
 }
 
@@ -82,6 +83,9 @@ func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset i
 		}
 		message := update.Message
 		if message == nil || message.From == nil || !message.From.IsBot {
+			continue
+		}
+		if transport.ServerBotID != 0 && message.From.ID != transport.ServerBotID {
 			continue
 		}
 		if strings.ToLower(message.From.Username) != expected {

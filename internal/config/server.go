@@ -28,6 +28,7 @@ type Server struct {
 // ServerTransport описывает закрытую группу, через которую приходят точки.
 type ServerTransport struct {
 	BotToken    string `json:"bot_token"`
+	BotID       int64  `json:"bot_id,omitempty"`
 	BotUsername string `json:"bot_username"`
 	ChatID      int64  `json:"chat_id"`
 	InviteLink  string `json:"invite_link,omitempty"`

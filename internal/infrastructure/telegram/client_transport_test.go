@@ -31,7 +31,7 @@ func TestClientTransportRecognizesProbeAcknowledgement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := ClientTransport{API: client, ServerBotUsername: "server_bot"}
+	transport := ClientTransport{API: client, ServerBotID: 7, ServerBotUsername: "server_bot"}
 	acks, next, err := transport.Acknowledgements(context.Background(), 0)
 	if err != nil {
 		t.Fatal(err)

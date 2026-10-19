@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -51,6 +52,10 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	var envelope protocol.Envelope
 	if err := decoder.Decode(&envelope); err != nil {
 		return PacketResult{}, errors.New("транспортный пакет повреждён")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return PacketResult{}, errors.New("после транспортного пакета найдены лишние данные")
 	}
 	client, err := service.Clients.Client(ctx, envelope.ClientID)
 	if err != nil {

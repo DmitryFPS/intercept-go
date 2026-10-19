@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"intercept/internal/application"
@@ -29,6 +30,65 @@ func (store *ServerStore) KnownEvent(ctx context.Context, eventID, contentDigest
 		return false, errors.New("конфликт: UUID события уже принят с другим содержимым")
 	}
 	return true, nil
+}
+
+func backfillServerStreamKeys(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `
+		SELECT j.event_id, j.destination_id, e.payload_json, j.delivery_json
+		FROM delivery_jobs j JOIN received_events e ON e.event_id=j.event_id
+		WHERE j.stream_key=''`)
+	if err != nil {
+		return fmt.Errorf("прочитать старые очереди доставки: %w", err)
+	}
+	type row struct {
+		eventID, destinationID        string
+		eventPayload, deliveryPayload []byte
+	}
+	var values []row
+	for rows.Next() {
+		var value row
+		if err := rows.Scan(&value.eventID, &value.destinationID, &value.eventPayload, &value.deliveryPayload); err != nil {
+			rows.Close()
+			return err
+		}
+		values = append(values, value)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, value := range values {
+		eventPlain, err := unprotectDatabaseValue(value.eventPayload)
+		if err != nil {
+			return err
+		}
+		deliveryPlain, err := unprotectDatabaseValue(value.deliveryPayload)
+		if err != nil {
+			return err
+		}
+		var event domain.Event
+		var delivery domain.PlannedDelivery
+		if err := json.Unmarshal(eventPlain, &event); err != nil {
+			return fmt.Errorf("разобрать старое событие %s: %w", value.eventID, err)
+		}
+		if err := json.Unmarshal(deliveryPlain, &delivery); err != nil {
+			return fmt.Errorf("разобрать старое задание %s: %w", value.eventID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE delivery_jobs SET stream_key=? WHERE event_id=? AND destination_id=?`,
+			deliveryStreamKey(event, delivery), value.eventID, value.destinationID,
+		); err != nil {
+			return fmt.Errorf("восстановить очередь задания %s: %w", value.eventID, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // Accept атомарно сохраняет событие и все задания, рассчитанные маршрутизатором.
@@ -90,7 +150,7 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 				event_id, destination_id, delivery_json, stream_key, source_at,
 				expires_at, state, next_attempt_at
 			) VALUES(?, ?, ?, ?, ?, ?, 'pending', ?)`, event.ID, delivery.Destination.ID,
-			deliveryPayload, deliveryStreamKey(delivery), sourceAt.Format(time.RFC3339Nano),
+			deliveryPayload, deliveryStreamKey(event, delivery), sourceAt.Format(time.RFC3339Nano),
 			expiresAt.Format(time.RFC3339Nano), now); err != nil {
 			return false, fmt.Errorf("создать задание %s: %w", delivery.Destination.ID, err)
 		}
@@ -183,9 +243,13 @@ func (store *ServerStore) MarkDeliveryRetry(ctx context.Context, eventID, destin
 	return changedExactlyOnce(result, err, "запланировать внешнюю доставку")
 }
 
-func deliveryStreamKey(delivery domain.PlannedDelivery) string {
+func deliveryStreamKey(event domain.Event, delivery domain.PlannedDelivery) string {
 	if delivery.Destination.Kind == domain.DestinationTelegram {
 		return fmt.Sprintf("%s:topic:%d", delivery.Destination.ID, delivery.Decision.ThreadID)
 	}
-	return delivery.Destination.ID
+	position := "name:" + domain.NormalizeUnitName(domain.RoutingUnitName(event.Position.UnitName))
+	if catalogUUID := strings.TrimSpace(event.Position.CatalogUUID); catalogUUID != "" {
+		position = "catalog:" + strings.ToLower(catalogUUID)
+	}
+	return delivery.Destination.ID + ":position:" + position
 }

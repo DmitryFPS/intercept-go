@@ -23,7 +23,9 @@ type ServerStore struct {
 
 // NewServerStore применяет миграции и защищает чувствительные столбцы.
 func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
-	if err := Migrate(ctx, db, []string{serverMigration, serverDeliveryOrderMigration}); err != nil {
+	if err := Migrate(ctx, db, []string{
+		serverMigration, serverDeliveryOrderMigration, serverStreamRepairMigration,
+	}); err != nil {
 		return nil, err
 	}
 	for _, item := range []struct{ table, column string }{
@@ -35,6 +37,9 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 		if err := protectExistingColumn(ctx, db, item.table, item.column); err != nil {
 			return nil, fmt.Errorf("защитить хранилище сервера: %w", err)
 		}
+	}
+	if err := backfillServerStreamKeys(ctx, db); err != nil {
+		return nil, err
 	}
 	return &ServerStore{db: db}, nil
 }

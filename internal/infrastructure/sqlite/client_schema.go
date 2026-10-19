@@ -102,3 +102,10 @@ DROP INDEX client_events_pending_idx;
 CREATE INDEX client_events_pending_idx
 	ON client_events(state, stream_key, next_attempt_at, created_at, event_id);
 `
+
+// Ранняя версия миграции использовала UUID исходной записи и могла разделить
+// одно подразделение на несколько очередей. Значение восстанавливается из
+// сохранённого события после применения SQL-миграций.
+const clientStreamRepairMigration = `
+UPDATE client_events SET stream_key='';
+`

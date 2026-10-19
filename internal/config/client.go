@@ -42,6 +42,7 @@ type EAVC struct {
 type ClientTransport struct {
 	BotToken          string `json:"bot_token"`
 	BotUsername       string `json:"bot_username"`
+	ServerBotID       int64  `json:"server_bot_id,omitempty"`
 	ServerBotUsername string `json:"server_bot_username"`
 	ChatID            int64  `json:"chat_id"`
 	ThreadID          int64  `json:"thread_id"`

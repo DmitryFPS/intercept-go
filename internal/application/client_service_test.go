@@ -83,9 +83,9 @@ func TestClientServiceStoresTransportProbeSeparately(t *testing.T) {
 	if err != nil || count != 1 {
 		t.Fatalf("ответ проверки не обработан: count=%d err=%v", count, err)
 	}
-	probeAt, exists, err := service.LastTransportProbe(context.Background())
-	if err != nil || !exists || !probeAt.Equal(now) {
-		t.Fatalf("время проверки не сохранено: %s exists=%v err=%v", probeAt, exists, err)
+	probeID, probeAt, exists, err := service.LastTransportProbe(context.Background())
+	if err != nil || !exists || probeID != "probe-id" || !probeAt.Equal(now) {
+		t.Fatalf("ответ проверки не сохранён: id=%q at=%s exists=%v err=%v", probeID, probeAt, exists, err)
 	}
 }
 

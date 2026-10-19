@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"intercept/internal/application"
@@ -104,7 +105,15 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		status.Detail = "Получаем данные точек и выполняем маршруты."
 		status.TransportOK = true
 	})
-	go server.deliveryLoop(ctx, delivery)
+	var background sync.WaitGroup
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		server.deliveryLoop(ctx, delivery)
+	}()
+	// Перенастройка ждёт остановки старого цикла. Одновременные циклы могли бы
+	// выбрать одно задание до фиксации результата и отправить его дважды.
+	defer background.Wait()
 	offset := int64(0)
 	if raw, exists, _ := server.Store.Value(ctx, serverOffsetName); exists {
 		offset, _ = strconv.ParseInt(raw, 10, 64)

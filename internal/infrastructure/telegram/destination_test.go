@@ -108,7 +108,7 @@ func TestDestinationEditsAndDeletesBlocksWithoutDuplicates(t *testing.T) {
 }
 
 // Если Telegram окончательно запретил правку старого сообщения, новое не
-// создаётся: исправление не должно выглядеть как новый перехват.
+// создаётся, но доставка остаётся ошибочной и не теряет исправление молча.
 func TestDestinationDoesNotReplaceMessageAfterTerminalEditError(t *testing.T) {
 	t.Parallel()
 	var methods []string
@@ -143,12 +143,55 @@ func TestDestinationDoesNotReplaceMessageAfterTerminalEditError(t *testing.T) {
 		t.Fatal(err)
 	}
 	event.Blocks[0].Text = "12.00\n-Первое исправлено"
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
-		t.Fatal(err)
+	if err := destination.Deliver(context.Background(), event, delivery); err == nil {
+		t.Fatal("невозможная правка не должна считаться доставленной")
 	}
 	want := []string{"sendMessage", "editMessageText"}
 	if strings.Join(methods, ",") != strings.Join(want, ",") {
 		t.Fatalf("неожиданные действия Telegram: %v", methods)
+	}
+}
+
+// Ответ «текст не изменён» означает, что предыдущая попытка уже успела
+// исправить сообщение; такой повтор можно безопасно завершить без ожидания.
+func TestDestinationAcceptsAlreadyAppliedTelegramEdit(t *testing.T) {
+	t.Parallel()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	call := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		call++
+		if method == "sendMessage" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"message_id": 101},
+			})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"ok": false, "error_code": 400, "description": "Bad Request: message is not modified",
+		})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	event := domain.Event{
+		Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
+		Position: domain.Position{UnitName: "позиция"},
+		Blocks:   []domain.ContentBlock{{Key: "12.00", Text: "12.00\n-Первое"}},
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	event.Blocks[0].Text = "12.00\n-Первое исправлено"
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatalf("уже выполненная правка должна считаться успешной: %v", err)
+	}
+	if call != 2 {
+		t.Fatalf("ожидались отправка и одна правка, вызовов: %d", call)
 	}
 }
 

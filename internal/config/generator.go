@@ -19,6 +19,7 @@ type ClientRequest struct {
 	TimeZone          string
 	BotToken          string
 	BotUsername       string
+	ServerBotID       int64
 	ServerBotUsername string
 	InviteLink        string
 	ChatID            int64
@@ -60,6 +61,7 @@ func GenerateClient(request ClientRequest, now time.Time, random io.Reader) (Cli
 		EAVC: EAVC{SQLitePath: eavcPath, TimeZone: timeZone},
 		Transport: ClientTransport{
 			BotToken: request.BotToken, BotUsername: request.BotUsername,
+			ServerBotID:       request.ServerBotID,
 			ServerBotUsername: request.ServerBotUsername,
 			ChatID:            request.ChatID, ThreadID: request.ThreadID,
 			InviteLink: strings.TrimSpace(request.InviteLink),

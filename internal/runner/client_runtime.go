@@ -40,6 +40,7 @@ func (client *Client) restartWorker(parent context.Context) error {
 	client.mu.Lock()
 	client.workerStop = cancel
 	client.workerDone = done
+	client.pendingProbeID = ""
 	client.status = ClientStatus{
 		State: "starting", Title: "Запуск", Detail: "Проверяем базу EAVC и Telegram.",
 		Configured: true, ClientID: cfg.ClientID, ClientName: cfg.ClientName,
@@ -115,6 +116,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		ClientID: cfg.ClientID, Source: source, Queue: queue, State: queue,
 		Sender: &telegram.ClientTransport{
 			API: api, ChatID: cfg.Transport.ChatID, ThreadID: cfg.Transport.ThreadID,
+			ServerBotID:       cfg.Transport.ServerBotID,
 			ServerBotUsername: cfg.Transport.ServerBotUsername,
 		},
 		KeyID: cfg.Cryptography.KeyID, Key: key, BatchSize: cfg.Polling.BatchSize,
@@ -206,15 +208,20 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 		}
 		if count > 0 {
 			now := time.Now().UTC()
-			probeAt, probeExists, _ := service.LastTransportProbe(ctx)
+			probeID, probeAt, probeExists, _ := service.LastTransportProbe(ctx)
 			client.update(func(status *ClientStatus) {
+				if client.pendingProbeID != "" && (!probeExists || probeID != client.pendingProbeID) {
+					// Обычное подтверждение или старый ответ не завершает новую проверку.
+					return
+				}
 				status.State = "running"
 				status.Title = "Программа работает"
 				status.Detail = "Сервер подтвердил получение данных."
 				status.LastAcknowledged = &now
-				if probeExists {
+				if probeExists && probeID == client.pendingProbeID {
 					status.LastTransportCheck = &probeAt
 					status.Detail = "Двусторонняя связь с сервером проверена."
+					client.pendingProbeID = ""
 				}
 			})
 		}

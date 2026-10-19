@@ -37,12 +37,13 @@ type Client struct {
 	Version string
 	Logger  *slog.Logger
 
-	mu          sync.RWMutex
-	lifecycleMu sync.Mutex
-	status      ClientStatus
-	workerStop  context.CancelFunc
-	workerDone  chan struct{}
-	rootContext context.Context
+	mu             sync.RWMutex
+	lifecycleMu    sync.Mutex
+	status         ClientStatus
+	workerStop     context.CancelFunc
+	workerDone     chan struct{}
+	rootContext    context.Context
+	pendingProbeID string
 }
 
 // NewClient собирает переносимое приложение вокруг выбранной рабочей папки.

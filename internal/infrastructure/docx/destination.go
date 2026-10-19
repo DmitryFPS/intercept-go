@@ -55,20 +55,17 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	if !acquired {
 		return errDestinationBusy
 	}
-	result := make(chan error, 1)
-	go func() {
-		defer unlock()
-		result <- settings.deliver(ctx, event)
-	}()
-	select {
-	case err := <-result:
-		return err
-	case <-ctx.Done():
-		return fmt.Errorf("операция Word превысила допустимое время: %w", ctx.Err())
-	}
+	defer unlock()
+	// Файловые вызовы выполняются в текущей рабочей операции. Так сервер не
+	// объявит доставку завершённой или просроченной, пока скрытая горутина ещё
+	// способна перезаписать документ в сетевой папке.
+	return settings.deliver(ctx, event)
 }
 
 func (destination Destination) deliver(ctx context.Context, event domain.Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := os.Stat(destination.Folder); err != nil {
 		if err := share.Connect(ctx, destination.Folder, destination.Username, destination.Password); err != nil {
 			return err
@@ -76,6 +73,9 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 	}
 	if err := os.MkdirAll(destination.Folder, 0o755); err != nil {
 		return fmt.Errorf("создать папку Word: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	current, err := loadState(destination.StatePath)
 	if err != nil {
@@ -112,6 +112,10 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 		}
 		render := renderDigest(document)
 		filename := destination.documentName(record.Number, event.Position.UnitName)
+		target, err := safeDestinationPath(destination.Folder, filename)
+		if err != nil {
+			return err
+		}
 		if exists && ((record.Render != "" && record.Render == render) ||
 			(record.Render == "" && record.Hash == digest && record.Filename == filename)) {
 			continue
@@ -124,11 +128,16 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 		if err != nil {
 			return err
 		}
-		if err := writeAtomic(filepath.Join(destination.Folder, filename), payload); err != nil {
+		if err := writeAtomic(ctx, target, payload); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if record.Filename != "" && record.Filename != filename {
-			_ = os.Remove(filepath.Join(destination.Folder, record.Filename))
+			if previous, pathErr := safeDestinationPath(destination.Folder, record.Filename); pathErr == nil {
+				_ = os.Remove(previous)
+			}
 		}
 		record.Hash = digest
 		record.Render = render
@@ -145,7 +154,9 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 			continue
 		}
 		if record.Filename != "" {
-			_ = os.Remove(filepath.Join(destination.Folder, record.Filename))
+			if obsolete, pathErr := safeDestinationPath(destination.Folder, record.Filename); pathErr == nil {
+				_ = os.Remove(obsolete)
+			}
 		}
 		delete(current.Blocks, key)
 	}

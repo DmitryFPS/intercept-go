@@ -1,6 +1,7 @@
 package docx
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -79,10 +80,14 @@ func saveState(path string, current state) error {
 	return nil
 }
 
-func writeAtomic(path string, payload []byte) error {
+func writeAtomic(ctx context.Context, path string, payload []byte) error {
 	temporary := path + ".tmp"
+	defer os.Remove(temporary)
 	if err := os.WriteFile(temporary, payload, 0o644); err != nil {
 		return fmt.Errorf("записать временный Word: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("доставка Word отменена до публикации файла: %w", err)
 	}
 	if err := os.Rename(temporary, path); err != nil {
 		return fmt.Errorf("доставить Word: %w", err)
@@ -91,11 +96,26 @@ func writeAtomic(path string, payload []byte) error {
 }
 
 func (destination *Destination) documentName(number int, unit string) string {
-	unit = strings.Join(strings.Fields(badFilename.ReplaceAllString(unit, "")), " ")
-	if unit == "" {
-		unit = "н-у"
+	prefix := safeFilenamePart(destination.Prefix, "СТНД")
+	unit = safeFilenamePart(unit, "н-у")
+	network := safeFilenamePart(destination.Network, "получатель")
+	return fmt.Sprintf("%s%d %s - %s.docx", prefix, number, unit, network)
+}
+
+func safeFilenamePart(value, fallback string) string {
+	value = strings.Join(strings.Fields(badFilename.ReplaceAllString(value, "")), " ")
+	value = strings.Trim(value, ". ")
+	if value == "" {
+		return fallback
 	}
-	return fmt.Sprintf("%s%d %s - %s.docx", destination.Prefix, number, unit, destination.Network)
+	return value
+}
+
+func safeDestinationPath(folder, filename string) (string, error) {
+	if filename == "" || filepath.Base(filename) != filename || filename == "." || filename == ".." {
+		return "", errors.New("небезопасное имя Word-документа")
+	}
+	return filepath.Join(folder, filename), nil
 }
 
 func normalizeText(value string) string {

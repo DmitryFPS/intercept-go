@@ -94,3 +94,9 @@ DROP TABLE delivery_jobs_v1;
 CREATE INDEX delivery_jobs_pending_idx
 	ON delivery_jobs(state, stream_key, source_at, event_id, next_attempt_at);
 `
+
+// Старые задания получали одну общую очередь на Word-направление. Ключи
+// пересчитываются из сохранённых событий после расшифрования столбцов.
+const serverStreamRepairMigration = `
+UPDATE delivery_jobs SET stream_key='';
+`
