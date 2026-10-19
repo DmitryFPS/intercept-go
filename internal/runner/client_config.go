@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"intercept/internal/config"
-	"intercept/internal/infrastructure/eavc"
 	"intercept/internal/infrastructure/secrets"
 	"intercept/internal/infrastructure/telegram"
 )
@@ -28,11 +27,6 @@ func (client *Client) ImportConfig(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	source, err := eavc.Open(ctx, cfg.EAVC.SQLitePath)
-	if err != nil {
-		return fmt.Errorf("проверка базы EAVC: %w", err)
-	}
-	source.Close()
 	api, err := telegram.New(cfg.Transport.BotToken, nil)
 	if err != nil {
 		return err

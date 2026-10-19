@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>InterceptClient</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/eavc.css">
 </head>
 <body>
   <main class="shell">
@@ -23,6 +24,13 @@
     <section class="actions">
       <label class="primary">Загрузить настройки<input id="configFile" type="file" accept="application/json,.json"></label>
       <a class="secondary" href="/api/diagnostics">Скачать диагностику</a>
+    </section>
+    <section class="eavc-settings">
+      <h3>Где находится EAVC</h3>
+      <p>Обычно клиент находит базу сам. Если этого не произошло, сначала запустите быстрый поиск.</p>
+      <div class="path-row"><input id="eavcPath" placeholder="Например: D:\EAVC или D:\EAVC\main.sqlite"><button id="saveEavc" class="secondary" type="button">Проверить путь</button></div>
+      <div class="search-row"><button id="quickSearch" class="secondary" type="button">Найти EAVC</button><button id="fullSearch" class="secondary" type="button">Искать на всех дисках</button><button id="cancelSearch" class="secondary hidden" type="button">Остановить поиск</button></div>
+      <div id="eavcCandidates" class="candidates"></div>
     </section>
     <p id="message" class="message"></p>
     <footer>Оставьте программу открытой. После восстановления связи отправятся только данные не старше 30 минут.</footer>

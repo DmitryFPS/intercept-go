@@ -74,7 +74,12 @@ func (client *Client) stopWorkerLocked() {
 }
 
 func (client *Client) run(ctx context.Context, cfg config.Client) {
-	source, err := eavc.Open(ctx, cfg.EAVC.SQLitePath)
+	eavcPath, err := client.resolveEAVCPath(ctx, cfg)
+	if err != nil {
+		client.fail("Не найдена база EAVC", err)
+		return
+	}
+	source, err := eavc.Open(ctx, eavcPath)
 	if err != nil {
 		client.fail("Ошибка базы EAVC", err)
 		return
@@ -101,6 +106,11 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		return
 	}
 	key, _ := cfg.Key()
+	location, err := time.LoadLocation(cfg.EAVCTimeZone())
+	if err != nil {
+		client.fail("Ошибка часового пояса", err)
+		return
+	}
 	service := &application.ClientService{
 		ClientID: cfg.ClientID, Source: source, Queue: queue, State: queue,
 		Sender: &telegram.ClientTransport{
@@ -110,6 +120,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		KeyID: cfg.Cryptography.KeyID, Key: key, BatchSize: cfg.Polling.BatchSize,
 		CatchUpExisting: cfg.Polling.CatchUpExisting,
 		MaxEventAge:     time.Duration(cfg.Polling.MaxEventAgeMinutes) * time.Minute,
+		SourceLocation:  location,
 		AttemptTimeout:  20 * time.Second,
 		Logger:          client.Logger,
 		Now:             time.Now,
@@ -120,6 +131,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		status.Detail = "EAVC подключён. Новые данные передаются в течение 30 минут."
 		status.DatabaseOK = true
 		status.TelegramOK = true
+		status.EAVCPath = eavcPath
 	})
 
 	go client.ackLoop(ctx, service, queue)

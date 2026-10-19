@@ -28,8 +28,49 @@ func (handler Handler) Routes() http.Handler {
 		localui.WriteJSON(writer, http.StatusOK, handler.Client.Status())
 	})
 	mux.HandleFunc("POST /api/config/import", handler.importConfig)
+	mux.HandleFunc("POST /api/eavc/search", handler.searchEAVC)
+	mux.HandleFunc("POST /api/eavc/select", handler.selectEAVC)
 	mux.HandleFunc("GET /api/diagnostics", handler.diagnostics)
 	return securityHeaders(mux)
+}
+
+func (handler Handler) searchEAVC(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Extended bool `json:"extended"`
+	}
+	if err := localui.ReadJSON(request, &input, 16*1024); err != nil {
+		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	timeout := 20 * time.Second
+	if input.Extended {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), timeout)
+	defer cancel()
+	candidates, err := handler.Client.SearchEAVC(ctx, input.Extended)
+	if err != nil {
+		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, map[string]any{"candidates": candidates})
+}
+
+func (handler Handler) selectEAVC(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Path string `json:"path"`
+	}
+	if err := localui.ReadJSON(request, &input, 16*1024); err != nil {
+		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
+	defer cancel()
+	if err := handler.Client.SelectEAVC(ctx, input.Path); err != nil {
+		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (handler Handler) importConfig(writer http.ResponseWriter, request *http.Request) {

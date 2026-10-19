@@ -136,7 +136,7 @@ func (handler Handler) addClient(writer http.ResponseWriter, request *http.Reque
 	var input struct {
 		Number          string `json:"number"`
 		Name            string `json:"name"`
-		EAVCPath        string `json:"eavc_path"`
+		TimeZone        string `json:"time_zone"`
 		BotToken        string `json:"bot_token"`
 		ThreadID        int64  `json:"thread_id"`
 		CatchUpExisting bool   `json:"catch_up_existing"`
@@ -148,7 +148,7 @@ func (handler Handler) addClient(writer http.ResponseWriter, request *http.Reque
 	ctx, cancel := context.WithTimeout(handler.Context, 30*time.Second)
 	defer cancel()
 	payload, err := handler.Server.AddClient(ctx, config.ClientRequest{
-		Number: input.Number, Name: input.Name, EAVCPath: input.EAVCPath,
+		Number: input.Number, Name: input.Name, EAVCPath: "auto", TimeZone: input.TimeZone,
 		BotToken: input.BotToken, ThreadID: input.ThreadID, CatchUpExisting: input.CatchUpExisting,
 	})
 	if err != nil {

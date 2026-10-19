@@ -25,6 +25,7 @@ type ClientStatus struct {
 	LastDatabaseRead *time.Time          `json:"last_database_read,omitempty"`
 	LastUpload       *time.Time          `json:"last_upload,omitempty"`
 	LastAcknowledged *time.Time          `json:"last_acknowledged,omitempty"`
+	EAVCPath         string              `json:"eavc_path,omitempty"`
 	Queue            stateDB.ClientStats `json:"queue"`
 	Version          string              `json:"version"`
 }

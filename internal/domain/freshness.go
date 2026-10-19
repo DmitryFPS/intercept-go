@@ -19,10 +19,18 @@ var sourceTimeLayouts = []string{
 	"2006-01-02",
 }
 
-// Freshness вычисляет единый срок доставки по времени изменения в EAVC.
-// Время без часового пояса трактуется как UTC — так же, как в рабочей Python-версии.
+// Freshness вычисляет срок доставки для источников, которые уже сохраняют UTC.
 func Freshness(updatedAt string, observedAt, now time.Time, maxAge time.Duration) (time.Time, time.Time, string) {
-	sourceAt, ok := parseSourceTime(updatedAt)
+	return FreshnessInLocation(updatedAt, observedAt, now, maxAge, time.UTC)
+}
+
+// FreshnessInLocation трактует время без смещения в часовом поясе рабочего места.
+// Строки с явным смещением продолжают разбираться без каких-либо преобразований.
+func FreshnessInLocation(updatedAt string, observedAt, now time.Time, maxAge time.Duration, location *time.Location) (time.Time, time.Time, string) {
+	if location == nil {
+		location = time.UTC
+	}
+	sourceAt, ok := parseSourceTime(updatedAt, location)
 	if !ok {
 		return time.Time{}, now.UTC(), FreshnessInvalidTime
 	}
@@ -42,13 +50,20 @@ func Freshness(updatedAt string, observedAt, now time.Time, maxAge time.Duration
 	return sourceAt, expiresAt, ""
 }
 
-func parseSourceTime(value string) (time.Time, bool) {
+func parseSourceTime(value string, location *time.Location) (time.Time, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return time.Time{}, false
 	}
 	for _, layout := range sourceTimeLayouts {
-		if parsed, err := time.Parse(layout, value); err == nil {
+		var parsed time.Time
+		var err error
+		if strings.Contains(layout, "Z07:00") {
+			parsed, err = time.Parse(layout, value)
+		} else {
+			parsed, err = time.ParseInLocation(layout, value, location)
+		}
+		if err == nil {
 			return parsed, true
 		}
 	}

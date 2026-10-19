@@ -33,6 +33,7 @@ type ClientService struct {
 	BatchSize       int
 	CatchUpExisting bool
 	MaxEventAge     time.Duration
+	SourceLocation  *time.Location
 	AttemptTimeout  time.Duration
 	Logger          *slog.Logger
 	Now             func() time.Time
@@ -208,8 +209,8 @@ func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 	if maxAge <= 0 {
 		maxAge = 30 * time.Minute
 	}
-	sourceAt, expiresAt, freshnessIssue := domain.Freshness(
-		item.Record.UpdatedAt, item.ObservedAt, now, maxAge,
+	sourceAt, expiresAt, freshnessIssue := domain.FreshnessInLocation(
+		item.Record.UpdatedAt, item.ObservedAt, now, maxAge, service.SourceLocation,
 	)
 	id, err := protocol.UUIDv7(now, rand.Reader)
 	if err != nil {

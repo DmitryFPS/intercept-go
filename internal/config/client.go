@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
 
 const ClientSchemaV2 = "intercept-client-config/v2"
@@ -32,6 +33,7 @@ type Client struct {
 
 type EAVC struct {
 	SQLitePath string `json:"sqlite_path"`
+	TimeZone   string `json:"time_zone"`
 }
 
 type ClientTransport struct {
@@ -72,6 +74,9 @@ func (cfg Client) Validate() error {
 	if strings.TrimSpace(cfg.EAVC.SQLitePath) == "" {
 		return errors.New("не задан путь к базе EAVC")
 	}
+	if _, err := time.LoadLocation(cfg.EAVCTimeZone()); err != nil {
+		return errors.New("неверно указан часовой пояс EAVC")
+	}
 	if !validBotToken(cfg.Transport.BotToken) {
 		return errors.New("токен бота точки имеет неверный формат")
 	}
@@ -107,6 +112,14 @@ func (cfg Client) Validate() error {
 		return err
 	}
 	return nil
+}
+
+// EAVCTimeZone сохраняет совместимость с уже выданными конфигурациями v2.
+func (cfg Client) EAVCTimeZone() string {
+	if value := strings.TrimSpace(cfg.EAVC.TimeZone); value != "" {
+		return value
+	}
+	return "Europe/Moscow"
 }
 
 func (cfg Client) IssuerPublicKey() (ed25519.PublicKey, error) {

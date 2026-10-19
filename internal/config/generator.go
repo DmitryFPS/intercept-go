@@ -16,6 +16,7 @@ type ClientRequest struct {
 	Number            string
 	Name              string
 	EAVCPath          string
+	TimeZone          string
 	BotToken          string
 	BotUsername       string
 	ServerBotUsername string
@@ -45,10 +46,18 @@ func GenerateClient(request ClientRequest, now time.Time, random io.Reader) (Cli
 	if err != nil {
 		return Client{}, err
 	}
+	eavcPath := strings.TrimSpace(request.EAVCPath)
+	if eavcPath == "" {
+		eavcPath = "auto"
+	}
+	timeZone := strings.TrimSpace(request.TimeZone)
+	if timeZone == "" {
+		timeZone = "Europe/Moscow"
+	}
 	cfg := Client{
 		Schema: ClientSchemaV2, GeneratedAt: now.UTC(), ClientID: clientID,
 		ClientNumber: strings.TrimSpace(request.Number), ClientName: strings.TrimSpace(request.Name),
-		EAVC: EAVC{SQLitePath: strings.TrimSpace(request.EAVCPath)},
+		EAVC: EAVC{SQLitePath: eavcPath, TimeZone: timeZone},
 		Transport: ClientTransport{
 			BotToken: request.BotToken, BotUsername: request.BotUsername,
 			ServerBotUsername: request.ServerBotUsername,
@@ -59,7 +68,7 @@ func GenerateClient(request ClientRequest, now time.Time, random io.Reader) (Cli
 			KeyID: keyID, KeyBase64: base64.RawStdEncoding.EncodeToString(key),
 		},
 		Polling: ClientPolling{
-			EAVCSeconds: 2, BatchSize: 100, CatchUpExisting: request.CatchUpExisting,
+			EAVCSeconds: 10, BatchSize: 100, CatchUpExisting: request.CatchUpExisting,
 			MaxEventAgeMinutes: 30,
 		},
 	}

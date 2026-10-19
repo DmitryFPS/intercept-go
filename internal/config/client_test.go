@@ -41,6 +41,26 @@ func TestClientConfigRejectsUnknownFieldsAndBadKey(t *testing.T) {
 	}
 }
 
+// Проверяет безопасные значения, которые сервер выдаёт переносному клиенту:
+// путь определяется на точке, база читается раз в 10 секунд, время московское.
+func TestGenerateClientUsesPortableEAVCDefaults(t *testing.T) {
+	random := bytes.NewReader(make([]byte, 128))
+	cfg, err := GenerateClient(ClientRequest{
+		Number: "001", Name: "Текстиль", BotToken: "123456:abcdefghijklmnopqrstuv",
+		BotUsername: "point_bot", ServerBotUsername: "server_bot",
+		ChatID: -1001, ThreadID: 10,
+	}, time.Now(), random)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EAVC.SQLitePath != "auto" || cfg.EAVCTimeZone() != "Europe/Moscow" {
+		t.Fatalf("неверные настройки EAVC: %+v", cfg.EAVC)
+	}
+	if cfg.Polling.EAVCSeconds != 10 {
+		t.Fatalf("ожидался опрос раз в 10 секунд, получено %d", cfg.Polling.EAVCSeconds)
+	}
+}
+
 func validClientConfig() Client {
 	return Client{
 		Schema: ClientSchemaV2, GeneratedAt: time.Now(), ClientID: "textile", ClientNumber: "001", ClientName: "Текстиль",
