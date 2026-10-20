@@ -2,12 +2,12 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>InterceptServer</title><link rel="stylesheet" href="/style.css">
+  <title>EAVC Connect — Центр</title><link rel="stylesheet" href="/style.css">
   <style>.empty-state:empty::before{display:grid;grid-column:1/-1;place-items:center;min-height:150px}</style>
 </head>
 <body>
 <aside class="sidebar">
-  <div class="brand"><span class="brand-mark">IS</span><div><strong>InterceptServer</strong><small>Центр обработки</small></div></div>
+  <div class="brand"><span class="brand-mark">EC</span><div><strong>EAVC Connect</strong><small>Центр управления</small></div></div>
   <nav aria-label="Разделы">
     <button data-page="dashboard" class="active"><span>01</span>Обзор</button>
     <button data-page="transport"><span>02</span>Связь</button>
@@ -18,7 +18,7 @@
   <div class="sidebar-foot"><span class="status-dot" id="sidebarDot"></span><div><b id="sidebarState">Проверяем</b><small id="version"></small></div></div>
 </aside>
 <main>
-  <header class="topbar"><div><span class="eyebrow">НАСТРОЙКА СИСТЕМЫ</span><h1 id="pageTitle">Обзор</h1></div><button id="openHelp" class="button ghost">Как настроить</button></header>
+  <header class="topbar"><div><span id="pageContext" class="eyebrow">СОСТОЯНИЕ СИСТЕМЫ</span><h1 id="pageTitle">Обзор</h1></div><button id="openHelp" class="button ghost">Как настроить</button></header>
   <div id="globalMessage" class="toast" role="status" aria-live="polite"></div>
 
   <section id="dashboard" class="page active">
@@ -29,25 +29,25 @@
   </section>
 
   <section id="transport" class="page">
-    <div class="section-head"><div><span class="eyebrow">ШАГ 1</span><h2>Связь с рабочими точками</h2><p>Укажите Telegram-группу, которую программы используют для защищённого обмена.</p></div><span id="transportBadge" class="badge neutral">Не настроено</span></div>
-    <div class="two-columns align-start"><form id="transportForm" class="card form"><div class="card-head full"><div><h3>Подключение сервера</h3><p>Сначала программа проверит доступ, затем сохранит настройки.</p></div></div><label class="full">Токен бота сервера<input name="bot_token" type="password" required autocomplete="off" placeholder="Вставьте токен"></label><label>ID группы для обмена<input name="chat_id" type="number" required placeholder="Начинается с -100"></label><label>Ссылка-приглашение <span class="optional">необязательно</span><input name="invite_link" placeholder="Вставьте ссылку"></label><div class="form-actions full"><button class="button primary">Проверить и сохранить</button></div></form><article class="card instruction"><div class="card-head"><h3>Что подготовить в Telegram</h3></div><ol><li>Создайте закрытую группу и включите в ней темы.</li><li>Для каждого рабочего места создайте отдельную тему.</li><li>Добавьте бота сервера и ботов рабочих мест.</li><li>Выдайте боту сервера право отправлять и удалять сообщения.</li></ol><p class="notice">Все действия в Telegram выполняете вы. Программа только проверяет введённые данные.</p></article></div>
+    <div class="section-head page-intro"><p>Укажите Telegram-группу, которую программы используют для защищённого обмена.</p><span id="transportBadge" class="badge neutral">Не настроено</span></div>
+    <div class="two-columns align-start"><form id="transportForm" class="card form"><div class="card-head full"><div><h3>Подключение центра</h3><p>Сначала программа проверит доступ, затем сохранит настройки.</p></div></div><label class="full">Токен бота центра<input name="bot_token" type="password" required autocomplete="off" placeholder="Вставьте токен"></label><label>ID группы для обмена<input name="chat_id" type="number" required placeholder="Начинается с -100"></label><label>Ссылка-приглашение <span class="optional">необязательно</span><input name="invite_link" placeholder="Вставьте ссылку"></label><div class="form-actions full"><button class="button primary">Проверить и сохранить</button></div></form><article class="card instruction"><div class="card-head"><h3>Что подготовить в Telegram</h3></div><ol><li>Создайте закрытую группу и включите в ней темы.</li><li>Для каждого рабочего места создайте отдельную тему.</li><li>Добавьте бота центра и ботов рабочих мест.</li><li>Выдайте боту центра право отправлять и удалять сообщения.</li></ol><p class="notice">Все действия в Telegram выполняете вы. Программа только проверяет введённые данные.</p></article></div>
   </section>
 
   <section id="destinations" class="page">
-    <div class="section-head"><div><span class="eyebrow">ШАГ 2</span><h2>Получатели</h2><p>Telegram-группы и Word-папки, куда сервер доставляет результат.</p></div><button id="addDestination" class="button primary">Добавить получателя</button></div>
+    <div class="section-head page-intro"><p>Telegram-группы и Word-папки, куда центр доставляет результат.</p><button id="addDestination" class="button primary">Добавить получателя</button></div>
     <div class="toolbar"><label class="search"><span>Поиск</span><input id="destinationSearch" placeholder="Название или тип"></label><span id="destinationCount" class="muted"></span></div><div id="destinationsList" class="card-grid empty-state"></div>
   </section>
 
   <section id="clients" class="page">
-    <div class="section-head"><div><span class="eyebrow">ШАГ 3</span><h2>Рабочие точки</h2><p>Для каждого компьютера создаётся отдельный файл настроек и используется отдельный бот.</p></div><button id="addClient" class="button primary">Добавить рабочую точку</button></div><div id="clientsList" class="card-grid empty-state"></div>
+    <div class="section-head page-intro"><p>Для каждого компьютера создаётся отдельный файл настроек и используется отдельный бот.</p><button id="addClient" class="button primary">Добавить рабочую точку</button></div><div id="clientsList" class="card-grid empty-state"></div>
   </section>
 
   <section id="routes" class="page">
-    <div class="section-head"><div><span class="eyebrow">ШАГ 4</span><h2>Маршруты</h2><p>Укажите, куда отправлять данные для каждой позиции.</p></div><button id="addPosition" class="button primary">Добавить позицию</button></div>
+    <div class="section-head page-intro"><p>Укажите, куда отправлять данные для каждой позиции.</p><button id="addPosition" class="button primary">Добавить позицию</button></div>
     <div class="route-toolbar card"><label class="search"><span>Найти позицию</span><input id="positionSearch" placeholder="Начните вводить название"></label><div><span id="rulesMeta" class="muted"></span><span id="draftBadge" class="badge warning hidden">Есть неопубликованный черновик</span></div></div>
     <article id="unknownRoute" class="route-card system-route"></article><div id="positionsList" class="route-list empty-state"></div>
     <div class="pagination"><button id="positionPrev" class="button ghost">Назад</button><span id="positionPage"></span><button id="positionNext" class="button ghost">Дальше</button></div>
-    <div class="publish-bar"><div><strong>Черновик автоматически сохраняется в базе сервера</strong><small>Он сохранится после обновления страницы и начнёт действовать только после публикации.</small></div><button id="publishRules" class="button primary">Опубликовать маршруты</button></div>
+    <div class="publish-bar"><div><strong>Черновик автоматически сохраняется в центре</strong><small>Он сохранится после обновления страницы и начнёт действовать только после публикации.</small></div><button id="publishRules" class="button primary">Опубликовать маршруты</button></div>
     <article class="card history"><div class="card-head history-head"><div><h3>История версий</h3><p>Хранятся действующая и до 100 предыдущих версий. Восстановление создаёт новую версию.</p></div><button id="toggleRuleHistory" class="button ghost hidden" type="button">Показать все</button></div><div id="rulesHistory" class="simple-list empty-state"></div></article>
   </section>
 </main>
@@ -58,6 +58,6 @@
 
 <dialog id="positionDialog" class="modal route-modal"><form id="positionForm" method="dialog"><div class="modal-head"><div><span class="eyebrow">МАРШРУТ ПОЗИЦИИ</span><h2 id="positionDialogTitle">Новая позиция</h2></div><button type="button" class="icon-button" data-close="positionDialog" aria-label="Закрыть">×</button></div><input name="original_key" type="hidden"><label class="position-name">Название позиции<input name="name" required placeholder="Точно как в исходной программе"></label><div id="routeEditor" class="route-editor"></div><div class="modal-actions"><button type="button" class="button ghost" data-close="positionDialog">Отмена</button><button class="button primary" value="save">Сохранить в черновик</button></div></form></dialog>
 
-<dialog id="helpDialog" class="modal help-modal"><div class="modal-head"><div><span class="eyebrow">ПОРЯДОК РАБОТЫ</span><h2>Настройка без скрытых шагов</h2></div><button type="button" class="icon-button" data-close="helpDialog" aria-label="Закрыть">×</button></div><ol><li>Подключите бота сервера и группу для обмена.</li><li>Добавьте получателей с понятными вам названиями.</li><li>Создайте файл настроек для каждого рабочего компьютера.</li><li>Добавьте позиции и выберите, куда их отправлять.</li><li>Опубликуйте маршруты и выполните тест связи.</li></ol><p class="notice">Группы и темы Telegram вы создаёте вручную. Программа проверяет настройки, но не меняет Telegram.</p></dialog>
+<dialog id="helpDialog" class="modal help-modal"><div class="modal-head"><div><span class="eyebrow">ПОРЯДОК РАБОТЫ</span><h2>Настройка без скрытых шагов</h2></div><button type="button" class="icon-button" data-close="helpDialog" aria-label="Закрыть">×</button></div><ol><li>Подключите бота центра и группу для обмена.</li><li>Добавьте получателей с понятными вам названиями.</li><li>Создайте файл настроек для каждого рабочего компьютера.</li><li>Добавьте позиции и выберите, куда их отправлять.</li><li>Опубликуйте маршруты и выполните тест связи.</li></ol><p class="notice">Группы и темы Telegram вы создаёте вручную. Программа проверяет настройки, но не меняет Telegram.</p></dialog>
 <script src="/app.js"></script>
 </body></html>

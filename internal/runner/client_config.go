@@ -87,7 +87,7 @@ func (client *Client) CheckTransport(ctx context.Context) error {
 		status.LastTransportCheck = nil
 		status.State = "starting"
 		status.Title = "Проверяем связь"
-		status.Detail = "Тестовый пакет отправлен. Ожидаем ответ сервера."
+		status.Detail = "Тестовый пакет отправлен. Ожидаем ответ центра."
 	})
 	go client.reportTransportCheckTimeout(client.applicationContext(), probeID)
 	return nil

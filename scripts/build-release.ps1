@@ -15,8 +15,8 @@ $distRoot = Join-Path $releaseBase $Version
 # результат воспроизводимым и не зависит от прав на системные AppData/GOPATH.
 $buildCacheRoot = Join-Path $workspaceRoot '.build-cache\release'
 New-Item -ItemType Directory -Force -Path $buildCacheRoot | Out-Null
-$clientRoot = Join-Path $distRoot 'InterceptClient'
-$serverRoot = Join-Path $distRoot 'InterceptServer'
+$clientRoot = Join-Path $distRoot 'EAVC Connect Station'
+$serverRoot = Join-Path $distRoot 'EAVC Connect Center'
 $env:GOPATH = Join-Path $buildCacheRoot 'gopath'
 $env:GOCACHE = Join-Path $buildCacheRoot 'gocache'
 $env:GOMODCACHE = Join-Path $buildCacheRoot 'gomodcache'
@@ -49,18 +49,18 @@ try {
     New-Item -ItemType Directory -Path $clientRoot, $serverRoot | Out-Null
 
     $clientFlags = "-s -w -H=windowsgui -X main.version=$Version"
-    go build -trimpath -ldflags $clientFlags -o (Join-Path $clientRoot 'InterceptClient.exe') ./cmd/intercept-client
-    if ($LASTEXITCODE -ne 0) { throw 'Не удалось собрать InterceptClient.' }
-    go build -trimpath -ldflags $clientFlags -o (Join-Path $serverRoot 'InterceptServer.exe') ./cmd/intercept-server
-    if ($LASTEXITCODE -ne 0) { throw 'Не удалось собрать InterceptServer.' }
+    go build -trimpath -ldflags $clientFlags -o (Join-Path $clientRoot 'EAVC Connect Station.exe') ./cmd/intercept-client
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось собрать EAVC Connect — Рабочая точка.' }
+    go build -trimpath -ldflags $clientFlags -o (Join-Path $serverRoot 'EAVC Connect Center.exe') ./cmd/intercept-server
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось собрать EAVC Connect — Центр управления.' }
 
     Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\client-readme.txt') -Destination (Join-Path $clientRoot 'ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\server-readme.txt') -Destination (Join-Path $serverRoot 'ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'assets\word_template.docx') -Destination (Join-Path $serverRoot 'word_template.docx')
     New-Item -ItemType Directory -Path (Join-Path $clientRoot 'data'), (Join-Path $clientRoot 'logs'), (Join-Path $serverRoot 'data'), (Join-Path $serverRoot 'logs') | Out-Null
 
-    $clientArchive = Join-Path $distRoot 'InterceptClient-portable.zip'
-    $serverArchive = Join-Path $distRoot 'InterceptServer-portable.zip'
+    $clientArchive = Join-Path $distRoot 'EAVC-Connect-Station-portable.zip'
+    $serverArchive = Join-Path $distRoot 'EAVC-Connect-Center-portable.zip'
     Compress-Archive -Path $clientRoot -DestinationPath $clientArchive -CompressionLevel Optimal
     Compress-Archive -Path $serverRoot -DestinationPath $serverArchive -CompressionLevel Optimal
 

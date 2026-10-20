@@ -119,7 +119,7 @@ func (handler Handler) diagnostics(writer http.ResponseWriter, _ *http.Request) 
 		return
 	}
 	writer.Header().Set("Content-Type", "application/zip")
-	writer.Header().Set("Content-Disposition", `attachment; filename="InterceptClient-diagnostics.zip"`)
+	writer.Header().Set("Content-Disposition", `attachment; filename="EAVC-Connect-Station-diagnostics.zip"`)
 	writer.Write(payload)
 }
 
@@ -127,6 +127,7 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		writer.Header().Set("X-Frame-Options", "DENY")
+		writer.Header().Set("Cache-Control", "no-store, max-age=0")
 		writer.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'")
 		next.ServeHTTP(writer, request)
 	})

@@ -8,6 +8,7 @@
 /.gotmp/
 /.cache/
 /.preview/
+/.build-cache/
 *.log
 *.local.json
 *.secret.json

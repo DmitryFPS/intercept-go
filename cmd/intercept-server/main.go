@@ -22,7 +22,7 @@ var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		fmt.Printf("InterceptServer %s\n", buildVersion())
+		fmt.Printf("EAVC Connect Center %s\n", buildVersion())
 		return
 	}
 	baseDir, err := executableDir()

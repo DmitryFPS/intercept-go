@@ -93,7 +93,7 @@ async function selectEAVC(path) {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path})
     });
     element('eavcPath').value = path;
-    showMessage('База EAVC выбрана. Клиент запускается.', 'success');
+    showMessage('База EAVC выбрана. Рабочая точка запускается.', 'success');
     await refresh();
   } catch (error) {
     showMessage(error.message);
@@ -125,7 +125,7 @@ element('checkTransport').addEventListener('click', async () => {
   showMessage('Отправляем проверочный пакет…', 'info');
   try {
     await requestJSON('/api/transport/check', {method: 'POST'});
-    showMessage('Пакет отправлен. Ответ сервера появится в блоке «Подтверждение сервера».', 'success');
+    showMessage('Пакет отправлен. Ответ центра появится в блоке «Подтверждение центра».', 'success');
   } catch (error) {
     showMessage(error.message);
   }

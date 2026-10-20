@@ -120,7 +120,7 @@ func NewServer(ctx context.Context, baseDir, version string, logger *slog.Logger
 		BaseDir: baseDir, Version: version, Logger: logger, Store: store,
 		status: ServerStatus{
 			State: "setup", Title: "Настройте связь",
-			Detail:  "Укажите бота сервера и группу, через которую рабочие точки будут обмениваться данными.",
+			Detail:  "Укажите бота центра и группу, через которую рабочие точки будут обмениваться данными.",
 			Version: version,
 		},
 	}

@@ -198,7 +198,7 @@ func (client *Client) collectAndDispatch(ctx context.Context, service *applicati
 		client.update(func(status *ClientStatus) {
 			status.State = "running"
 			status.Title = "Программа работает"
-			status.Detail = "Новые данные загружены и ожидают подтверждения сервера."
+			status.Detail = "Новые данные загружены и ожидают подтверждения центра."
 			status.TelegramOK = true
 			status.LastUpload = &now
 		})
@@ -211,7 +211,7 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 		count, err := service.ReceiveAcknowledgements(ctx)
 		if err != nil && ctx.Err() == nil {
 			client.transientFailure(
-				"Нет подтверждения сервера",
+				"Нет подтверждения центра",
 				"Связь временно прервалась. Программа повторит проверку автоматически; данные сохранены.",
 				err,
 			)
@@ -228,11 +228,11 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 				}
 				status.State = "running"
 				status.Title = "Программа работает"
-				status.Detail = "Сервер подтвердил получение данных."
+				status.Detail = "Центр подтвердил получение данных."
 				status.LastAcknowledged = &now
 				if probeExists && probeID == client.pendingProbeID {
 					status.LastTransportCheck = &probeAt
-					status.Detail = "Двусторонняя связь с сервером проверена."
+					status.Detail = "Двусторонняя связь с центром проверена."
 					client.pendingProbeID = ""
 				}
 			})

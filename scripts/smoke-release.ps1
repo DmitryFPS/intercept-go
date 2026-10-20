@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $resolvedDist = (Resolve-Path -LiteralPath $DistRoot).Path
-$smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("InterceptSmoke-" + [guid]::NewGuid().ToString('N'))
+$smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EAVCConnectSmoke-" + [guid]::NewGuid().ToString('N'))
 $processes = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
 
 function Wait-LocalApi {
@@ -55,8 +55,8 @@ function Test-TcpPort {
 try {
     New-Item -ItemType Directory -Path $smokeRoot | Out-Null
     $cases = @(
-        @{ Archive = 'InterceptClient-portable.zip'; Folder = 'Клиент Тест'; Exe = 'InterceptClient.exe'; Uri = 'http://127.0.0.1:17631/api/status' },
-        @{ Archive = 'InterceptServer-portable.zip'; Folder = 'Сервер Тест'; Exe = 'InterceptServer.exe'; Uri = 'http://127.0.0.1:17632/api/status' }
+        @{ Archive = 'EAVC-Connect-Station-portable.zip'; Folder = 'Рабочая точка Тест'; Exe = 'EAVC Connect Station.exe'; Uri = 'http://127.0.0.1:17631/api/status' },
+        @{ Archive = 'EAVC-Connect-Center-portable.zip'; Folder = 'Центр Тест'; Exe = 'EAVC Connect Center.exe'; Uri = 'http://127.0.0.1:17632/api/status' }
     )
     foreach ($case in $cases) {
         if (Test-TcpPort -Uri ([uri]$case.Uri)) {
@@ -103,7 +103,7 @@ finally {
     $resolvedSmoke = [System.IO.Path]::GetFullPath($smokeRoot)
     $resolvedTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
     if ($resolvedSmoke.StartsWith($resolvedTemp, [System.StringComparison]::OrdinalIgnoreCase) -and
-        (Split-Path -Leaf $resolvedSmoke).StartsWith('InterceptSmoke-')) {
+        (Split-Path -Leaf $resolvedSmoke).StartsWith('EAVCConnectSmoke-')) {
         Remove-Item -LiteralPath $resolvedSmoke -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

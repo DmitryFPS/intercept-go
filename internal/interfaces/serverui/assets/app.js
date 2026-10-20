@@ -8,6 +8,14 @@ const pageTitles = {
   routes: 'Маршруты'
 };
 
+const pageContexts = {
+  dashboard: 'СОСТОЯНИЕ СИСТЕМЫ',
+  transport: 'ШАГ 1 · НАСТРОЙКА СИСТЕМЫ',
+  destinations: 'ШАГ 2 · НАСТРОЙКА СИСТЕМЫ',
+  clients: 'ШАГ 3 · НАСТРОЙКА СИСТЕМЫ',
+  routes: 'ШАГ 4 · НАСТРОЙКА СИСТЕМЫ'
+};
+
 let status = null;
 let destinations = {};
 let clients = [];
@@ -93,6 +101,7 @@ document.querySelectorAll('.sidebar nav button').forEach(button => {
     button.classList.add('active');
     $(button.dataset.page).classList.add('active');
     $('pageTitle').textContent = pageTitles[button.dataset.page];
+    $('pageContext').textContent = pageContexts[button.dataset.page];
     try {
       if (button.dataset.page === 'dashboard') await loadOverview();
       if (button.dataset.page === 'destinations') await loadDestinations();
@@ -376,7 +385,7 @@ $('clientForm').addEventListener('submit', async event => {
     const blob = await response.blob();
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `InterceptClient-${data.get('number')}.json`;
+    link.download = `EAVC Connect Station-${data.get('number')}.json`;
     link.click();
     URL.revokeObjectURL(link.href);
     closeDialog('clientDialog');
@@ -402,7 +411,7 @@ async function loadRules() {
   currentPositionPage = 1;
   renderRules();
   await loadRuleHistory();
-  if (rulesDirty) notify('Неопубликованный черновик восстановлен из базы сервера.', true);
+  if (rulesDirty) notify('Неопубликованный черновик восстановлен из центра.', true);
 }
 
 function positionName(key) {
@@ -541,7 +550,7 @@ $('positionsList').addEventListener('click', async event => {
       await post('/api/rule-draft', rules);
       rulesDirty = true;
       renderRules();
-      notify('Позиция удалена, черновик сохранён в базе сервера.', true);
+      notify('Позиция удалена, черновик сохранён в центре.', true);
     } catch (error) {
       rules = previous;
       renderRules();
@@ -583,7 +592,7 @@ $('positionForm').addEventListener('submit', async event => {
     rulesDirty = true;
     closeDialog('positionDialog');
     renderRules();
-    notify('Черновик сохранён в базе сервера.', true);
+    notify('Черновик сохранён в центре.', true);
   } catch (error) {
     rules = previous;
     notify(error.message);
