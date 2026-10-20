@@ -41,7 +41,7 @@ func (handler Handler) checkTransport(writer http.ResponseWriter, request *http.
 	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
 	defer cancel()
 	if err := handler.Client.CheckTransport(ctx); err != nil {
-		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось проверить связь с центром. Программа продолжит попытки автоматически.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusAccepted, map[string]bool{"sent": true})
@@ -52,7 +52,7 @@ func (handler Handler) searchEAVC(writer http.ResponseWriter, request *http.Requ
 		Extended bool `json:"extended"`
 	}
 	if err := localui.ReadJSON(request, &input, 16*1024); err != nil {
-		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось начать поиск. Обновите страницу и повторите попытку.", err)
 		return
 	}
 	timeout := 20 * time.Second
@@ -63,7 +63,7 @@ func (handler Handler) searchEAVC(writer http.ResponseWriter, request *http.Requ
 	defer cancel()
 	candidates, err := handler.Client.SearchEAVC(ctx, input.Extended)
 	if err != nil {
-		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		handler.publicError(writer, http.StatusBadRequest, "Поиск EAVC не завершён. Повторите поиск или укажите путь вручную.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]any{"candidates": candidates})
@@ -74,13 +74,13 @@ func (handler Handler) selectEAVC(writer http.ResponseWriter, request *http.Requ
 		Path string `json:"path"`
 	}
 	if err := localui.ReadJSON(request, &input, 16*1024); err != nil {
-		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		handler.publicError(writer, http.StatusBadRequest, "Укажите путь к базе EAVC.", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
 	defer cancel()
 	if err := handler.Client.SelectEAVC(ctx, input.Path); err != nil {
-		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		handler.publicError(writer, http.StatusBadRequest, "Выбранная база EAVC не открылась. Проверьте путь и доступ к файлу.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
@@ -106,7 +106,7 @@ func (handler Handler) importConfig(writer http.ResponseWriter, request *http.Re
 	ctx, cancel := context.WithTimeout(handler.Context, 30*time.Second)
 	defer cancel()
 	if err := handler.Client.ImportConfig(ctx, payload); err != nil {
-		localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		handler.publicError(writer, http.StatusBadRequest, "Файл настроек не принят. Скачайте его заново в центре управления.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
@@ -115,12 +115,19 @@ func (handler Handler) importConfig(writer http.ResponseWriter, request *http.Re
 func (handler Handler) diagnostics(writer http.ResponseWriter, _ *http.Request) {
 	payload, err := handler.Client.Diagnostics()
 	if err != nil {
-		localui.WriteJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		handler.publicError(writer, http.StatusInternalServerError, "Не удалось подготовить диагностику. Перезапустите программу и повторите попытку.", err)
 		return
 	}
 	writer.Header().Set("Content-Type", "application/zip")
 	writer.Header().Set("Content-Disposition", `attachment; filename="EAVC-Connect-Station-diagnostics.zip"`)
 	writer.Write(payload)
+}
+
+func (handler Handler) publicError(writer http.ResponseWriter, status int, message string, err error) {
+	if handler.Client.Logger != nil {
+		handler.Client.Logger.Warn("операция интерфейса не выполнена", "message", message, "error", err)
+	}
+	localui.WriteJSON(writer, status, map[string]string{"error": message})
 }
 
 func securityHeaders(next http.Handler) http.Handler {

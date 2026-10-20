@@ -60,7 +60,7 @@ func (handler Handler) Routes() http.Handler {
 func (handler Handler) restoreDefaultWordTemplate(writer http.ResponseWriter, _ *http.Request) {
 	path, err := handler.Server.RestoreDefaultWordTemplate()
 	if err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось восстановить стандартный шаблон Word.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]string{"path": path})
@@ -69,7 +69,7 @@ func (handler Handler) restoreDefaultWordTemplate(writer http.ResponseWriter, _ 
 func (handler Handler) destinationWordTemplate(writer http.ResponseWriter, request *http.Request) {
 	payload, filename, err := handler.Server.DestinationWordTemplate(request.PathValue("id"))
 	if err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось скачать шаблон Word.", err)
 		return
 	}
 	writer.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
@@ -81,7 +81,7 @@ func (handler Handler) destinationWordTemplate(writer http.ResponseWriter, reque
 func (handler Handler) clientConfig(writer http.ResponseWriter, request *http.Request) {
 	payload, client, err := handler.Server.ClientConfig(request.Context(), request.PathValue("id"))
 	if err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось подготовить файл настроек рабочей точки.", err)
 		return
 	}
 	filename := "EAVC Connect Station-" + safeFilename(client.Number) + ".json"
@@ -93,7 +93,7 @@ func (handler Handler) clientConfig(writer http.ResponseWriter, request *http.Re
 func (handler Handler) diagnostics(writer http.ResponseWriter, request *http.Request) {
 	payload, err := handler.Server.Diagnostics(request.Context())
 	if err != nil {
-		localui.WriteJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		handler.publicError(writer, http.StatusInternalServerError, "Не удалось подготовить диагностику. Перезапустите центр и повторите попытку.", err)
 		return
 	}
 	writer.Header().Set("Content-Type", "application/zip")
@@ -104,7 +104,7 @@ func (handler Handler) diagnostics(writer http.ResponseWriter, request *http.Req
 func (handler Handler) ruleVersions(writer http.ResponseWriter, request *http.Request) {
 	history, err := handler.Server.RuleHistory(request.Context())
 	if err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось загрузить историю маршрутов.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, history)
@@ -113,11 +113,11 @@ func (handler Handler) ruleVersions(writer http.ResponseWriter, request *http.Re
 func (handler Handler) restoreRules(writer http.ResponseWriter, request *http.Request) {
 	version, err := strconv.ParseInt(request.PathValue("version"), 10, 64)
 	if err != nil || version <= 0 {
-		badRequest(writer, fmt.Errorf("некорректная версия маршрутов"))
+		handler.publicError(writer, http.StatusBadRequest, "Выбрана некорректная версия маршрутов.", err)
 		return
 	}
 	if err := handler.Server.RestoreRules(request.Context(), version, "Локальный администратор"); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось восстановить выбранную версию маршрутов.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
@@ -126,13 +126,13 @@ func (handler Handler) restoreRules(writer http.ResponseWriter, request *http.Re
 func (handler Handler) setup(writer http.ResponseWriter, request *http.Request) {
 	var setup runner.TransportSetup
 	if err := localui.ReadJSON(request, &setup, 1024*1024); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Проверьте заполнение полей связи.", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(handler.Context, 30*time.Second)
 	defer cancel()
 	if err := handler.Server.ConfigureTransport(ctx, setup); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось проверить связь с Telegram. Проверьте токен и ID группы.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
@@ -141,7 +141,7 @@ func (handler Handler) setup(writer http.ResponseWriter, request *http.Request) 
 func (handler Handler) clients(writer http.ResponseWriter, request *http.Request) {
 	clients, err := handler.Server.Clients(request.Context())
 	if err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось загрузить список рабочих точек.", err)
 		return
 	}
 	type safeClient struct {
@@ -173,7 +173,7 @@ func (handler Handler) addClient(writer http.ResponseWriter, request *http.Reque
 		CatchUpExisting bool   `json:"catch_up_existing"`
 	}
 	if err := localui.ReadJSON(request, &input, 1024*1024); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Проверьте заполнение полей рабочей точки.", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(handler.Context, 30*time.Second)
@@ -183,7 +183,7 @@ func (handler Handler) addClient(writer http.ResponseWriter, request *http.Reque
 		BotToken: input.BotToken, ThreadID: input.ThreadID, CatchUpExisting: input.CatchUpExisting,
 	})
 	if err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось создать настройки рабочей точки. Проверьте токен, тему и введённые данные.", err)
 		return
 	}
 	filename := "EAVC Connect Station-" + safeFilename(input.Number) + ".json"
@@ -195,13 +195,13 @@ func (handler Handler) addClient(writer http.ResponseWriter, request *http.Reque
 func (handler Handler) addDestination(writer http.ResponseWriter, request *http.Request) {
 	var setup runner.DestinationSetup
 	if err := localui.ReadJSON(request, &setup, 1024*1024); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Проверьте заполнение полей получателя.", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(handler.Context, 30*time.Second)
 	defer cancel()
 	if err := handler.Server.AddDestination(ctx, setup); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось сохранить получателя. Проверьте поля, шаблон и доступ к месту назначения.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
@@ -211,7 +211,7 @@ func (handler Handler) deleteDestination(writer http.ResponseWriter, request *ht
 	ctx, cancel := context.WithTimeout(handler.Context, 30*time.Second)
 	defer cancel()
 	if err := handler.Server.DeleteDestination(ctx, request.PathValue("id")); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось удалить получателя. Повторите попытку.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
@@ -220,7 +220,7 @@ func (handler Handler) deleteDestination(writer http.ResponseWriter, request *ht
 func (handler Handler) rules(writer http.ResponseWriter, request *http.Request) {
 	rules, err := handler.Server.Rules(request.Context())
 	if err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось загрузить маршруты.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, rules)
@@ -229,7 +229,7 @@ func (handler Handler) rules(writer http.ResponseWriter, request *http.Request) 
 func (handler Handler) ruleDraft(writer http.ResponseWriter, request *http.Request) {
 	rules, exists, err := handler.Server.RuleDraft(request.Context())
 	if err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось загрузить черновик маршрутов.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, struct {
@@ -241,11 +241,11 @@ func (handler Handler) ruleDraft(writer http.ResponseWriter, request *http.Reque
 func (handler Handler) saveRuleDraft(writer http.ResponseWriter, request *http.Request) {
 	var rules domain.RuleSet
 	if err := localui.ReadJSON(request, &rules, 4*1024*1024); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Проверьте настройки маршрута.", err)
 		return
 	}
 	if err := handler.Server.SaveRuleDraft(request.Context(), rules); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось сохранить черновик маршрутов.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
@@ -254,7 +254,7 @@ func (handler Handler) saveRuleDraft(writer http.ResponseWriter, request *http.R
 func (handler Handler) publishRules(writer http.ResponseWriter, request *http.Request) {
 	var rules domain.RuleSet
 	if err := localui.ReadJSON(request, &rules, 4*1024*1024); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Проверьте настройки маршрутов.", err)
 		return
 	}
 	author := strings.TrimSpace(request.Header.Get("X-Operator"))
@@ -262,14 +262,17 @@ func (handler Handler) publishRules(writer http.ResponseWriter, request *http.Re
 		author = "Локальный администратор"
 	}
 	if err := handler.Server.PublishRules(request.Context(), rules, author); err != nil {
-		badRequest(writer, err)
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось опубликовать маршруты.", err)
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func badRequest(writer http.ResponseWriter, err error) {
-	localui.WriteJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+func (handler Handler) publicError(writer http.ResponseWriter, status int, message string, err error) {
+	if handler.Server.Logger != nil {
+		handler.Server.Logger.Warn("операция интерфейса не выполнена", "message", message, "error", err)
+	}
+	localui.WriteJSON(writer, status, map[string]string{"error": message})
 }
 
 func safeFilename(value string) string {
