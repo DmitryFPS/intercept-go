@@ -41,7 +41,7 @@ func (server *Server) restartWorker(parent context.Context) error {
 	server.config = cloneServerConfig(cfg)
 	server.status.Configured = true
 	server.status.State = "starting"
-	server.status.Title = "Запуск сервера"
+	server.status.Title = "Запуск центра"
 	server.status.Detail = "Проверяем связь и получателей."
 	server.status.InviteLink = cfg.Transport.InviteLink
 	server.status.Destinations = destinationIDs(cfg.Destinations)
@@ -101,7 +101,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	}
 	server.update(func(status *ServerStatus) {
 		status.State = "running"
-		status.Title = "Сервер работает"
+		status.Title = "Центр работает"
 		status.Detail = "Получаем данные точек и выполняем маршруты."
 		status.TransportOK = true
 	})
@@ -131,6 +131,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			}
 			continue
 		}
+		server.transportRecovered()
 		for _, packet := range packets {
 			if packet.ProbeID != "" {
 				if err := receiver.AcknowledgeProbe(ctx, packet.SenderBotUsername, packet.ProbeID); err != nil {
@@ -169,6 +170,18 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			_ = server.Store.SaveValue(ctx, serverOffsetName, strconv.FormatInt(offset, 10))
 		}
 	}
+}
+
+func (server *Server) transportRecovered() {
+	server.update(func(status *ServerStatus) {
+		status.TransportOK = true
+		if status.State != "waiting" || status.Title != "Telegram временно недоступен" {
+			return
+		}
+		status.State = "running"
+		status.Title = "Центр работает"
+		status.Detail = "Связь с Telegram восстановлена. Получаем данные точек и выполняем маршруты."
+	})
 }
 
 func (server *Server) deleteTransportPacket(ctx context.Context, receiver *telegram.ServerReceiver, messageID int64) {

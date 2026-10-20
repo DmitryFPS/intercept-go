@@ -194,7 +194,10 @@ func (client *Client) collectAndDispatch(ctx context.Context, service *applicati
 			"Данные сохранены на компьютере. Программа повторит отправку автоматически.",
 			err,
 		)
-	} else if count > 0 {
+	} else {
+		client.transportRecovered("EAVC подключён.")
+	}
+	if err == nil && count > 0 {
 		client.update(func(status *ClientStatus) {
 			status.State = "running"
 			status.Title = "Программа работает"
@@ -218,6 +221,7 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		client.transportRecovered("EAVC подключён.")
 		if count > 0 {
 			now := time.Now().UTC()
 			probeID, probeAt, probeExists, _ := service.LastTransportProbe(ctx)
@@ -239,6 +243,19 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 		}
 		client.refreshStats(ctx, queue)
 	}
+}
+
+func (client *Client) transportRecovered(detail string) {
+	client.update(func(status *ClientStatus) {
+		status.TelegramOK = true
+		if status.State != "waiting" ||
+			(status.Title != "Telegram временно недоступен" && status.Title != "Нет подтверждения центра") {
+			return
+		}
+		status.State = "running"
+		status.Title = "Программа работает"
+		status.Detail = detail
+	})
 }
 
 func (client *Client) refreshStats(ctx context.Context, queue *stateDB.ClientQueue) {

@@ -146,7 +146,7 @@ func (server *Server) Start(ctx context.Context) {
 	server.mu.Unlock()
 	if _, err := os.Stat(server.configPath()); err == nil {
 		if err := server.restartWorker(rootContext); err != nil {
-			server.fail("Ошибка настроек сервера", err)
+			server.fail("Ошибка настроек центра", err)
 		}
 	}
 	server.background.Add(2)
