@@ -1,6 +1,10 @@
 package runner
 
-import "testing"
+import (
+	"errors"
+	"log/slog"
+	"testing"
+)
 
 func TestClientTransportRecoveryClearsTemporaryWarning(t *testing.T) {
 	client := &Client{status: ClientStatus{
@@ -32,5 +36,23 @@ func TestTransportRecoveryDoesNotHideUnrelatedFailure(t *testing.T) {
 	status := client.Status()
 	if status.Title != "Не удалось прочитать EAVC" || status.Detail != "сбой базы" {
 		t.Fatalf("посторонняя ошибка была скрыта: %#v", status)
+	}
+}
+
+func TestClientFailureDoesNotExposeTechnicalError(t *testing.T) {
+	client := &Client{Logger: slog.Default()}
+	client.fail("Не удалось подключиться", "Повторите попытку позже.", errors.New("deleteWebhook: TLS handshake timeout"))
+	status := client.Status()
+	if status.Detail != "Повторите попытку позже." {
+		t.Fatalf("в интерфейс попала техническая ошибка: %#v", status)
+	}
+}
+
+func TestServerFailureDoesNotExposeTechnicalError(t *testing.T) {
+	server := &Server{Logger: slog.Default()}
+	server.fail("Не удалось подключиться", "Повторите попытку позже.", errors.New("getUpdates: unexpected EOF"))
+	status := server.Status()
+	if status.Detail != "Повторите попытку позже." {
+		t.Fatalf("в интерфейс попала техническая ошибка: %#v", status)
 	}
 }

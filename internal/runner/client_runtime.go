@@ -3,7 +3,6 @@ package runner
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"path/filepath"
 	"time"
 
@@ -77,39 +76,77 @@ func (client *Client) stopWorkerLocked() {
 func (client *Client) run(ctx context.Context, cfg config.Client) {
 	eavcPath, err := client.resolveEAVCPath(ctx, cfg)
 	if err != nil {
-		client.fail("Не найдена база EAVC", err)
+		client.fail(
+			"Не найдена база EAVC",
+			"Нажмите «Найти EAVC» или укажите путь к базе вручную.",
+			err,
+		)
 		return
 	}
 	source, err := eavc.Open(ctx, eavcPath)
 	if err != nil {
-		client.fail("Ошибка базы EAVC", err)
+		client.fail(
+			"Не удалось открыть базу EAVC",
+			"Проверьте выбранный путь и доступ к файлу базы.",
+			err,
+		)
 		return
 	}
 	defer source.Close()
 	db, err := stateDB.OpenState(filepath.Join(client.BaseDir, "data", "client.db"))
 	if err != nil {
-		client.fail("Ошибка локальной очереди", err)
+		client.fail(
+			"Не удалось открыть локальное хранилище",
+			"Перезапустите программу. Если ошибка повторится, скачайте диагностику.",
+			err,
+		)
 		return
 	}
 	defer db.Close()
 	queue, err := stateDB.NewClientQueue(ctx, db)
 	if err != nil {
-		client.fail("Ошибка локальной очереди", err)
+		client.fail(
+			"Не удалось открыть локальное хранилище",
+			"Перезапустите программу. Если ошибка повторится, скачайте диагностику.",
+			err,
+		)
 		return
 	}
 	api, err := telegram.New(cfg.Transport.BotToken, nil)
 	if err != nil {
-		client.fail("Ошибка Telegram", err)
+		client.fail(
+			"Неверные настройки Telegram",
+			"Загрузите новый файл настроек, созданный в центре управления.",
+			err,
+		)
 		return
 	}
-	if err := api.DeleteWebhook(ctx, false); err != nil {
-		client.fail("Ошибка Telegram", fmt.Errorf("отключить webhook: %w", err))
-		return
+	client.update(func(status *ClientStatus) {
+		status.DatabaseOK = true
+		status.EAVCPath = eavcPath
+	})
+	for {
+		if err := api.DeleteWebhook(ctx, false); err == nil {
+			break
+		} else {
+			client.transientFailure(
+				"Telegram временно недоступен",
+				"Данные сохранены. Программа повторит подключение автоматически.",
+				err,
+			)
+		}
+		if !waitForRetry(ctx, 5*time.Second) {
+			return
+		}
 	}
 	key, _ := cfg.Key()
 	location, err := time.LoadLocation(cfg.EAVCTimeZone())
 	if err != nil {
-		client.fail("Ошибка часового пояса", err)
+		client.fail(
+			"Неверный часовой пояс",
+			"Создайте файл настроек рабочей точки заново.",
+			err,
+		)
 		return
 	}
 	service := &application.ClientService{

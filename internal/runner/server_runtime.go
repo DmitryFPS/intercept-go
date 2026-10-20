@@ -76,12 +76,26 @@ func (server *Server) stopWorkerLocked() {
 func (server *Server) run(ctx context.Context, cfg config.Server) {
 	api, err := telegram.New(cfg.Transport.BotToken, nil)
 	if err != nil {
-		server.fail("Ошибка Telegram", err)
+		server.fail(
+			"Неверные настройки Telegram",
+			"Проверьте токен бота центра на странице «Связь».",
+			err,
+		)
 		return
 	}
-	if err := api.DeleteWebhook(ctx, false); err != nil {
-		server.fail("Ошибка Telegram", err)
-		return
+	for {
+		if err := api.DeleteWebhook(ctx, false); err == nil {
+			break
+		} else {
+			server.warn(
+				"Telegram временно недоступен",
+				"Настройки и очереди сохранены. Программа повторит подключение автоматически.",
+				err,
+			)
+		}
+		if !waitForRetry(ctx, 5*time.Second) {
+			return
+		}
 	}
 	receiver := &telegram.ServerReceiver{
 		API: api, ChatID: cfg.Transport.ChatID, MaxBytes: 4 * 1024 * 1024,
@@ -331,12 +345,12 @@ func (server *Server) clientSigningKey() (ed25519.PrivateKey, error) {
 	return append(ed25519.PrivateKey(nil), key...), nil
 }
 
-func (server *Server) fail(title string, err error) {
+func (server *Server) fail(title, detail string, err error) {
 	server.Logger.Error(title, "error", err)
 	server.update(func(status *ServerStatus) {
 		status.State = "error"
 		status.Title = title
-		status.Detail = err.Error()
+		status.Detail = detail
 		status.TransportOK = false
 	})
 }

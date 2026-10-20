@@ -62,7 +62,11 @@ func (client *Client) Start(ctx context.Context) {
 	client.mu.Unlock()
 	if _, err := os.Stat(client.configPath()); err == nil {
 		if err := client.restartWorker(ctx); err != nil {
-			client.fail("Ошибка настроек", err)
+			client.fail(
+				"Не удалось загрузить настройки",
+				"Загрузите файл настроек рабочей точки ещё раз.",
+				err,
+			)
 		}
 	}
 	go func() {
@@ -87,12 +91,12 @@ func (client *Client) applicationContext() context.Context {
 	return context.Background()
 }
 
-func (client *Client) fail(title string, err error) {
+func (client *Client) fail(title, detail string, err error) {
 	client.Logger.Error(title, "error", err)
 	client.update(func(status *ClientStatus) {
 		status.State = "error"
 		status.Title = title
-		status.Detail = err.Error()
+		status.Detail = detail
 	})
 }
 

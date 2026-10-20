@@ -155,7 +155,11 @@ func (server *Server) Start(ctx context.Context) {
 	server.mu.Unlock()
 	if _, err := os.Stat(server.configPath()); err == nil {
 		if err := server.restartWorker(rootContext); err != nil {
-			server.fail("Ошибка настроек центра", err)
+			server.fail(
+				"Не удалось загрузить настройки центра",
+				"Проверьте сохранённые данные на странице «Связь».",
+				err,
+			)
 		}
 	}
 	server.background.Add(2)
