@@ -130,7 +130,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 	client.update(func(status *ClientStatus) {
 		status.State = "running"
 		status.Title = "Программа работает"
-		status.Detail = "EAVC подключён. Новые данные передаются в течение 30 минут."
+		status.Detail = "EAVC подключён."
 		status.DatabaseOK = true
 		status.TelegramOK = true
 		status.EAVCPath = eavcPath
