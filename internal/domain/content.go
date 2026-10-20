@@ -15,8 +15,11 @@ var (
 
 // Callsign связывает цифровой ID корреспондента с подписью из EAVC.
 type Callsign struct {
-	Code  string `json:"code"`
-	Label string `json:"label"`
+	Number      int64  `json:"number,omitempty"`
+	Code        string `json:"code"`
+	Label       string `json:"label"`
+	Tag         string `json:"tag,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // ContentBlock — одна самостоятельная временная часть бланка EAVC.

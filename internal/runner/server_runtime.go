@@ -97,7 +97,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	}
 	delivery := &application.DeliveryService{
 		Queue: server.Store, Gateways: server.gateways(cfg), Now: time.Now,
-		MaxConcurrent: 4, AttemptTimeout: 20 * time.Second, Logger: server.Logger,
+		MaxConcurrent: 4, AttemptTimeout: 2 * time.Minute, Logger: server.Logger,
 	}
 	server.update(func(status *ServerStatus) {
 		status.State = "running"
@@ -220,13 +220,21 @@ func (server *Server) deliveryLoop(ctx context.Context, service *application.Del
 
 func (server *Server) gateways(cfg config.Server) map[string]application.DeliveryGateway {
 	result := make(map[string]application.DeliveryGateway)
+	telegramAPIs := make(map[string]*telegram.Client)
 	for id, destination := range cfg.Destinations {
 		switch destination.Kind {
 		case domain.DestinationTelegram:
-			api, err := telegram.New(destination.BotToken, nil)
+			api := telegramAPIs[destination.BotToken]
+			var err error
+			if api == nil {
+				api, err = telegram.New(destination.BotToken, nil)
+				if err == nil {
+					telegramAPIs[destination.BotToken] = api
+				}
+			}
 			if err == nil {
 				result[id] = &telegram.Destination{
-					API: api, ChatID: destination.ChatID,
+					API: api, ChatID: destination.ChatID, Network: destination.Network,
 					StatePath: filepath.Join(server.BaseDir, "data", "telegram-"+safeID(id)+".json"),
 					Logger:    server.Logger,
 				}

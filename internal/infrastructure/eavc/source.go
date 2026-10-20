@@ -23,10 +23,12 @@ var requiredColumns = []string{
 
 // Source читает EAVC только через SQLite mode=ro и PRAGMA query_only.
 type Source struct {
-	db             *sql.DB
-	hasCatalogUUID bool
-	hasSourceMode  bool
-	hasCallsigns   bool
+	db              *sql.DB
+	hasCatalogUUID  bool
+	hasSourceMode   bool
+	hasCallsigns    bool
+	callsignColumns map[string]bool
+	hasArchive      bool
 }
 
 // Open проверяет файл и схему до запуска фонового чтения.
@@ -67,9 +69,39 @@ func Open(ctx context.Context, path string) (*Source, error) {
 		db.Close()
 		return nil, err
 	}
+	callsignColumns := map[string]bool{}
+	if hasCallsigns {
+		callsignColumns, err = tableColumns(ctx, db, "intercept_callsigns")
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		if !callsignColumns["code"] || !callsignColumns["label"] {
+			db.Close()
+			return nil, errors.New("схема позывных EAVC не поддерживается: отсутствуют code или label")
+		}
+	}
+	hasArchive, err := hasTable(ctx, db, "intercept_items_archive")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if hasArchive {
+		archiveColumns, archiveErr := tableColumns(ctx, db, "intercept_items_archive")
+		if archiveErr != nil {
+			db.Close()
+			return nil, archiveErr
+		}
+		for _, column := range requiredColumns {
+			if !archiveColumns[column] {
+				db.Close()
+				return nil, fmt.Errorf("схема архива EAVC не поддерживается, отсутствует поле: %s", column)
+			}
+		}
+	}
 	return &Source{
 		db: db, hasCatalogUUID: columns["catalog_uuid"], hasSourceMode: columns["source_mode"],
-		hasCallsigns: hasCallsigns,
+		hasCallsigns: hasCallsigns, callsignColumns: callsignColumns, hasArchive: hasArchive,
 	}, nil
 }
 
@@ -91,14 +123,29 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 	if source.hasSourceMode {
 		modeExpression = "COALESCE(source_mode, 'unknown')"
 	}
+	activeQuery := fmt.Sprintf(`
+		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
+			uuid, content, updated_by, updated_at, %s AS catalog_uuid, %s AS source_mode
+		FROM intercept_items`, catalogExpression, modeExpression)
+	allItemsQuery := activeQuery
+	if source.hasArchive {
+		allItemsQuery += ` UNION ALL
+		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
+			uuid, content, updated_by, updated_at, '' AS catalog_uuid, 'unknown' AS source_mode
+		FROM intercept_items_archive`
+	}
 	query := fmt.Sprintf(`
 		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
-			uuid, content, updated_by, updated_at, %s, %s
-		FROM intercept_items
-		WHERE updated_at > ? OR (updated_at = ? AND id > ?)
-		ORDER BY updated_at, id
-		LIMIT ?`, catalogExpression, modeExpression)
-	rows, err := source.db.QueryContext(ctx, query, after.UpdatedAt, after.UpdatedAt, after.ID, limit)
+			uuid, content, updated_by, updated_at, catalog_uuid, source_mode
+		FROM (%s)
+		WHERE ? = ''
+			OR julianday(updated_at) > julianday(?)
+			OR (julianday(updated_at) = julianday(?) AND id > ?)
+		ORDER BY julianday(updated_at), id
+		LIMIT ?`, allItemsQuery)
+	rows, err := source.db.QueryContext(
+		ctx, query, after.UpdatedAt, after.UpdatedAt, after.UpdatedAt, after.ID, limit,
+	)
 	if err != nil {
 		return nil, after, fmt.Errorf("прочитать изменения EAVC: %w", err)
 	}
@@ -160,13 +207,26 @@ func (source *Source) enrichCallsigns(ctx context.Context, item *application.Sou
 	if len(codes) == 0 {
 		return nil
 	}
-	labels := make(map[string]string)
+	callsigns := make(map[string]domain.Callsign)
 	lookup := func(where string, args []any, missing []string) error {
 		if len(missing) == 0 {
 			return nil
 		}
 		placeholders := strings.TrimRight(strings.Repeat("?,", len(missing)), ",")
-		query := "SELECT code, label FROM intercept_callsigns WHERE " + where +
+		numberExpression := "0"
+		if source.callsignColumns["id"] {
+			numberExpression = "id"
+		}
+		tagExpression := "''"
+		if source.callsignColumns["tag"] {
+			tagExpression = "tag"
+		}
+		descriptionExpression := "''"
+		if source.callsignColumns["tag_desc"] {
+			descriptionExpression = "tag_desc"
+		}
+		query := "SELECT " + numberExpression + ", code, label, " + tagExpression + ", " + descriptionExpression +
+			" FROM intercept_callsigns WHERE " + where +
 			" AND code IN (" + placeholders + ")"
 		args = append(args, stringsToAny(missing)...)
 		rows, err := source.db.QueryContext(ctx, query, args...)
@@ -174,14 +234,19 @@ func (source *Source) enrichCallsigns(ctx context.Context, item *application.Sou
 			return fmt.Errorf("прочитать позывные EAVC: %w", err)
 		}
 		for rows.Next() {
-			var code, label sql.NullString
-			if err := rows.Scan(&code, &label); err != nil {
+			var number sql.NullInt64
+			var code, label, tag, description sql.NullString
+			if err := rows.Scan(&number, &code, &label, &tag, &description); err != nil {
 				rows.Close()
 				return fmt.Errorf("декодировать позывной EAVC: %w", err)
 			}
-			if code.String != "" && label.String != "" {
-				if _, exists := labels[code.String]; !exists {
-					labels[code.String] = label.String
+			key := domain.NormalizeCorrespondentCode(code.String)
+			if key != "" && strings.TrimSpace(label.String) != "" {
+				if _, exists := callsigns[key]; !exists {
+					callsigns[key] = domain.Callsign{
+						Number: number.Int64, Code: code.String, Label: label.String,
+						Tag: tag.String, Description: description.String,
+					}
 				}
 			}
 		}
@@ -195,7 +260,7 @@ func (source *Source) enrichCallsigns(ctx context.Context, item *application.Sou
 	missing := func() []string {
 		result := make([]string, 0)
 		for _, code := range codes {
-			if labels[code] == "" {
+			if _, exists := callsigns[domain.NormalizeCorrespondentCode(code)]; !exists {
 				result = append(result, code)
 			}
 		}
@@ -219,12 +284,13 @@ func (source *Source) enrichCallsigns(ctx context.Context, item *application.Sou
 	}
 	for blockIndex := range item.Blocks {
 		for _, code := range domain.ExtractCorrespondentCodes(item.Blocks[blockIndex].Text) {
-			label := strings.TrimSpace(labels[code])
-			if label == "" {
-				label = "н/у"
+			callsign := callsigns[domain.NormalizeCorrespondentCode(code)]
+			callsign.Code = code
+			if strings.TrimSpace(callsign.Label) == "" {
+				callsign.Label = "н/у"
 			}
 			item.Blocks[blockIndex].Callsigns = append(
-				item.Blocks[blockIndex].Callsigns, domain.Callsign{Code: code, Label: label},
+				item.Blocks[blockIndex].Callsigns, callsign,
 			)
 		}
 	}

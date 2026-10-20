@@ -9,12 +9,58 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type failingRoundTripper struct{ message string }
 
 func (transport failingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New(transport.message)
+}
+
+func TestTelegramClientReturnsRetryAfterForRateLimit(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(writer, `{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":17}}`)
+	}))
+	defer server.Close()
+	client, _ := NewWithBaseURL("123:token", server.URL, server.Client())
+	_, err := client.GetMe(context.Background())
+	var limited interface{ RetryAfter() time.Duration }
+	if !errors.As(err, &limited) || limited.RetryAfter() != 17*time.Second {
+		t.Fatalf("retry_after не сохранён: %v", err)
+	}
+}
+
+func TestSendLimiterKeepsGroupBelowTwentyMessagesPerMinute(t *testing.T) {
+	limiter := newSendLimiter()
+	limiter.globalInterval = 0
+	limiter.groupInterval = 35 * time.Millisecond
+	started := time.Now()
+	if err := limiter.wait(context.Background(), -1001); err != nil {
+		t.Fatal(err)
+	}
+	if err := limiter.wait(context.Background(), -1001); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < 30*time.Millisecond {
+		t.Fatalf("сообщения одной группы отправлены слишком быстро: %s", elapsed)
+	}
+}
+
+func TestSendLimiterHonorsSharedCooldown(t *testing.T) {
+	limiter := newSendLimiter()
+	limiter.globalInterval = 0
+	limiter.privateInterval = 0
+	limiter.blockFor(35 * time.Millisecond)
+	started := time.Now()
+	if err := limiter.wait(context.Background(), 1001); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < 30*time.Millisecond {
+		t.Fatalf("общая пауза Telegram не соблюдена: %s", elapsed)
+	}
 }
 
 // Сетевая ошибка стандартной библиотеки может содержать полный URL Bot API;

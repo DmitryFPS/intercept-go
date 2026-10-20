@@ -17,19 +17,19 @@ import (
 )
 
 var (
-	timeLinePattern = regexp.MustCompile(`^(\d{1,2})[.:](\d{2})\s*$`)
-	codeTailPattern = regexp.MustCompile(`\s*\((\d{1,10})\)\s*$`)
-	codeAnyPattern  = regexp.MustCompile(`\((\d{1,10})\)`)
-	leadingDash     = regexp.MustCompile(`^[-–—]\s*`)
+	legacyDatePrefix = regexp.MustCompile(`^\s*(\d{4})-(\d{2})-(\d{2})`)
 )
 
 const (
-	directionTitle    = "ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ"
-	defaultNetwork    = "313"
-	defaultOperator   = "Позывной"
-	defaultShiftGroup = "1"
-	defaultShiftChief = "Позывной"
-	editedMark        = "(отредактировано)"
+	directionTitle     = "ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ"
+	defaultNetwork     = "313"
+	defaultOperator    = "Позывной"
+	defaultShiftGroup  = "1"
+	defaultShiftChief  = "Позывной"
+	editedMark         = "(отредактировано)"
+	cellRunProperties  = `<w:rFonts w:eastAsia="Times New Roman"/>{b}<w:szCs w:val="24"/><w:lang w:eastAsia="ru-RU"/>`
+	titleRunProperties = `<w:rFonts w:eastAsia="Times New Roman"/>{b}<w:bCs/><w:szCs w:val="24"/><w:lang w:eastAsia="ru-RU"/>`
+	outerRunProperties = `<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:sz w:val="28"/>`
 
 	maxTemplateParts      = 2048
 	maxTemplatePartBytes  = 16 * 1024 * 1024
@@ -38,16 +38,17 @@ const (
 
 // Document содержит данные одного Word-документа без привязки к файлам.
 type Document struct {
-	Unit      string
-	Frequency string
-	GroupCode string
-	Network   string
-	Date      time.Time
-	Operator  string
-	Content   string
-	Callsigns []domain.Callsign
-	Edited    bool
-	EditedAt  time.Time
+	Unit            string
+	Frequency       string
+	GroupCode       string
+	Network         string
+	Date            time.Time
+	Operator        string
+	Content         string
+	Callsigns       []domain.Callsign
+	SourceUpdatedAt string
+	Edited          bool
+	EditedAt        time.Time
 }
 
 // Build сохраняет служебные части шаблона и заменяет только тело документа.
@@ -133,144 +134,102 @@ func buildBody(document Document) []byte {
 		date = time.Now()
 	}
 	date = date.In(time.FixedZone("MSK", 3*60*60))
-	correspondents, lines := parseDocumentContent(document.Content, document.Callsigns)
+	correspondents, lines := domain.PresentIntercept(document.Content, document.Callsigns)
 	var paragraphs strings.Builder
 	paragraphs.WriteString(styledParagraph([]styledRun{
 		{Text: "Радиосеть "}, {Text: unit, Bold: true}, {Text: " - " + network},
-	}, false, "left"))
+	}, true, ""))
 	paragraphs.WriteString(styledParagraph([]styledRun{{
-		Text: strings.TrimSpace(document.Frequency) + " МГц (гр. ID " + fallback(document.GroupCode, "—") + " AES-256)",
-	}}, false, "left"))
-	paragraphs.WriteString(styledParagraph([]styledRun{{Text: date.Format("02.01.2006г."), Bold: true}}, true, "left"))
-	paragraphs.WriteString(styledParagraph(nil, false, "left"))
+		Text: fallback(document.Frequency, "—") + " МГц (гр. ID " + fallback(document.GroupCode, "—") + " AES-256)",
+	}}, false, ""))
+	dateText := date.Format("02.01.2006г.")
+	if match := legacyDatePrefix.FindStringSubmatch(document.SourceUpdatedAt); match != nil {
+		dateText = match[3] + "." + match[2] + "." + match[1] + "г."
+	}
+	paragraphs.WriteString(styledParagraph([]styledRun{{Text: dateText, Bold: true}}, true, ""))
+	paragraphs.WriteString(styledParagraph(nil, false, ""))
 	for _, correspondent := range correspondents {
+		description := strings.TrimSpace(correspondent.Description)
+		if description == "" {
+			description = "военнослужащий " + unit + ", мужской голос, украинская речь"
+		}
+		description = strings.TrimRight(description, ";") + ";"
 		paragraphs.WriteString(styledParagraph([]styledRun{
 			{Text: strconv.Itoa(correspondent.Number) + ".«"},
 			{Text: correspondent.Label, Bold: true},
-			{Text: "» (id: " + correspondent.Code + ") – военнослужащий " + unit + ", мужской голос, украинская речь;"},
-		}, false, "left"))
+			{Text: "» (id: " + correspondent.Code + ") – " + description},
+		}, false, ""))
 	}
 	if len(correspondents) > 0 {
-		paragraphs.WriteString(styledParagraph(nil, false, "left"))
+		paragraphs.WriteString(styledParagraph(nil, false, ""))
 	}
 	for _, line := range lines {
-		paragraphs.WriteString(styledParagraph([]styledRun{{Text: line.Text, Bold: line.Time}}, line.Time, "left"))
+		paragraphs.WriteString(styledParagraph([]styledRun{{Text: line.Text, Bold: line.Time}}, line.Time, ""))
 	}
 	if document.Edited {
-		paragraphs.WriteString(styledParagraph(nil, false, "left"))
-		mark := editedMark
-		if !document.EditedAt.IsZero() {
-			mark = "(отредактировано в " + document.EditedAt.In(time.FixedZone("MSK", 3*60*60)).Format("15:04") + ")"
-		}
-		paragraphs.WriteString(styledParagraph([]styledRun{{Text: mark}}, false, "left"))
+		paragraphs.WriteString(styledParagraph(nil, false, ""))
+		paragraphs.WriteString(styledParagraph([]styledRun{{Text: editedMark}}, false, ""))
 	}
-	body := `<w:body>` + styledParagraph(nil, false, "left") +
+	body := `<w:body>` + styledParagraphWith(nil, false, "", outerRunProperties, 480) +
 		`<w:tbl><w:tblPr><w:tblStyle w:val="a3"/><w:tblW w:w="11055" w:type="dxa"/><w:tblInd w:w="-34" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="11055"/></w:tblGrid>` +
-		styledRow(styledParagraph([]styledRun{{Text: directionTitle, Bold: true}}, false, "center"), true) +
+		styledRow(styledParagraphWith([]styledRun{{Text: directionTitle, Bold: true, Properties: titleRunProperties}}, false, "center", titleRunProperties, -1), true) +
 		styledRow(paragraphs.String(), false) + `</w:tbl>` +
-		styledParagraph([]styledRun{{Text: "Дежурный оператор: "}, {Text: defaultOperator}}, false, "right") +
-		styledParagraph([]styledRun{{Text: "Старший смены МГ "}, {Text: defaultShiftGroup}, {Text: ": "}, {Text: defaultShiftChief}}, false, "center") +
-		styledParagraph(nil, false, "left") +
+		styledParagraphWith([]styledRun{{Text: "Дежурный оператор: ", Properties: outerRunProperties}, {Text: defaultOperator, Properties: outerRunProperties}}, false, "right", outerRunProperties, -1) +
+		styledParagraphWith([]styledRun{{Text: "Старший смены МГ ", Properties: outerRunProperties}, {Text: defaultShiftGroup, Properties: outerRunProperties}, {Text: ": ", Properties: outerRunProperties}, {Text: defaultShiftChief, Properties: outerRunProperties}}, false, "center", outerRunProperties, -1) +
+		styledParagraphWith(nil, false, "", outerRunProperties, -1) +
 		`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="284" w:right="707" w:bottom="426" w:left="567" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/><w:docGrid w:linePitch="360"/></w:sectPr></w:body>`
 	return []byte(body)
 }
 
-type correspondent struct {
-	Number int
-	Label  string
-	Code   string
-}
-
-type documentLine struct {
-	Text string
-	Time bool
-}
-
 type styledRun struct {
-	Text string
-	Bold bool
-}
-
-func parseDocumentContent(content string, callsigns []domain.Callsign) ([]correspondent, []documentLine) {
-	labels := make(map[string]string)
-	for _, callsign := range callsigns {
-		code := normalizeCode(callsign.Code)
-		label := strings.TrimSpace(callsign.Label)
-		if code != "" && label != "" && label != "н/у" && labels[code] == "" {
-			labels[code] = label
-		}
-	}
-	codes := domain.ExtractCorrespondentCodes(content)
-	numbers := make(map[string]int, len(codes))
-	correspondents := make([]correspondent, 0, len(codes))
-	for _, code := range codes {
-		numbers[code] = len(numbers) + 1
-		label := labels[normalizeCode(code)]
-		if label == "" {
-			label = "н/у"
-		}
-		correspondents = append(correspondents, correspondent{Number: numbers[code], Label: label, Code: code})
-	}
-	lines := make([]documentLine, 0)
-	for _, raw := range strings.Split(normalizeText(content), "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" {
-			continue
-		}
-		if match := timeLinePattern.FindStringSubmatch(line); match != nil {
-			hour, _ := strconv.Atoi(match[1])
-			lines = append(lines, documentLine{Text: fmt.Sprintf("%02d:%s", hour, match[2]), Time: true})
-			continue
-		}
-		body := leadingDash.ReplaceAllString(line, "")
-		code := ""
-		if match := codeTailPattern.FindStringSubmatchIndex(body); match != nil {
-			code = body[match[2]:match[3]]
-			body = strings.TrimSpace(body[:match[0]])
-		} else if match := codeAnyPattern.FindStringSubmatchIndex(body); match != nil {
-			code = body[match[2]:match[3]]
-			body = strings.TrimSpace(body[:match[0]] + body[match[1]:])
-		}
-		if number := numbers[code]; number > 0 {
-			body = "/" + strconv.Itoa(number) + "/ " + body
-		}
-		lines = append(lines, documentLine{Text: strings.TrimSpace(body)})
-	}
-	return correspondents, lines
-}
-
-func normalizeCode(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	value = strings.TrimLeft(value, "0")
-	if value == "" {
-		return "0"
-	}
-	return value
+	Text       string
+	Bold       bool
+	Properties string
 }
 
 func styledParagraph(runs []styledRun, boldMark bool, justify string) string {
+	return styledParagraphWith(runs, boldMark, justify, cellRunProperties, -1)
+}
+
+func styledParagraphWith(runs []styledRun, boldMark bool, justify, properties string, spacingAfter int) string {
 	var builder strings.Builder
-	builder.WriteString(`<w:p><w:pPr><w:jc w:val="` + justify + `"/><w:rPr><w:rFonts w:eastAsia="Times New Roman"/>`)
-	if boldMark {
-		builder.WriteString(`<w:b/>`)
+	builder.WriteString(`<w:p><w:pPr>`)
+	if spacingAfter >= 0 {
+		builder.WriteString(`<w:spacing w:after="` + strconv.Itoa(spacingAfter) + `"/>`)
 	}
-	builder.WriteString(`<w:szCs w:val="24"/><w:lang w:eastAsia="ru-RU"/></w:rPr></w:pPr>`)
+	if justify != "" {
+		builder.WriteString(`<w:jc w:val="` + justify + `"/>`)
+	}
+	builder.WriteString(`<w:rPr>`)
+	builder.WriteString(formatRunProperties(properties, boldMark))
+	builder.WriteString(`</w:rPr></w:pPr>`)
 	for _, run := range runs {
 		var escaped bytes.Buffer
 		_ = xml.EscapeText(&escaped, []byte(run.Text))
-		builder.WriteString(`<w:r><w:rPr><w:rFonts w:eastAsia="Times New Roman"/>`)
-		if run.Bold {
-			builder.WriteString(`<w:b/>`)
+		runProperties := run.Properties
+		if runProperties == "" {
+			runProperties = cellRunProperties
 		}
-		builder.WriteString(`<w:szCs w:val="24"/><w:lang w:eastAsia="ru-RU"/></w:rPr><w:t xml:space="preserve">`)
+		builder.WriteString(`<w:r><w:rPr>`)
+		builder.WriteString(formatRunProperties(runProperties, run.Bold))
+		builder.WriteString(`</w:rPr><w:t`)
+		if run.Text != strings.TrimSpace(run.Text) {
+			builder.WriteString(` xml:space="preserve"`)
+		}
+		builder.WriteString(`>`)
 		builder.WriteString(escaped.String())
 		builder.WriteString(`</w:t></w:r>`)
 	}
 	builder.WriteString(`</w:p>`)
 	return builder.String()
+}
+
+func formatRunProperties(properties string, bold bool) string {
+	marker := ""
+	if bold {
+		marker = `<w:b/>`
+	}
+	return strings.Replace(properties, "{b}", marker, 1)
 }
 
 func styledRow(paragraphs string, verticalCenter bool) string {

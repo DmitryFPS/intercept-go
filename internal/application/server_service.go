@@ -223,15 +223,16 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 	err := gateway.Deliver(attemptContext, job.Event, job.Delivery)
 	cancel()
 	if err != nil {
+		next := now.Add(retryDelayFor(err, job.Attempts+1))
 		if markErr := service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
-			now.Add(retryDelay(job.Attempts+1)), err.Error()); markErr != nil {
+			next, err.Error()); markErr != nil {
 			return false, fmt.Errorf("доставка: %v; сохранить повтор: %w", err, markErr)
 		}
 		if service.Logger != nil {
 			service.Logger.Warn("доставка не удалась, назначен повтор",
 				"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
 				"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts+1,
-				"next_attempt_at", now.Add(retryDelay(job.Attempts+1)), "error", err,
+				"next_attempt_at", next, "error", err,
 			)
 		}
 		return false, nil

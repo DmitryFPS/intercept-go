@@ -13,17 +13,112 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const defaultBaseURL = "https://api.telegram.org"
+
+const (
+	// Telegram рекомендует не превышать примерно 30 сообщений в секунду на
+	// бота, одно сообщение в секунду в одном чате и 20 сообщений в минуту в
+	// группе. Используем небольшой запас, чтобы штатная очередь не получала 429.
+	globalSendInterval  = 40 * time.Millisecond
+	privateChatInterval = time.Second
+	groupChatInterval   = 3 * time.Second
+)
 
 // Client — минимальный строго типизированный клиент Telegram Bot API.
 type Client struct {
 	token      string
 	baseURL    string
 	httpClient *http.Client
+	sends      *sendLimiter
 }
+
+type sendLimiter struct {
+	mu              sync.Mutex
+	nextGlobal      time.Time
+	nextByChat      map[int64]time.Time
+	blockedUntil    time.Time
+	globalInterval  time.Duration
+	privateInterval time.Duration
+	groupInterval   time.Duration
+}
+
+func newSendLimiter() *sendLimiter {
+	return &sendLimiter{
+		nextByChat: make(map[int64]time.Time), globalInterval: globalSendInterval,
+		privateInterval: privateChatInterval, groupInterval: groupChatInterval,
+	}
+}
+
+func (limiter *sendLimiter) wait(ctx context.Context, chatID int64) error {
+	limiter.mu.Lock()
+	now := time.Now()
+	scheduled := now
+	if limiter.blockedUntil.After(scheduled) {
+		scheduled = limiter.blockedUntil
+	}
+	if limiter.nextGlobal.After(scheduled) {
+		scheduled = limiter.nextGlobal
+	}
+	if next := limiter.nextByChat[chatID]; next.After(scheduled) {
+		scheduled = next
+	}
+	chatInterval := limiter.privateInterval
+	if chatID < 0 {
+		chatInterval = limiter.groupInterval
+	}
+	limiter.nextGlobal = scheduled.Add(limiter.globalInterval)
+	limiter.nextByChat[chatID] = scheduled.Add(chatInterval)
+	limiter.mu.Unlock()
+
+	for {
+		limiter.mu.Lock()
+		if limiter.blockedUntil.After(scheduled) {
+			scheduled = limiter.blockedUntil
+		}
+		limiter.mu.Unlock()
+		delay := time.Until(scheduled)
+		if delay <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (limiter *sendLimiter) blockFor(delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+	until := time.Now().Add(delay)
+	limiter.mu.Lock()
+	if until.After(limiter.blockedUntil) {
+		limiter.blockedUntil = until
+	}
+	limiter.mu.Unlock()
+}
+
+// rateLimitError сообщает прикладной очереди точную паузу, которую вернул
+// Telegram. Очередь переживает перезапуск, поэтому ожидание не теряется.
+type rateLimitError struct {
+	after       time.Duration
+	description string
+}
+
+func (err *rateLimitError) Error() string {
+	return fmt.Sprintf("Telegram временно ограничил частоту запросов; повтор не раньше чем через %s: %s",
+		err.after, err.description)
+}
+
+func (err *rateLimitError) RetryAfter() time.Duration { return err.after }
 
 // User содержит только поля Telegram-пользователя, нужные транспорту.
 type User struct {
@@ -89,7 +184,10 @@ func NewWithBaseURL(token, baseURL string, httpClient *http.Client) (*Client, er
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 70 * time.Second}
 	}
-	return &Client{token: token, baseURL: strings.TrimRight(baseURL, "/"), httpClient: httpClient}, nil
+	return &Client{
+		token: token, baseURL: strings.TrimRight(baseURL, "/"), httpClient: httpClient,
+		sends: newSendLimiter(),
+	}, nil
 }
 
 // GetMe проверяет токен и возвращает неизменяемый ID бота.
@@ -108,6 +206,9 @@ func (client *Client) DeleteWebhook(ctx context.Context, dropPending bool) error
 
 // SendDocument загружает ограниченный программой служебный файл в группу.
 func (client *Client) SendDocument(ctx context.Context, chatID, threadID int64, filename string, payload []byte, caption string) (Message, error) {
+	if err := client.sends.wait(ctx, chatID); err != nil {
+		return Message{}, err
+	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	writer.WriteField("chat_id", strconv.FormatInt(chatID, 10))
@@ -145,6 +246,9 @@ func (client *Client) SendDocument(ctx context.Context, chatID, threadID int64, 
 
 // SendMessage отправляет личное машинное подтверждение указанному боту.
 func (client *Client) SendMessage(ctx context.Context, chatID int64, username, text string) (Message, error) {
+	if err := client.sends.wait(ctx, chatID); err != nil {
+		return Message{}, err
+	}
 	target := any(chatID)
 	if strings.TrimSpace(username) != "" {
 		target = "@" + strings.TrimPrefix(strings.TrimSpace(username), "@")
@@ -156,6 +260,9 @@ func (client *Client) SendMessage(ctx context.Context, chatID int64, username, t
 
 // SendText публикует текст в указанную группу и тему.
 func (client *Client) SendText(ctx context.Context, chatID, threadID int64, text string) (Message, error) {
+	if err := client.sends.wait(ctx, chatID); err != nil {
+		return Message{}, err
+	}
 	request := map[string]any{"chat_id": chatID, "text": text}
 	if threadID > 0 {
 		request["message_thread_id"] = threadID
@@ -167,6 +274,9 @@ func (client *Client) SendText(ctx context.Context, chatID, threadID int64, text
 
 // SendHTML публикует подготовленное сообщение в формате Telegram HTML.
 func (client *Client) SendHTML(ctx context.Context, chatID, threadID int64, text string) (Message, error) {
+	if err := client.sends.wait(ctx, chatID); err != nil {
+		return Message{}, err
+	}
 	request := map[string]any{
 		"chat_id": chatID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true,
 	}
@@ -288,6 +398,14 @@ func (client *Client) do(request *http.Request, output any) error {
 		description := strings.TrimSpace(result.Description)
 		if description == "" {
 			description = "неизвестная ошибка"
+		}
+		if response.StatusCode == http.StatusTooManyRequests || result.ErrorCode == http.StatusTooManyRequests {
+			after := time.Duration(result.Parameters.RetryAfter) * time.Second
+			if after <= 0 {
+				after = 5 * time.Second
+			}
+			client.sends.blockFor(after + time.Second)
+			return &rateLimitError{after: after, description: description}
 		}
 		return fmt.Errorf("Telegram: %s (код %d)", description, result.ErrorCode)
 	}

@@ -33,24 +33,61 @@ func TestFormatReviewIsVisibleAndKeepsOriginalName(t *testing.T) {
 	}
 }
 
-// Сообщение сохраняет привычные заголовок и позывные в том же виде, что использовала старая программа.
-func TestFormatEventMatchesLegacyHeaderAndCallsigns(t *testing.T) {
+// Сообщение дословно повторяет предоставленный пользователем рабочий образец:
+// номер радиосети, карточки корреспондентов и /номер/ перед каждой репликой.
+func TestFormatEventMatchesApprovedTelegramExample(t *testing.T) {
 	t.Parallel()
 	event := domain.Event{
-		CreatedAt: time.Date(2026, 10, 18, 21, 0, 0, 0, time.UTC),
-		SourceAt:  time.Date(2026, 10, 18, 21, 0, 0, 0, time.UTC),
-		Position:  domain.Position{UnitName: `3 шб 425 ошп "Скала"`, Frequency: "162.0000", GroupCode: "53525"},
-		Content:   "16.39\n-Привет. (90861)",
+		CreatedAt: time.Date(2026, 10, 20, 17, 34, 0, 0, time.UTC),
+		SourceAt:  time.Date(2026, 10, 20, 17, 34, 0, 0, time.UTC),
+		Source:    domain.SourceRecord{UpdatedAt: "2026-10-20T17:34:00+03:00"},
+		Position:  domain.Position{UnitName: "Гольназ", Frequency: "159.3000", GroupCode: "18902"},
+		Content:   "17.30\n-Монако Торбе на связь. (52325)\n-На связи. (52345)\n-До Олимпа дотянулися, сказал им копать. (52325)\n-Плюс. (52345)",
 		Blocks: []domain.ContentBlock{{
-			Key: "16.39", Text: "16.39\n-Привет. (90861)",
-			Callsigns: []domain.Callsign{{Code: "90861", Label: "Лаки"}},
+			Key: "17.30", Text: "17.30\n-Монако Торбе на связь. (52325)\n-На связи. (52345)\n-До Олимпа дотянулися, сказал им копать. (52325)\n-Плюс. (52345)",
+			Callsigns: []domain.Callsign{
+				{Number: 1, Code: "52345", Label: "Монако", Description: "ОД на КНП Гольназ, мужской голос, украинская речь"},
+				{Number: 6, Code: "52325", Label: "Торба", Description: "Старший группы Гольназ, мужской голос, украинская речь"},
+			},
 		}},
 	}
-	want := "ОВЧ радиосеть\n<b>3 шб 425 ошп \"Скала\"</b>\n" +
-		"Частота 162.0000 МГц (групповой ID 53525 AES-256)\n" +
-		"Дата: 19.10.2026\n\n<b>Лаки (90861)</b>\n\n16.39\n-Привет. (90861)"
-	if got := FormatEvent(event, false); got != want {
+	want := "Радиосеть <b>Гольназ</b> - 39\n" +
+		"159.3000 МГц (ID 18902 AES-256)\n" +
+		"20.10.2026г.\n\n" +
+		"1. «<b>Монако</b>» (id: 52345) ОД на КНП Гольназ, мужской голос, украинская речь;\n" +
+		"6. «<b>Торба</b>» (id: 52325) Старший группы Гольназ, мужской голос, украинская речь;\n\n" +
+		"<b>17:30</b>\n" +
+		"/6/ Монако Торбе на связь.\n" +
+		"/1/ На связи.\n" +
+		"/6/ До Олимпа дотянулися, сказал им копать.\n" +
+		"/1/ Плюс."
+	if got := FormatEventForNetwork(event, "39", false); got != want {
 		t.Fatalf("формат отличается\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestFormatDeferredEventKeepsMarkerAndOriginalDate(t *testing.T) {
+	t.Parallel()
+	event := domain.Event{
+		CreatedAt: time.Date(2026, 10, 20, 20, 0, 0, 0, time.UTC),
+		Source:    domain.SourceRecord{UpdatedAt: "2026-10-19 03:51:00"},
+		Position: domain.Position{
+			UnitName: "2 об 3 обр ОсН НГ (отложенный режим)", Frequency: "159.5750", GroupCode: "3",
+		},
+		Mode: domain.SourceModeDeferred,
+		Blocks: []domain.ContentBlock{{
+			Key: "03.51", Text: "03.51\n-На приём. (783693)",
+			Callsigns: []domain.Callsign{{Number: 15, Code: "783693", Label: "Марс"}},
+		}},
+	}
+	got := FormatEventForNetwork(event, "39", false)
+	for _, expected := range []string{
+		"Радиосеть <b>2 об 3 обр ОсН НГ (отложенный режим)</b> - 39",
+		"19.10.2026г.", "15. «<b>Марс</b>»", "<b>03:51</b>", "/15/ На приём.",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("в отложенном сообщении нет %q:\n%s", expected, got)
+		}
 	}
 }
 
@@ -58,6 +95,7 @@ func TestFormatEventMatchesLegacyHeaderAndCallsigns(t *testing.T) {
 func TestDestinationEditsAndDeletesBlocksWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 	var methods []string
+	var texts []string
 	nextID := int64(100)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
@@ -65,6 +103,9 @@ func TestDestinationEditsAndDeletesBlocksWithoutDuplicates(t *testing.T) {
 		var body map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatalf("декодировать %s: %v", method, err)
+		}
+		if value, ok := body["text"].(string); ok {
+			texts = append(texts, value)
 		}
 		if method == "sendMessage" {
 			if body["message_thread_id"] != float64(42) || body["parse_mode"] != "HTML" {
@@ -101,6 +142,9 @@ func TestDestinationEditsAndDeletesBlocksWithoutDuplicates(t *testing.T) {
 	want := []string{"sendMessage", "sendMessage", "editMessageText", "deleteMessage"}
 	if strings.Join(methods, ",") != strings.Join(want, ",") {
 		t.Fatalf("неожиданные действия Telegram: %v", methods)
+	}
+	if len(texts) != 3 || !strings.Contains(texts[2], "Первое исправлено") {
+		t.Fatalf("исправленный текст не передан через editMessageText: %#v", texts)
 	}
 	if len(destination.locks) != 0 {
 		t.Fatalf("служебные блокировки не освобождены: %d", len(destination.locks))

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -142,7 +143,7 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 		messageID, err := service.Sender.Send(sendContext, envelope)
 		cancel()
 		if err != nil {
-			next := now.Add(retryDelay(queued.Attempts + 1))
+			next := now.Add(retryDelayFor(err, queued.Attempts+1))
 			if markErr := service.Queue.MarkRetry(ctx, event.ID, next, err.Error()); markErr != nil {
 				return sent, fmt.Errorf("отправка: %v; сохранить повтор: %w", err, markErr)
 			}
@@ -273,4 +274,16 @@ func retryDelay(attempt int) time.Duration {
 		attempt = 8
 	}
 	return time.Duration(1<<uint(attempt-1)) * 5 * time.Second
+}
+
+func retryDelayFor(err error, attempt int) time.Duration {
+	delay := retryDelay(attempt)
+	var limited interface{ RetryAfter() time.Duration }
+	if errors.As(err, &limited) {
+		// Секунда запаса исключает повтор на самой границе retry_after.
+		if requested := limited.RetryAfter() + time.Second; requested > delay {
+			return requested
+		}
+	}
+	return delay
 }

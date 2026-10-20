@@ -107,7 +107,7 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 		document := Document{
 			Unit: event.Position.UnitName, Frequency: event.Position.Frequency,
 			GroupCode: event.Position.GroupCode, Network: destination.Network,
-			Date: date, Operator: event.UpdatedBy, Content: block.Text,
+			Date: date, SourceUpdatedAt: event.Source.UpdatedAt, Operator: event.UpdatedBy, Content: block.Text,
 			Callsigns: block.Callsigns,
 		}
 		render := renderDigest(document)

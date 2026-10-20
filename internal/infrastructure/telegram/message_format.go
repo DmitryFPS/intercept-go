@@ -3,14 +3,22 @@ package telegram
 import (
 	"crypto/sha256"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"intercept/internal/domain"
 )
 
-// FormatEvent сохраняет вид сообщений рабочей Python-версии.
+var legacyDatePrefix = regexp.MustCompile(`^\s*(\d{4})-(\d{2})-(\d{2})`)
+
+// FormatEvent формирует сообщение без дополнительного обозначения радиосети.
 func FormatEvent(event domain.Event, review bool, notes ...string) string {
+	return FormatEventForNetwork(event, "", review, notes...)
+}
+
+// FormatEventForNetwork формирует сообщение по утверждённому образцу Telegram.
+func FormatEventForNetwork(event domain.Event, network string, review bool, notes ...string) string {
 	block := domain.ContentBlock{Text: event.Content}
 	if len(event.Blocks) > 0 {
 		block = event.Blocks[0]
@@ -22,10 +30,10 @@ func FormatEvent(event domain.Event, review bool, notes ...string) string {
 	if len(notes) > 0 {
 		delivery.Decision.Note = notes[0]
 	}
-	return formatBlock(event, block, delivery, "")
+	return formatBlock(event, block, delivery, network, "")
 }
 
-func formatBlockChunks(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery) []string {
+func formatBlockChunks(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network string) []string {
 	parts := splitRunes(block.Text, 3000)
 	if len(parts) == 0 {
 		return nil
@@ -38,12 +46,12 @@ func formatBlockChunks(event domain.Event, block domain.ContentBlock, delivery d
 		}
 		copyBlock := block
 		copyBlock.Text = part
-		chunks = append(chunks, formatBlock(event, copyBlock, delivery, suffix))
+		chunks = append(chunks, formatBlock(event, copyBlock, delivery, network, suffix))
 	}
 	return chunks
 }
 
-func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, suffix string) string {
+func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network, suffix string) string {
 	var builder strings.Builder
 	if delivery.Decision.Action == domain.RouteReview {
 		builder.WriteString("🔴 НОВОЕ ИЛИ ОШИБОЧНОЕ ПОДРАЗДЕЛЕНИЕ\n")
@@ -53,43 +61,64 @@ func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.
 		}
 		builder.WriteString("──────────────\n")
 	}
-	builder.WriteString("ОВЧ радиосеть\n<b>")
+	builder.WriteString("Радиосеть <b>")
 	builder.WriteString(escapeText(fallbackText(event.Position.UnitName, "—")))
-	builder.WriteString("</b>\nЧастота ")
+	builder.WriteString("</b>")
+	if network = strings.TrimSpace(network); network != "" {
+		builder.WriteString(" - ")
+		builder.WriteString(escapeText(network))
+	}
+	builder.WriteString("\n")
 	builder.WriteString(escapeText(fallbackText(event.Position.Frequency, "—")))
-	builder.WriteString(" МГц (групповой ID ")
+	builder.WriteString(" МГц (ID ")
 	builder.WriteString(escapeText(fallbackText(event.Position.GroupCode, "—")))
-	builder.WriteString(" AES-256)\nДата: ")
-	builder.WriteString(eventDate(event).Format("02.01.2006"))
-	builder.WriteString("\n\n")
+	builder.WriteString(" AES-256)\n")
+	builder.WriteString(eventDate(event))
+	builder.WriteString("г.\n\n")
 	callsigns := block.Callsigns
 	if len(callsigns) == 0 {
 		for _, code := range domain.ExtractCorrespondentCodes(block.Text) {
 			callsigns = append(callsigns, domain.Callsign{Code: code, Label: "н/у"})
 		}
 	}
-	seen := make(map[string]bool)
-	for _, callsign := range callsigns {
-		code := strings.TrimSpace(callsign.Code)
-		if code == "" || seen[code] {
-			continue
+	correspondents, lines := domain.PresentIntercept(block.Text, callsigns)
+	for _, correspondent := range correspondents {
+		description := strings.TrimSpace(correspondent.Description)
+		if description == "" {
+			description = "военнослужащий " + fallbackText(event.Position.UnitName, "—") + ", мужской голос, украинская речь"
 		}
-		seen[code] = true
-		builder.WriteString("<b>")
-		builder.WriteString(escapeText(fallbackText(callsign.Label, "н/у")))
-		builder.WriteString(" (")
-		builder.WriteString(escapeText(code))
-		builder.WriteString(")</b>\n")
-	}
-	if len(seen) > 0 {
+		description = strings.TrimRight(description, ";") + ";"
+		builder.WriteString(fmt.Sprintf("%d. «<b>", correspondent.Number))
+		builder.WriteString(escapeText(correspondent.Label))
+		builder.WriteString("</b>» (id: ")
+		builder.WriteString(escapeText(correspondent.Code))
+		builder.WriteString(") ")
+		builder.WriteString(escapeText(description))
 		builder.WriteString("\n")
 	}
-	builder.WriteString(escapeText(strings.TrimSpace(block.Text)))
+	if len(correspondents) > 0 {
+		builder.WriteString("\n")
+	}
+	for index, line := range lines {
+		if index > 0 {
+			builder.WriteString("\n")
+		}
+		if line.Time {
+			builder.WriteString("<b>")
+		}
+		builder.WriteString(escapeText(line.Text))
+		if line.Time {
+			builder.WriteString("</b>")
+		}
+	}
 	builder.WriteString(suffix)
 	return builder.String()
 }
 
-func eventDate(event domain.Event) time.Time {
+func eventDate(event domain.Event) string {
+	if match := legacyDatePrefix.FindStringSubmatch(event.Source.UpdatedAt); match != nil {
+		return match[3] + "." + match[2] + "." + match[1]
+	}
 	date := event.SourceAt
 	if date.IsZero() {
 		date = event.ObservedAt
@@ -97,7 +126,7 @@ func eventDate(event domain.Event) time.Time {
 	if date.IsZero() {
 		date = event.CreatedAt
 	}
-	return date.In(time.FixedZone("MSK", 3*60*60))
+	return date.In(time.FixedZone("MSK", 3*60*60)).Format("02.01.2006")
 }
 
 func splitRunes(value string, limit int) []string {

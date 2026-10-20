@@ -3,18 +3,100 @@ package docx
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"intercept/internal/domain"
 )
+
+// Шаблон в поставке побайтно совпадает с предоставленным пользователем файлом,
+// а собранный документ содержит те же фрагменты и их порядок.
+func TestBuildMatchesProvidedReferenceDocumentXML(t *testing.T) {
+	t.Parallel()
+	template := filepath.Join("..", "..", "..", "assets", "word_template.docx")
+	templatePayload, err := os.ReadFile(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateDigest := sha256.Sum256(templatePayload)
+	const providedTemplateSHA256 = "56e5349fc134a7bb177b04d79c539cae94e31d61a9a203e40d0023d073d3b987"
+	if got := strings.ToLower(fmt.Sprintf("%x", templateDigest)); got != providedTemplateSHA256 {
+		t.Fatalf("файл шаблона отличается от предоставленного эталона: %s", got)
+	}
+	payload, err := Build(template, Document{
+		Unit: "2 об 3 обр ОсН НГ", Frequency: "159.5750", GroupCode: "3", Network: "39",
+		Date: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC),
+		Callsigns: []domain.Callsign{
+			{Number: 1, Code: "783693", Label: "Марс, Шило"},
+			{Number: 15, Code: "17384", Label: "Швидкий, Лоза"},
+		},
+		Content: "03.51\n-... Марсу на прием. (783693)\n03.52\n-Швидкий на приеме, что? (17384)\n-... все нормально ... чтокаешь? (783693)\n-5-ые сутки них*я не жрал, потому что воды нихр*на нет, пришлите нам 10 литров воды, пожалуйста, я прошу. (17384)\n-Ну скидывали ... что нам той воды. (17384)",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "legacy.docx")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantRuns := []string{
+		"ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ",
+		"Радиосеть ", "2 об 3 обр ОсН НГ", " - 39",
+		"159.5750 МГц (гр. ID 3 AES-256)", "21.08.2026г.",
+		"1.«", "Марс, Шило", "» (id: 783693) – военнослужащий 2 об 3 обр ОсН НГ, мужской голос, украинская речь;",
+		"15.«", "Швидкий, Лоза", "» (id: 17384) – военнослужащий 2 об 3 обр ОсН НГ, мужской голос, украинская речь;",
+		"03:51", "/1/ ... Марсу на прием.", "03:52", "/15/ Швидкий на приеме, что?",
+		"/1/ ... все нормально ... чтокаешь?",
+		"/15/ 5-ые сутки них*я не жрал, потому что воды нихр*на нет, пришлите нам 10 литров воды, пожалуйста, я прошу.",
+		"/15/ Ну скидывали ... что нам той воды.",
+		"Дежурный оператор: ", "Позывной", "Старший смены МГ ", "1", ": ", "Позывной",
+	}
+	if runs := documentRuns(t, documentXML(t, path)); !reflect.DeepEqual(runs, wantRuns) {
+		t.Fatalf("содержимое документа отличается от эталона:\nполучено: %#v\nожидалось: %#v", runs, wantRuns)
+	}
+}
+
+// Описание карточки EAVC и её настоящий номер должны попадать в Word без
+// подмены на порядковые 1, 2, 3.
+func TestBuildUsesEAVCCallsignNumberAndDescription(t *testing.T) {
+	t.Parallel()
+	template := filepath.Join("..", "..", "..", "assets", "word_template.docx")
+	payload, err := Build(template, Document{
+		Unit: "Гольназ", Frequency: "159.3000", GroupCode: "18902", Network: "39",
+		Date: time.Date(2026, 10, 20, 17, 34, 0, 0, time.UTC),
+		Callsigns: []domain.Callsign{{
+			Number: 6, Code: "52325", Label: "Торба",
+			Description: "Старший группы Гольназ, мужской голос, украинская речь",
+		}},
+		Content: "17.30\n-Монако Торбе на связь. (52325)",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "callsign.docx")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runs := documentRuns(t, documentXML(t, path))
+	for _, expected := range []string{
+		"6.«", "Торба", "» (id: 52325) – Старший группы Гольназ, мужской голос, украинская речь;",
+		"17:30", "/6/ Монако Торбе на связь.",
+	} {
+		if !slices.Contains(runs, expected) {
+			t.Fatalf("в Word отсутствует %q: %#v", expected, runs)
+		}
+	}
+}
 
 // Каждый временной блок перехвата создаёт один Word-документ, а повторная обработка не порождает копий.
 func TestDestinationBuildsOneDocumentPerTimeBlockWithoutDuplicates(t *testing.T) {
@@ -120,9 +202,8 @@ func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 	}
 }
 
-// Исправленный документ явно показывает московское время правки, чтобы на
-// принимающей стороне его не приняли за повтор исходного перехвата.
-func TestEditedDocumentContainsEditTime(t *testing.T) {
+// Исправленный документ сохраняет точную пометку рабочей Python-версии.
+func TestEditedDocumentKeepsLegacyMark(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	template := filepath.Join(root, "template.docx")
@@ -138,8 +219,8 @@ func TestEditedDocumentContainsEditTime(t *testing.T) {
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if xml := documentXML(t, path); !strings.Contains(xml, "(отредактировано в 18:30)") {
-		t.Fatalf("в документе нет времени редактирования: %s", xml)
+	if xml := documentXML(t, path); !strings.Contains(xml, "(отредактировано)") || strings.Contains(xml, "отредактировано в") {
+		t.Fatalf("пометка редактирования отличается от Python-версии: %s", xml)
 	}
 }
 
@@ -178,7 +259,7 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 	if filepath.Base(files[0]) != firstName {
 		t.Fatalf("правка создала новый номер вместо перезаписи: до=%q после=%q", firstName, filepath.Base(files[0]))
 	}
-	if xml := documentXML(t, files[0]); !strings.Contains(xml, "(отредактировано в ") || !strings.Contains(xml, "Первый исправлен") {
+	if xml := documentXML(t, files[0]); !strings.Contains(xml, "(отредактировано)") || !strings.Contains(xml, "Первый исправлен") {
 		t.Fatal("изменённый документ не перезаписан с пометкой")
 	}
 }

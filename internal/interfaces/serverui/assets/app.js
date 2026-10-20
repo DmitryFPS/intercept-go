@@ -204,12 +204,15 @@ function destinationType(kind) {
 
 function destinationDetails(destination) {
   if (destination.kind === 'telegram') {
-    return [['Группа или канал', destination.chat_id || 'Не указано']];
+    return [
+      ['Группа или канал', destination.chat_id || 'Не указано'],
+      ['Обозначение радиосети', destination.network || 'Не задано']
+    ];
   }
   return [
     ['Куда сохраняются документы', destination.folder || 'Не указано'],
     ['Шаблон DOCX', destination.template || 'Не указан'],
-    ['Обозначение в имени файла', destination.network || 'Не задано']
+    ['Обозначение радиосети', destination.network || 'Не задано']
   ];
 }
 
@@ -245,6 +248,7 @@ function updateDestinationKind() {
   document.querySelector(`#destinationForm .kind.${kind}`).classList.remove('hidden');
   form.elements.bot_token.required = kind === 'telegram' && form.dataset.originalKind !== 'telegram';
   form.elements.chat_id.required = kind === 'telegram';
+  form.elements.network.required = true;
   form.elements.template.required = kind === 'word';
   form.elements.folder.required = kind === 'word';
 }

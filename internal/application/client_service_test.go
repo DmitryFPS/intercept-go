@@ -10,6 +10,20 @@ import (
 	"intercept/internal/protocol"
 )
 
+type testRetryAfterError struct{ delay time.Duration }
+
+func (err testRetryAfterError) Error() string             { return "429" }
+func (err testRetryAfterError) RetryAfter() time.Duration { return err.delay }
+
+func TestRetryDelayUsesTelegramRetryAfter(t *testing.T) {
+	if got := retryDelayFor(testRetryAfterError{delay: 41 * time.Second}, 1); got != 42*time.Second {
+		t.Fatalf("неверная пауза после 429: %s", got)
+	}
+	if got := retryDelayFor(errors.New("offline"), 1); got != 5*time.Second {
+		t.Fatalf("обычная ошибка потеряла экспоненциальную паузу: %s", got)
+	}
+}
+
 // Если файл передан в транспортный чат, он остаётся в очереди до отдельного подтверждения сервера.
 func TestClientServiceSeparatesUploadFromServerAcknowledgement(t *testing.T) {
 	t.Parallel()
