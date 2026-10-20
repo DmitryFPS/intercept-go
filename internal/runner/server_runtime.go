@@ -42,7 +42,7 @@ func (server *Server) restartWorker(parent context.Context) error {
 	server.status.Configured = true
 	server.status.State = "starting"
 	server.status.Title = "Запуск сервера"
-	server.status.Detail = "Проверяем транспорт и направления."
+	server.status.Detail = "Проверяем связь и получателей."
 	server.status.InviteLink = cfg.Transport.InviteLink
 	server.status.Destinations = destinationIDs(cfg.Destinations)
 	server.mu.Unlock()

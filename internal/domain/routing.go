@@ -70,7 +70,20 @@ func (rules RuleSet) Validate() error {
 		return errors.New("версия маршрутов должна быть положительной")
 	}
 	if len(rules.Destinations) == 0 {
-		return errors.New("не задано ни одного направления")
+		if len(rules.Unknown) != 0 {
+			return errors.New("маршрут новых событий не может ссылаться на отсутствующих получателей")
+		}
+		for key, decisions := range rules.Positions {
+			if len(decisions) != 0 {
+				return fmt.Errorf("позиция %q ссылается на отсутствующих получателей", key)
+			}
+		}
+		for mode, decisions := range rules.Modes {
+			if len(decisions) != 0 {
+				return fmt.Errorf("режим %q ссылается на отсутствующих получателей", mode)
+			}
+		}
+		return nil
 	}
 	if len(rules.Unknown) == 0 {
 		return errors.New("не задан маршрут для неопознанных событий")

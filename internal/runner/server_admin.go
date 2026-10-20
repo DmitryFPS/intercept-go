@@ -83,16 +83,30 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 		Network: strings.TrimSpace(setup.Network), Prefix: strings.TrimSpace(setup.Prefix),
 		Username: setup.Username, Password: setup.Password,
 	}
+	existingDestination, destinationExists := cfg.Destinations[id]
+	if destinationExists && existingDestination.Kind == destination.Kind {
+		if destination.Kind == domain.DestinationTelegram && strings.TrimSpace(destination.BotToken) == "" {
+			destination.BotToken = existingDestination.BotToken
+		}
+		if destination.Kind == domain.DestinationWord {
+			if destination.Username == "" {
+				destination.Username = existingDestination.Username
+			}
+			if destination.Password == "" {
+				destination.Password = existingDestination.Password
+			}
+		}
+	}
 	switch setup.Kind {
 	case domain.DestinationTelegram:
-		api, err := telegram.New(setup.BotToken, nil)
+		api, err := telegram.New(destination.BotToken, nil)
 		if err != nil {
 			return err
 		}
 		if _, err := api.GetMe(ctx); err != nil {
 			return fmt.Errorf("проверка бота направления: %w", err)
 		}
-		if err := api.TestTopic(ctx, setup.ChatID, 0); err != nil {
+		if err := api.TestTopic(ctx, destination.ChatID, 0); err != nil {
 			return fmt.Errorf("проверка Telegram-направления: %w", err)
 		}
 	case domain.DestinationWord:
@@ -122,17 +136,80 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 	if err != nil {
 		return err
 	}
-	if existing, exists := rules.Destinations[id]; !exists || existing.Name != name || existing.Kind != setup.Kind {
-		if rules.Destinations == nil {
-			rules.Destinations = make(map[string]domain.Destination)
-		}
-		rules.Destinations[id] = domain.Destination{ID: id, Name: name, Kind: setup.Kind, Enabled: true}
-		rules.Version++
-		if err := server.Store.PublishRules(ctx, rules, "Настройка направления"); err != nil {
-			return err
-		}
+	if rules.Destinations == nil {
+		rules.Destinations = make(map[string]domain.Destination)
+	}
+	if rules.Unknown == nil {
+		rules.Unknown = make(map[string]domain.RouteDecision)
+	}
+	existingRule, ruleExists := rules.Destinations[id]
+	rules.Destinations[id] = domain.Destination{ID: id, Name: name, Kind: setup.Kind, Enabled: true}
+	if _, exists := rules.Unknown[id]; !exists {
+		rules.Unknown[id] = domain.RouteDecision{Action: domain.RouteSkip}
+	}
+	if ruleExists && existingRule.Kind != setup.Kind && setup.Kind != domain.DestinationTelegram {
+		clearDestinationThreads(rules, id)
+	}
+	rules.Version++
+	if err := server.Store.PublishRules(ctx, rules, "Настройка направления"); err != nil {
+		return err
 	}
 	return server.restartWorker(server.applicationContext())
+}
+
+// DeleteDestination удаляет получателя из конфигурации и всех маршрутов.
+func (server *Server) DeleteDestination(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("не задан ID направления")
+	}
+	server.mu.RLock()
+	cfg := cloneServerConfig(server.config)
+	server.mu.RUnlock()
+	if _, exists := cfg.Destinations[id]; !exists {
+		return errors.New("направление не найдено")
+	}
+	rules, err := server.Store.ActiveRules(ctx)
+	if err != nil {
+		return err
+	}
+	delete(cfg.Destinations, id)
+	delete(rules.Destinations, id)
+	delete(rules.Unknown, id)
+	for _, decisions := range rules.Positions {
+		delete(decisions, id)
+	}
+	for _, decisions := range rules.Modes {
+		delete(decisions, id)
+	}
+	rules.Version++
+	if err := rules.Validate(); err != nil {
+		return err
+	}
+	cfg.UpdatedAt = time.Now().UTC()
+	if err := server.saveConfig(cfg); err != nil {
+		return err
+	}
+	if err := server.Store.PublishRules(ctx, rules, "Удаление направления"); err != nil {
+		return err
+	}
+	return server.restartWorker(server.applicationContext())
+}
+
+func clearDestinationThreads(rules domain.RuleSet, id string) {
+	clear := func(decisions map[string]domain.RouteDecision) {
+		if decision, exists := decisions[id]; exists {
+			decision.ThreadID = 0
+			decisions[id] = decision
+		}
+	}
+	clear(rules.Unknown)
+	for _, decisions := range rules.Positions {
+		clear(decisions)
+	}
+	for _, decisions := range rules.Modes {
+		clear(decisions)
+	}
 }
 
 // AddClient регистрирует точку и возвращает полностью готовый подписанный JSON.
@@ -285,11 +362,17 @@ func canonicalRules(rules domain.RuleSet) (domain.RuleSet, error) {
 // SafeDestinations возвращает направления без токенов и паролей.
 func (server *Server) SafeDestinations() map[string]map[string]any {
 	server.mu.RLock()
-	defer server.mu.RUnlock()
-	result := make(map[string]map[string]any, len(server.config.Destinations))
-	for id, destination := range server.config.Destinations {
+	configDestinations := cloneDestinations(server.config.Destinations)
+	server.mu.RUnlock()
+	rules, _ := server.Store.ActiveRules(context.Background())
+	result := make(map[string]map[string]any, len(configDestinations))
+	for id, destination := range configDestinations {
+		name := id
+		if item, exists := rules.Destinations[id]; exists {
+			name = item.Name
+		}
 		result[id] = map[string]any{
-			"kind": destination.Kind, "chat_id": destination.ChatID,
+			"name": name, "kind": destination.Kind, "chat_id": destination.ChatID,
 			"template": destination.Template, "folder": destination.Folder,
 			"network": destination.Network, "prefix": destination.Prefix,
 		}

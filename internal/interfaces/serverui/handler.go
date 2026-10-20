@@ -41,6 +41,7 @@ func (handler Handler) Routes() http.Handler {
 		localui.WriteJSON(writer, http.StatusOK, handler.Server.SafeDestinations())
 	})
 	mux.HandleFunc("POST /api/destinations", handler.addDestination)
+	mux.HandleFunc("DELETE /api/destinations/{id}", handler.deleteDestination)
 	mux.HandleFunc("GET /api/rules", handler.rules)
 	mux.HandleFunc("POST /api/rules", handler.publishRules)
 	mux.HandleFunc("GET /api/rule-versions", handler.ruleVersions)
@@ -172,6 +173,16 @@ func (handler Handler) addDestination(writer http.ResponseWriter, request *http.
 	ctx, cancel := context.WithTimeout(handler.Context, 30*time.Second)
 	defer cancel()
 	if err := handler.Server.AddDestination(ctx, setup); err != nil {
+		badRequest(writer, err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (handler Handler) deleteDestination(writer http.ResponseWriter, request *http.Request) {
+	ctx, cancel := context.WithTimeout(handler.Context, 30*time.Second)
+	defer cancel()
+	if err := handler.Server.DeleteDestination(ctx, request.PathValue("id")); err != nil {
 		badRequest(writer, err)
 		return
 	}

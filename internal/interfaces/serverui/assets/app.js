@@ -1,18 +1,597 @@
-const $=id=>document.getElementById(id);let rules=null;const pages={dashboard:'Обзор',transport:'Транспорт',clients:'Точки',destinations:'Куда отправлять',routes:'Правила отправки'};const json=async(url,opt={})=>{const r=await fetch(url,{cache:'no-store',...opt});const data=await r.json();if(!r.ok)throw new Error(data.error||'Ошибка');return data};const msg=(text,ok=false)=>{const e=$('globalMessage');e.textContent=text;e.style.color=ok?'#15764a':'#b42318'};const fmt=v=>v?new Date(v).toLocaleString('ru-RU'):'Ещё не было';
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button,.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');$(b.dataset.page).classList.add('active');$('pageTitle').textContent=pages[b.dataset.page];if(b.dataset.page==='clients')loadClients();if(b.dataset.page==='destinations')loadDestinations();if(b.dataset.page==='routes')loadRules()});
-async function refresh(){try{const s=await json('/api/status');$('hero').className='hero '+s.state;$('stateTitle').textContent=s.title;$('stateDetail').textContent=s.detail;$('version').textContent='Версия '+s.version;$('statClients').textContent=s.stats.clients;$('statEvents').textContent=s.stats.events;$('statPending').textContent=s.stats.pending;$('statDelivered').textContent=s.stats.delivered;$('statExpired').textContent=s.stats.expired;$('statRejected').textContent=s.stats.rejected;$('lastReceived').textContent=fmt(s.last_received);$('lastDelivery').textContent=fmt(s.last_delivery);$('inviteLink').textContent=s.invite_link||'Ссылка не указана'}catch(e){msg(e.message)}}
-const post=async(url,data)=>json(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-$('transportForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);msg('Проверяем бота и группу…',true);try{await post('/api/setup',{bot_token:f.get('bot_token'),chat_id:Number(f.get('chat_id')),invite_link:f.get('invite_link')});msg('Транспорт сохранён. Сервер запускается.',true);e.target.reset();refresh()}catch(err){msg(err.message)}};
-$('clientForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);msg('Проверяем бота точки и создаём файл…',true);try{const r=await fetch('/api/clients',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({number:f.get('number'),name:f.get('name'),time_zone:f.get('time_zone'),bot_token:f.get('bot_token'),thread_id:Number(f.get('thread_id')),catch_up_existing:f.get('catch_up_existing')==='on'})});if(!r.ok){const x=await r.json();throw new Error(x.error)}const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`InterceptClient-${f.get('number')}.json`;a.click();URL.revokeObjectURL(a.href);msg('Файл готов. Передайте его оператору точки.',true);e.target.reset();loadClients()}catch(err){msg(err.message)}};
-async function loadClients(){try{const data=await json('/api/clients');const box=$('clientsList');box.className='list'+(data.length?'':' empty');box.innerHTML=data.length?data.map(x=>`<div class="list-row client-row"><strong>${esc(x.number)}</strong><span><b>${esc(x.name)}</b><small>ID: ${esc(x.id)}</small></span><span>${esc(x.bot)} · тема ${x.thread_id}</span><a class="secondary" href="/api/clients/${encodeURIComponent(x.id)}/config">Скачать JSON</a></div>`).join(''):'Точек пока нет.'}catch(e){msg(e.message)}}
-$('destinationForm').elements.kind.onchange=e=>{document.querySelectorAll('.subform.kind').forEach(x=>x.classList.add('hidden'));document.querySelector('.subform.'+e.target.value).classList.remove('hidden')};
-$('destinationForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const body={id:f.get('id'),name:f.get('name'),kind:f.get('kind'),bot_token:f.get('bot_token'),chat_id:Number(f.get('chat_id')||0),template:f.get('template'),folder:f.get('folder'),network:f.get('network'),prefix:f.get('prefix'),username:f.get('username'),password:f.get('password')};msg('Проверяем направление…',true);try{await post('/api/destinations',body);msg('Направление сохранено. В правилах появился новый столбец.',true);e.target.reset();e.target.elements.kind.dispatchEvent(new Event('change'));loadDestinations()}catch(err){msg(err.message)}};
-async function loadDestinations(){try{const data=await json('/api/destinations');const entries=Object.entries(data);const box=$('destinationsList');box.className='list'+(entries.length?'':' empty');box.innerHTML=entries.length?entries.map(([id,x])=>`<div class="list-row"><strong>${esc(id)}</strong><span>${x.kind==='telegram'?'Telegram':'Word'}</span><span>${esc(x.kind==='telegram'?String(x.chat_id):x.folder)}</span><span class="pill">настроено</span></div>`).join(''):'Направлений пока нет.'}catch(e){msg(e.message)}}
-async function loadRules(){try{rules=await json('/api/rules');renderRules();await loadRuleHistory()}catch(e){msg(e.message)}}
-async function loadRuleHistory(){const data=await json('/api/rule-versions');const box=$('rulesHistory');box.className='list'+(data.length?'':' empty');box.innerHTML=data.length?data.map(x=>`<div class="list-row"><strong>Версия ${x.version}</strong><span>${esc(x.author)}</span><span>${fmt(x.created_at)}</span>${x.active?'<span class="pill">действует</span>':`<button class="secondary" onclick="restoreRules(${x.version})">Восстановить</button>`}</div>`).join(''):'История пока пуста.'}
-async function restoreRules(version){if(!confirm(`Восстановить правила из версии ${version}? Будет создана новая версия.`))return;try{await post(`/api/rule-versions/${version}/restore`,{});msg(`Правила версии ${version} восстановлены.`,true);loadRules()}catch(e){msg(e.message)}}
-function renderRules(){const dest=Object.values(rules.destinations);$('rulesMeta').textContent=`Опубликована версия ${rules.version}. Изменения ниже ещё не действуют, пока вы не нажмёте кнопку публикации.`;const head=$('routeTable').querySelector('thead');head.innerHTML='<tr><th>Позиция</th>'+dest.map(d=>`<th>${esc(d.name)}</th>`).join('')+'</tr>';const rows=[...Object.keys(rules.positions).sort().map(k=>[k,rules.positions[k],false]),['__unknown__',rules.unknown,true]];$('routeTable').querySelector('tbody').innerHTML=rows.map(([key,decisions,unknown])=>`<tr data-key="${esc(key)}"><td>${unknown?'<strong>Все новые и неопознанные</strong>':esc(key.replace(/^name:/,''))}</td>${dest.map(d=>cell(d,decisions[d.id]||{action:'skip'})).join('')}</tr>`).join('')}
-function cell(destination,d){const topic=destination.kind==='telegram'?`<input type="number" min="0" value="${d.thread_id||0}" title="ID темы; 0 — General">`:'<small>Word: тема не нужна</small>';return `<td data-destination="${esc(destination.id)}"><div class="route-cell"><select><option value="skip" ${d.action==='skip'?'selected':''}>Не отправлять</option><option value="deliver" ${d.action==='deliver'?'selected':''}>Отправлять</option><option value="review" ${d.action==='review'?'selected':''}>На проверку</option></select>${topic}</div></td>`}
-$('addPosition').onclick=()=>{const name=prompt('Точное название позиции из EAVC');if(!name)return;const key='name:'+name.trim().replace(/\s+/g,' ').toLocaleLowerCase('ru-RU');if(!rules.positions[key])rules.positions[key]={};renderRules()};
-$('publishRules').onclick=async()=>{if(!rules)return;document.querySelectorAll('#routeTable tbody tr').forEach(row=>{const target=row.dataset.key==='__unknown__'?rules.unknown:(rules.positions[row.dataset.key]??={});row.querySelectorAll('td[data-destination]').forEach(td=>{const input=td.querySelector('input');target[td.dataset.destination]={action:td.querySelector('select').value,thread_id:input?Number(input.value||0):0}})});if(!confirm('Опубликовать новую версию правил? Изменения сразу начнут действовать для новых событий.'))return;try{await post('/api/rules',rules);msg('Новая версия правил опубликована.',true);loadRules()}catch(e){msg(e.message)}};
-function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}refresh();setInterval(refresh,3000);
+const $ = id => document.getElementById(id);
+
+const pageTitles = {
+  dashboard: 'Обзор',
+  transport: 'Связь с рабочими точками',
+  destinations: 'Получатели',
+  clients: 'Рабочие точки',
+  routes: 'Маршруты'
+};
+
+let status = null;
+let destinations = {};
+let clients = [];
+let rules = null;
+let rulesDirty = false;
+let currentPositionPage = 1;
+const positionsPerPage = 12;
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+}
+
+function formatDate(value) {
+  return value ? new Date(value).toLocaleString('ru-RU') : 'Ещё не было';
+}
+
+async function request(url, options = {}) {
+  const response = await fetch(url, { cache: 'no-store', ...options });
+  const type = response.headers.get('content-type') || '';
+  const payload = type.includes('application/json') ? await response.json() : await response.text();
+  if (!response.ok) {
+    throw new Error(payload?.error || payload || 'Не удалось выполнить действие');
+  }
+  return payload;
+}
+
+function post(url, payload) {
+  return request(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+function notify(text, ok = false) {
+  const element = $('globalMessage');
+  element.textContent = text;
+  element.className = `toast show${ok ? ' ok' : ''}`;
+  clearTimeout(notify.timer);
+  notify.timer = setTimeout(() => element.classList.remove('show'), 6000);
+}
+
+function setButtonBusy(button, busy, busyText = 'Проверяем…') {
+  if (!button) return;
+  if (busy) {
+    button.dataset.label = button.textContent;
+    button.textContent = busyText;
+    button.disabled = true;
+  } else {
+    button.textContent = button.dataset.label || button.textContent;
+    button.disabled = false;
+  }
+}
+
+function openDialog(id) {
+  const dialog = $(id);
+  if (!dialog.open) dialog.showModal();
+}
+
+function closeDialog(id) {
+  const dialog = $(id);
+  if (dialog?.open) dialog.close();
+}
+
+document.querySelectorAll('[data-close]').forEach(button => {
+  button.addEventListener('click', () => closeDialog(button.dataset.close));
+});
+
+document.querySelectorAll('.modal').forEach(dialog => {
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) dialog.close();
+  });
+});
+
+document.querySelectorAll('.sidebar nav button').forEach(button => {
+  button.addEventListener('click', async () => {
+    document.querySelectorAll('.sidebar nav button,.page').forEach(item => item.classList.remove('active'));
+    button.classList.add('active');
+    $(button.dataset.page).classList.add('active');
+    $('pageTitle').textContent = pageTitles[button.dataset.page];
+    try {
+      if (button.dataset.page === 'dashboard') await loadOverview();
+      if (button.dataset.page === 'destinations') await loadDestinations();
+      if (button.dataset.page === 'clients') await loadClients();
+      if (button.dataset.page === 'routes') {
+        if (rulesDirty) {
+          renderRules();
+          await loadRuleHistory();
+        } else {
+          await loadRules();
+        }
+      }
+    } catch (error) {
+      notify(error.message);
+    }
+  });
+});
+
+$('openHelp').addEventListener('click', () => openDialog('helpDialog'));
+
+async function refreshStatus() {
+  status = await request('/api/status');
+  const stateClass = ['running', 'error', 'waiting'].includes(status.state) ? status.state : 'waiting';
+  $('hero').className = `hero ${stateClass}`;
+  $('stateTitle').textContent = status.title;
+  $('stateDetail').textContent = status.detail;
+  $('version').textContent = status.version ? `Версия ${status.version}` : '';
+  $('sidebarState').textContent = status.transport_ok ? 'Система работает' : (status.configured ? 'Нужна проверка' : 'Не настроено');
+  $('sidebarDot').style.background = status.transport_ok ? '#16a565' : (status.configured ? '#dd941a' : '#8190a5');
+  $('transportBadge').textContent = status.transport_ok ? 'Связь работает' : (status.configured ? 'Настроено, нужна связь' : 'Не настроено');
+  $('transportBadge').className = `badge ${status.transport_ok ? 'success' : (status.configured ? 'warning' : 'neutral')}`;
+
+  const stats = status.stats || {};
+  $('statClients').textContent = stats.clients || 0;
+  $('statEvents').textContent = stats.events || 0;
+  $('statPending').textContent = stats.pending || 0;
+  $('statDelivered').textContent = stats.delivered || 0;
+  $('statExpired').textContent = stats.expired || 0;
+  $('statRejected').textContent = stats.rejected || 0;
+  $('lastReceived').textContent = formatDate(status.last_received);
+  $('lastDelivery').textContent = formatDate(status.last_delivery);
+}
+
+async function loadOverview() {
+  const results = await Promise.all([
+    refreshStatus(),
+    request('/api/destinations'),
+    request('/api/clients'),
+    request('/api/rules')
+  ]);
+  destinations = results[1] || {};
+  clients = results[2] || [];
+  if (!rulesDirty) rules = results[3];
+  renderReadiness();
+}
+
+function renderReadiness() {
+  const items = [
+    [Boolean(status?.transport_ok), 'Подключить связь с рабочими точками'],
+    [Object.keys(destinations).length > 0, 'Добавить хотя бы одного получателя'],
+    [clients.length > 0, 'Создать файл настроек рабочей точки'],
+    [Object.keys(rules?.positions || {}).length > 0, 'Добавить позиции'],
+    [Object.keys(rules?.positions || {}).length > 0 && !rulesDirty, 'Опубликовать маршруты']
+  ];
+  $('readiness').innerHTML = items.map(([done, label]) => `
+    <div class="check-item${done ? ' done' : ''}">
+      <span class="check-mark">${done ? '✓' : ''}</span><span>${escapeHTML(label)}</span>
+    </div>`).join('');
+}
+
+$('transportForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const button = form.querySelector('button[type="submit"],button:not([type])');
+  setButtonBusy(button, true, 'Проверяем связь…');
+  try {
+    await post('/api/setup', {
+      bot_token: data.get('bot_token'),
+      chat_id: Number(data.get('chat_id')),
+      invite_link: data.get('invite_link')
+    });
+    form.reset();
+    await loadOverview();
+    notify('Связь проверена, настройки сохранены.', true);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
+
+function destinationType(kind) {
+  return kind === 'telegram' ? 'Telegram' : 'Документ Word';
+}
+
+function destinationDetails(destination) {
+  if (destination.kind === 'telegram') {
+    return [['Группа или канал', destination.chat_id || 'Не указано']];
+  }
+  return [
+    ['Шаблон', destination.template || 'Не указан'],
+    ['Папка', destination.folder || 'Не указана'],
+    ['Обозначение', destination.network || 'Не задано']
+  ];
+}
+
+async function loadDestinations() {
+  destinations = await request('/api/destinations');
+  renderDestinations();
+}
+
+function renderDestinations() {
+  const query = $('destinationSearch').value.trim().toLocaleLowerCase('ru-RU');
+  const entries = Object.entries(destinations)
+    .filter(([, item]) => !query || `${item.name} ${destinationType(item.kind)}`.toLocaleLowerCase('ru-RU').includes(query))
+    .sort((left, right) => String(left[1].name).localeCompare(String(right[1].name), 'ru'));
+  $('destinationCount').textContent = `Показано: ${entries.length} из ${Object.keys(destinations).length}`;
+  $('destinationsList').innerHTML = entries.map(([id, item]) => `
+    <article class="entity-card" data-destination-id="${escapeHTML(id)}">
+      <div class="entity-card-head"><div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(destinationType(item.kind))}</p></div><span class="badge success">Настроено</span></div>
+      <dl class="entity-meta">${destinationDetails(item).map(([label, value]) => `<dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd>`).join('')}</dl>
+      <div class="entity-actions"><button class="button ghost" data-action="edit">Изменить</button><button class="button danger" data-action="delete">Удалить</button></div>
+    </article>`).join('');
+}
+
+$('destinationSearch').addEventListener('input', renderDestinations);
+
+function generatedDestinationID() {
+  return `receiver-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function updateDestinationKind() {
+  const kind = $('destinationForm').elements.kind.value;
+  const form = $('destinationForm');
+  document.querySelectorAll('#destinationForm .kind').forEach(section => section.classList.add('hidden'));
+  document.querySelector(`#destinationForm .kind.${kind}`).classList.remove('hidden');
+  form.elements.bot_token.required = kind === 'telegram' && form.dataset.originalKind !== 'telegram';
+  form.elements.chat_id.required = kind === 'telegram';
+  form.elements.template.required = kind === 'word';
+  form.elements.folder.required = kind === 'word';
+}
+
+$('destinationForm').elements.kind.addEventListener('change', updateDestinationKind);
+
+function showDestinationDialog(id = '') {
+  const form = $('destinationForm');
+  form.reset();
+  const item = id ? destinations[id] : null;
+  form.dataset.editing = item ? 'true' : 'false';
+  form.dataset.originalKind = item?.kind || '';
+  form.elements.id.value = id || generatedDestinationID();
+  form.elements.name.value = item?.name || '';
+  form.elements.kind.value = item?.kind || 'telegram';
+  form.elements.chat_id.value = item?.chat_id || '';
+  form.elements.template.value = item?.template || '';
+  form.elements.folder.value = item?.folder || '';
+  form.elements.network.value = item?.network || '';
+  form.elements.prefix.value = item?.prefix || '';
+  $('destinationDialogTitle').textContent = item ? 'Изменить получателя' : 'Новый получатель';
+  updateDestinationKind();
+  openDialog('destinationDialog');
+}
+
+$('addDestination').addEventListener('click', () => showDestinationDialog());
+
+$('destinationsList').addEventListener('click', async event => {
+  const button = event.target.closest('button[data-action]');
+  const card = event.target.closest('[data-destination-id]');
+  if (!button || !card) return;
+  const id = card.dataset.destinationId;
+  if (button.dataset.action === 'edit') showDestinationDialog(id);
+  if (button.dataset.action === 'delete') {
+    const name = destinations[id]?.name || 'этого получателя';
+    if (!confirm(`Удалить «${name}»? Получатель будет убран из всех маршрутов.`)) return;
+    if (!discardDraftForRecipientChange()) return;
+    const hadDraft = rulesDirty;
+    setButtonBusy(button, true, 'Удаляем…');
+    try {
+      await request(`/api/destinations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (hadDraft) {
+        rulesDirty = false;
+        rules = null;
+      }
+      await loadDestinations();
+      notify('Получатель удалён из настроек и маршрутов.', true);
+    } catch (error) {
+      notify(error.message);
+      setButtonBusy(button, false);
+    }
+  }
+});
+
+$('destinationForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const button = form.querySelector('button[value="save"]');
+  if (!discardDraftForRecipientChange()) return;
+  const hadDraft = rulesDirty;
+  setButtonBusy(button, true, 'Проверяем…');
+  try {
+    await post('/api/destinations', {
+      id: data.get('id'),
+      name: data.get('name'),
+      kind: data.get('kind'),
+      bot_token: data.get('bot_token'),
+      chat_id: Number(data.get('chat_id') || 0),
+      template: data.get('template'),
+      folder: data.get('folder'),
+      network: data.get('network'),
+      prefix: data.get('prefix'),
+      username: data.get('username'),
+      password: data.get('password')
+    });
+    if (hadDraft) {
+      rulesDirty = false;
+      rules = null;
+    }
+    closeDialog('destinationDialog');
+    await loadDestinations();
+    notify('Получатель проверен и сохранён.', true);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
+
+function discardDraftForRecipientChange() {
+  if (!rulesDirty) return true;
+  return confirm('Есть неопубликованный черновик маршрутов. Отменить его и продолжить изменение получателей?');
+}
+
+async function loadClients() {
+  clients = await request('/api/clients');
+  renderClients();
+}
+
+function renderClients() {
+  $('clientsList').innerHTML = clients.map(client => `
+    <article class="entity-card">
+      <div class="entity-card-head"><div><h3>${escapeHTML(client.name)}</h3><p>Точка № ${escapeHTML(client.number)}</p></div><span class="badge ${client.active ? 'success' : 'neutral'}">${client.active ? 'Активна' : 'Отключена'}</span></div>
+      <dl class="entity-meta"><dt>Бот</dt><dd>${escapeHTML(client.bot || 'Не указан')}</dd><dt>Тема обмена</dt><dd>${escapeHTML(client.thread_id)}</dd></dl>
+      <div class="entity-actions"><a class="button ghost" href="/api/clients/${encodeURIComponent(client.id)}/config">Скачать файл настроек</a></div>
+    </article>`).join('');
+}
+
+$('addClient').addEventListener('click', () => {
+  $('clientForm').reset();
+  openDialog('clientDialog');
+});
+
+$('clientForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const button = form.querySelector('button[value="save"]');
+  setButtonBusy(button, true, 'Проверяем…');
+  try {
+    const response = await fetch('/api/clients', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        number: data.get('number'),
+        name: data.get('name'),
+        time_zone: data.get('time_zone'),
+        bot_token: data.get('bot_token'),
+        thread_id: Number(data.get('thread_id')),
+        catch_up_existing: data.get('catch_up_existing') === 'on'
+      })
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Не удалось создать настройки');
+    }
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `InterceptClient-${data.get('number')}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    closeDialog('clientDialog');
+    await loadClients();
+    notify('Файл настроек проверен и скачан.', true);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
+
+async function loadRules() {
+  rules = await request('/api/rules');
+  rules.destinations ||= {};
+  rules.positions ||= {};
+  rules.unknown ||= {};
+  rulesDirty = false;
+  currentPositionPage = 1;
+  renderRules();
+  await loadRuleHistory();
+}
+
+function positionName(key) {
+  return key.replace(/^(name|catalog):/, '');
+}
+
+function normalizedPositionKey(name) {
+  return `name:${name.trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru-RU')}`;
+}
+
+function sortedRuleDestinations() {
+  return Object.values(rules?.destinations || {}).sort((left, right) => left.name.localeCompare(right.name, 'ru'));
+}
+
+function decisionSummary(decisions) {
+  const chips = sortedRuleDestinations().flatMap(destination => {
+    const decision = decisions?.[destination.id];
+    if (!decision || decision.action === 'skip') return [];
+    const action = decision.action === 'review' ? 'На проверку' : 'Отправлять';
+    const topic = destination.kind === 'telegram' && decision.thread_id ? ` · тема ${decision.thread_id}` : '';
+    return [`<span class="route-chip${decision.action === 'review' ? ' review' : ''}">${escapeHTML(destination.name)} · ${action}${escapeHTML(topic)}</span>`];
+  });
+  return chips.length ? chips.join('') : '<span class="route-chip empty">Не отправлять</span>';
+}
+
+function renderRules() {
+  const allKeys = Object.keys(rules.positions).sort((left, right) => positionName(left).localeCompare(positionName(right), 'ru'));
+  const query = $('positionSearch').value.trim().toLocaleLowerCase('ru-RU');
+  const filtered = allKeys.filter(key => positionName(key).toLocaleLowerCase('ru-RU').includes(query));
+  const pages = Math.max(1, Math.ceil(filtered.length / positionsPerPage));
+  currentPositionPage = Math.min(currentPositionPage, pages);
+  const start = (currentPositionPage - 1) * positionsPerPage;
+  const visible = filtered.slice(start, start + positionsPerPage);
+
+  $('rulesMeta').textContent = `Опубликована версия ${rules.version} · позиций: ${allKeys.length}`;
+  $('draftBadge').classList.toggle('hidden', !rulesDirty);
+  $('publishRules').disabled = !rulesDirty;
+  $('positionPrev').disabled = currentPositionPage <= 1;
+  $('positionNext').disabled = currentPositionPage >= pages;
+  $('positionPage').textContent = `Страница ${currentPositionPage} из ${pages}`;
+
+  $('unknownRoute').innerHTML = `
+    <div><h3>Новые и неопознанные позиции</h3><p>Правило применяется, если отдельная позиция ещё не добавлена.</p></div>
+    <div class="route-summary">${decisionSummary(rules.unknown)}</div>
+    <div class="route-card-actions"><button class="button ghost" data-route-edit="__unknown__">Настроить</button></div>`;
+
+  $('positionsList').innerHTML = visible.map(key => `
+    <article class="route-card" data-position-key="${escapeHTML(key)}">
+      <div><h3>${escapeHTML(positionName(key))}</h3><p>Индивидуальный маршрут</p></div>
+      <div class="route-summary">${decisionSummary(rules.positions[key])}</div>
+      <div class="route-card-actions"><button class="button ghost" data-action="edit">Изменить</button><button class="button danger" data-action="delete">Удалить</button></div>
+    </article>`).join('');
+}
+
+$('positionSearch').addEventListener('input', () => {
+  currentPositionPage = 1;
+  renderRules();
+});
+
+$('positionPrev').addEventListener('click', () => {
+  if (currentPositionPage > 1) currentPositionPage--;
+  renderRules();
+});
+
+$('positionNext').addEventListener('click', () => {
+  currentPositionPage++;
+  renderRules();
+});
+
+function routeControl(destination, decision = { action: 'skip', thread_id: 0 }) {
+  const topic = destination.kind === 'telegram' ? `
+    <label>Тема получателя<input name="thread_${escapeHTML(destination.id)}" type="number" min="0" value="${Number(decision.thread_id || 0)}"><small>0 — основная тема</small></label>` : '<span class="route-hint">Дополнительная тема не требуется</span>';
+  return `<div class="route-control" data-route-destination="${escapeHTML(destination.id)}">
+    <strong>${escapeHTML(destination.name)}</strong>
+    <label>Действие<select name="action_${escapeHTML(destination.id)}"><option value="skip"${decision.action === 'skip' ? ' selected' : ''}>Не отправлять</option><option value="deliver"${decision.action === 'deliver' ? ' selected' : ''}>Отправлять</option><option value="review"${decision.action === 'review' ? ' selected' : ''}>Отправить на проверку</option></select></label>
+    ${topic}
+  </div>`;
+}
+
+function showPositionDialog(key = '') {
+  const form = $('positionForm');
+  form.reset();
+  const unknown = key === '__unknown__';
+  const decisions = unknown ? rules.unknown : (rules.positions[key] || {});
+  form.elements.original_key.value = key;
+  form.elements.name.value = unknown ? '' : positionName(key);
+  form.elements.name.closest('label').classList.toggle('hidden', unknown);
+  $('positionDialogTitle').textContent = unknown ? 'Новые и неопознанные позиции' : (key ? 'Изменить позицию' : 'Новая позиция');
+  const destinationList = sortedRuleDestinations();
+  $('routeEditor').innerHTML = destinationList.length
+    ? destinationList.map(destination => routeControl(destination, decisions[destination.id])).join('')
+    : '<div class="route-editor-empty">Сначала добавьте получателей. Позицию можно сохранить сейчас и настроить позже.</div>';
+  openDialog('positionDialog');
+}
+
+$('addPosition').addEventListener('click', () => showPositionDialog());
+$('unknownRoute').addEventListener('click', event => {
+  if (event.target.closest('[data-route-edit]')) showPositionDialog('__unknown__');
+});
+
+$('positionsList').addEventListener('click', event => {
+  const button = event.target.closest('button[data-action]');
+  const row = event.target.closest('[data-position-key]');
+  if (!button || !row) return;
+  const key = row.dataset.positionKey;
+  if (button.dataset.action === 'edit') showPositionDialog(key);
+  if (button.dataset.action === 'delete') {
+    if (!confirm(`Удалить позицию «${positionName(key)}» из черновика?`)) return;
+    delete rules.positions[key];
+    rulesDirty = true;
+    renderRules();
+    notify('Позиция удалена из черновика. Опубликуйте маршруты, чтобы применить изменение.', true);
+  }
+});
+
+$('positionForm').addEventListener('submit', event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const originalKey = data.get('original_key');
+  const unknown = originalKey === '__unknown__';
+  const decisions = {};
+  sortedRuleDestinations().forEach(destination => {
+    decisions[destination.id] = {
+      action: data.get(`action_${destination.id}`) || 'skip',
+      thread_id: destination.kind === 'telegram' ? Number(data.get(`thread_${destination.id}`) || 0) : 0
+    };
+  });
+
+  if (unknown) {
+    rules.unknown = decisions;
+  } else {
+    const newKey = normalizedPositionKey(data.get('name'));
+    if (newKey !== originalKey && rules.positions[newKey]) {
+      notify('Позиция с таким названием уже существует.');
+      return;
+    }
+    if (originalKey) delete rules.positions[originalKey];
+    rules.positions[newKey] = decisions;
+  }
+  rulesDirty = true;
+  closeDialog('positionDialog');
+  renderRules();
+  notify('Изменение сохранено в черновике.', true);
+});
+
+$('publishRules').addEventListener('click', async event => {
+  if (!rulesDirty || !rules) return;
+  if (!confirm('Опубликовать черновик? Новые маршруты сразу начнут применяться к следующим событиям.')) return;
+  const button = event.currentTarget;
+  setButtonBusy(button, true, 'Публикуем…');
+  try {
+    await post('/api/rules', rules);
+    await loadRules();
+    notify('Маршруты опубликованы и уже действуют.', true);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
+
+async function loadRuleHistory() {
+  const history = await request('/api/rule-versions');
+  $('rulesHistory').innerHTML = history.map(item => `
+    <div class="simple-row" data-rule-version="${item.version}">
+      <strong>Версия ${item.version}</strong><span>${escapeHTML(item.author)}</span><span>${formatDate(item.created_at)}</span>
+      ${item.active ? '<span class="badge success">Действует</span>' : '<button class="button ghost" data-action="restore">Восстановить</button>'}
+    </div>`).join('');
+}
+
+$('rulesHistory').addEventListener('click', async event => {
+  const button = event.target.closest('button[data-action="restore"]');
+  const row = event.target.closest('[data-rule-version]');
+  if (!button || !row) return;
+  const version = Number(row.dataset.ruleVersion);
+  if (!confirm(`Восстановить настройки из версии ${version}? Текущая версия останется в истории.`)) return;
+  setButtonBusy(button, true, 'Восстанавливаем…');
+  try {
+    await post(`/api/rule-versions/${version}/restore`, {});
+    await loadRules();
+    notify(`Настройки версии ${version} восстановлены как новая версия.`, true);
+  } catch (error) {
+    notify(error.message);
+    setButtonBusy(button, false);
+  }
+});
+
+async function initialize() {
+  try {
+    await loadOverview();
+  } catch (error) {
+    notify(error.message);
+  }
+  setInterval(() => refreshStatus().catch(() => {}), 5000);
+}
+
+window.addEventListener('beforeunload', event => {
+  if (!rulesDirty) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
+
+initialize();

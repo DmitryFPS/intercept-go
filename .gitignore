@@ -6,6 +6,8 @@
 /.gomodcache/
 /.gopath/
 /.gotmp/
+/.cache/
+/.preview/
 *.log
 *.local.json
 *.secret.json

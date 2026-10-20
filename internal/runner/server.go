@@ -93,7 +93,8 @@ func NewServer(ctx context.Context, baseDir, version string, logger *slog.Logger
 		db.Close()
 		return nil, err
 	}
-	if _, err := store.ActiveRules(ctx); err != nil {
+	activeRules, rulesErr := store.ActiveRules(ctx)
+	if rulesErr != nil {
 		rules, defaultErr := defaults.InitialRules()
 		if defaultErr != nil {
 			db.Close()
@@ -103,16 +104,37 @@ func NewServer(ctx context.Context, baseDir, version string, logger *slog.Logger
 			db.Close()
 			return nil, err
 		}
+	} else if _, configErr := os.Stat(filepath.Join(baseDir, "data", "server-config.dat")); os.IsNotExist(configErr) && isLegacyBuiltInRules(activeRules) {
+		rules, defaultErr := defaults.InitialRules()
+		if defaultErr != nil {
+			db.Close()
+			return nil, defaultErr
+		}
+		rules.Version = activeRules.Version + 1
+		if err := store.PublishRules(ctx, rules, "Удалена устаревшая встроенная заготовка"); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	server := &Server{
 		BaseDir: baseDir, Version: version, Logger: logger, Store: store,
 		status: ServerStatus{
-			State: "setup", Title: "Настройте транспорт",
-			Detail:  "Укажите серверного Telegram-бота и закрытую транспортную группу.",
+			State: "setup", Title: "Настройте связь",
+			Detail:  "Укажите бота сервера и группу, через которую рабочие точки будут обмениваться данными.",
 			Version: version,
 		},
 	}
 	return server, nil
+}
+
+func isLegacyBuiltInRules(rules domain.RuleSet) bool {
+	if len(rules.Destinations) != 3 || len(rules.Positions) < 20 {
+		return false
+	}
+	_, aerodrom := rules.Destinations["aerodrom"]
+	_, shabashka := rules.Destinations["shabashka"]
+	_, word := rules.Destinations["word-main"]
+	return aerodrom && shabashka && word
 }
 
 // Start запускает приём, доставку и обслуживание до отмены контекста.
