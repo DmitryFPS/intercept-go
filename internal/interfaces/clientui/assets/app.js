@@ -2,6 +2,12 @@ const element = id => document.getElementById(id);
 const formatTime = value => value ? new Date(value).toLocaleString('ru-RU') : 'Ещё не было';
 let searchController;
 
+function showMessage(text = '', tone = 'error') {
+  const message = element('message');
+  message.textContent = text;
+  message.className = text ? `message ${tone}` : 'message';
+}
+
 async function requestJSON(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json();
@@ -37,14 +43,15 @@ async function refresh() {
     element('expired').textContent = status.queue?.expired || 0;
     if (status.eavc_path && !element('eavcPath').value) element('eavcPath').value = status.eavc_path;
   } catch (error) {
-    element('message').textContent = 'Интерфейс временно не отвечает: ' + error.message;
+    console.error(error);
+    showMessage('Интерфейс временно не отвечает. Программа попробует обновить состояние автоматически.');
   }
 }
 
 async function searchEAVC(extended) {
   searchController = new AbortController();
   element('cancelSearch').classList.remove('hidden');
-  element('message').textContent = extended ? 'Ищем базы EAVC на дисках…' : 'Ищем EAVC рядом с программой…';
+  showMessage(extended ? 'Ищем базы EAVC на дисках…' : 'Ищем EAVC рядом с программой…', 'info');
   element('eavcCandidates').replaceChildren();
   try {
     const data = await requestJSON('/api/eavc/search', {
@@ -53,7 +60,7 @@ async function searchEAVC(extended) {
     });
     showCandidates(data.candidates || []);
   } catch (error) {
-    element('message').textContent = error.name === 'AbortError' ? 'Поиск остановлен.' : error.message;
+    showMessage(error.name === 'AbortError' ? 'Поиск остановлен.' : error.message, error.name === 'AbortError' ? 'info' : 'error');
   } finally {
     searchController = undefined;
     element('cancelSearch').classList.add('hidden');
@@ -62,10 +69,10 @@ async function searchEAVC(extended) {
 
 function showCandidates(candidates) {
   if (candidates.length === 0) {
-    element('message').textContent = 'Подходящая база EAVC не найдена. Можно указать путь вручную.';
+    showMessage('Подходящая база EAVC не найдена. Можно указать путь вручную.');
     return;
   }
-  element('message').textContent = candidates.length === 1 ? 'База найдена и выбрана.' : 'Найдено несколько баз. Выберите рабочую.';
+  showMessage(candidates.length === 1 ? 'База найдена и выбрана.' : 'Найдено несколько баз. Выберите рабочую.', candidates.length === 1 ? 'success' : 'info');
   for (const candidate of candidates) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -80,31 +87,31 @@ function showCandidates(candidates) {
 }
 
 async function selectEAVC(path) {
-  element('message').textContent = 'Проверяем выбранную базу…';
+  showMessage('Проверяем выбранную базу…', 'info');
   try {
     await requestJSON('/api/eavc/select', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path})
     });
     element('eavcPath').value = path;
-    element('message').textContent = 'База EAVC выбрана. Клиент запускается.';
+    showMessage('База EAVC выбрана. Клиент запускается.', 'success');
     await refresh();
   } catch (error) {
-    element('message').textContent = error.message;
+    showMessage(error.message);
   }
 }
 
 element('configFile').addEventListener('change', async event => {
   const file = event.target.files[0];
   if (!file) return;
-  element('message').textContent = 'Проверяем настройки…';
+  showMessage('Проверяем настройки…', 'info');
   const form = new FormData();
   form.append('config', file);
   try {
     await requestJSON('/api/config/import', {method: 'POST', body: form});
-    element('message').textContent = 'Настройки приняты. Программа запускается.';
+    showMessage('Настройки приняты. Программа запускается.', 'success');
     await refresh();
   } catch (error) {
-    element('message').textContent = error.message;
+    showMessage(error.message);
   } finally {
     event.target.value = '';
   }
@@ -115,12 +122,12 @@ element('fullSearch').addEventListener('click', () => searchEAVC(true));
 element('cancelSearch').addEventListener('click', () => searchController?.abort());
 element('saveEavc').addEventListener('click', () => selectEAVC(element('eavcPath').value));
 element('checkTransport').addEventListener('click', async () => {
-  element('message').textContent = 'Отправляем проверочный пакет…';
+  showMessage('Отправляем проверочный пакет…', 'info');
   try {
     await requestJSON('/api/transport/check', {method: 'POST'});
-    element('message').textContent = 'Пакет отправлен. Ответ сервера появится в блоке «Подтверждение сервера».';
+    showMessage('Пакет отправлен. Ответ сервера появится в блоке «Подтверждение сервера».', 'success');
   } catch (error) {
-    element('message').textContent = error.message;
+    showMessage(error.message);
   }
 });
 

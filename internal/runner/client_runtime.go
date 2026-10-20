@@ -175,7 +175,11 @@ func (client *Client) clientMaintenanceLoop(ctx context.Context, queue *stateDB.
 
 func (client *Client) collectAndDispatch(ctx context.Context, service *application.ClientService, queue *stateDB.ClientQueue) {
 	if _, err := service.CollectOnce(ctx); err != nil {
-		client.transientFailure("Не удалось прочитать EAVC", err)
+		client.transientFailure(
+			"Не удалось прочитать EAVC",
+			"База EAVC временно недоступна. Программа повторит чтение автоматически.",
+			err,
+		)
 		return
 	}
 	now := time.Now().UTC()
@@ -185,7 +189,11 @@ func (client *Client) collectAndDispatch(ctx context.Context, service *applicati
 	})
 	count, err := service.DispatchOnce(ctx)
 	if err != nil {
-		client.transientFailure("Ожидает интернет", err)
+		client.transientFailure(
+			"Telegram временно недоступен",
+			"Данные сохранены на компьютере. Программа повторит отправку автоматически.",
+			err,
+		)
 	} else if count > 0 {
 		client.update(func(status *ClientStatus) {
 			status.State = "running"
@@ -202,7 +210,11 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 	for ctx.Err() == nil {
 		count, err := service.ReceiveAcknowledgements(ctx)
 		if err != nil && ctx.Err() == nil {
-			client.transientFailure("Нет подтверждения сервера", err)
+			client.transientFailure(
+				"Нет подтверждения сервера",
+				"Связь временно прервалась. Программа повторит проверку автоматически; данные сохранены.",
+				err,
+			)
 			time.Sleep(5 * time.Second)
 			continue
 		}

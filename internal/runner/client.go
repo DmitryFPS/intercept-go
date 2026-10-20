@@ -96,7 +96,7 @@ func (client *Client) fail(title string, err error) {
 	})
 }
 
-func (client *Client) transientFailure(title string, err error) {
+func (client *Client) transientFailure(title, detail string, err error) {
 	if errors.Is(err, context.Canceled) {
 		return
 	}
@@ -104,7 +104,7 @@ func (client *Client) transientFailure(title string, err error) {
 	client.update(func(status *ClientStatus) {
 		status.State = "waiting"
 		status.Title = title
-		status.Detail = "Данные сохранены на компьютере. Повтор будет выполнен автоматически. " + err.Error()
+		status.Detail = detail
 		status.TelegramOK = false
 	})
 }
