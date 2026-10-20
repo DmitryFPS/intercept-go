@@ -83,3 +83,21 @@ func TestProtectLocalUI(t *testing.T) {
 		t.Fatalf("ожидался доступ для same-origin POST, получен %d", response.Code)
 	}
 }
+
+func TestIsRunningRecognizesSameProtectedInterface(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	server := httptest.NewUnstartedServer(nil)
+	authority := server.Listener.Addr().String()
+	server.Config.Handler = protectLocalUI(authority, token, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	server.Start()
+	defer server.Close()
+
+	if !IsRunning(authority, token) {
+		t.Fatal("работающий интерфейс с тем же ключом не распознан")
+	}
+	if IsRunning(authority, "другой-ключ") {
+		t.Fatal("интерфейс с другим ключом ошибочно распознан как свой")
+	}
+}

@@ -36,7 +36,7 @@ func ListenAndServe(ctx context.Context, address string, handler http.Handler, o
 	if open {
 		go func() {
 			time.Sleep(300 * time.Millisecond)
-			_ = OpenBrowser("http://" + listener.Addr().String() + "/?access=" + url.QueryEscape(accessToken))
+			_ = OpenBrowser(AccessURL(listener.Addr().String(), accessToken))
 		}()
 	}
 	go func() {
@@ -50,6 +50,27 @@ func ListenAndServe(ctx context.Context, address string, handler http.Handler, o
 		return nil
 	}
 	return err
+}
+
+// AccessURL возвращает защищённую ссылку локального интерфейса.
+func AccessURL(address, accessToken string) string {
+	return "http://" + address + "/?access=" + url.QueryEscape(accessToken)
+}
+
+// IsRunning проверяет, принадлежит ли уже занятый адрес экземпляру программы с тем же ключом доступа.
+func IsRunning(address, accessToken string) bool {
+	client := &http.Client{
+		Timeout: 750 * time.Millisecond,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	response, err := client.Get(AccessURL(address, accessToken))
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	return response.StatusCode == http.StatusSeeOther
 }
 
 func protectLocalUI(authority, token string, next http.Handler) http.Handler {

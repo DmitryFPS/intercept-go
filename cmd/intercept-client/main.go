@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,11 +35,6 @@ func main() {
 	} else {
 		defer closer.Close()
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	application := runner.NewClient(baseDir, buildVersion(), logger)
-	application.Start(ctx)
-	handler := clientui.Handler{Client: application, Context: ctx}.Routes()
 	accessToken, err := secrets.LoadOrCreateToken(
 		filepath.Join(baseDir, "data", "client-ui-access.dat"), argumentValue("--access-token="),
 	)
@@ -50,9 +44,18 @@ func main() {
 	}
 	address := "127.0.0.1:17631"
 	openBrowser := len(os.Args) < 2 || os.Args[1] != "--no-browser"
+	if openBrowser && localui.IsRunning(address, accessToken) {
+		_ = localui.OpenBrowser(localui.AccessURL(address, accessToken))
+		return
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	application := runner.NewClient(baseDir, buildVersion(), logger)
+	application.Start(ctx)
+	handler := clientui.Handler{Client: application, Context: ctx}.Routes()
 	if err := localui.ListenAndServe(ctx, address, handler, openBrowser, accessToken); err != nil {
 		logger.Error("локальный интерфейс завершён", "error", err)
-		_ = localui.OpenBrowser("http://" + address + "/?access=" + url.QueryEscape(accessToken))
+		_ = localui.OpenBrowser(localui.AccessURL(address, accessToken))
 	}
 }
 
