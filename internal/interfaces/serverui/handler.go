@@ -40,8 +40,13 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/destinations", func(writer http.ResponseWriter, _ *http.Request) {
 		localui.WriteJSON(writer, http.StatusOK, handler.Server.SafeDestinations())
 	})
+	mux.HandleFunc("GET /api/template-defaults", func(writer http.ResponseWriter, _ *http.Request) {
+		localui.WriteJSON(writer, http.StatusOK, handler.Server.TemplateDefaults())
+	})
+	mux.HandleFunc("POST /api/templates/restore-word", handler.restoreDefaultWordTemplate)
 	mux.HandleFunc("POST /api/destinations", handler.addDestination)
 	mux.HandleFunc("DELETE /api/destinations/{id}", handler.deleteDestination)
+	mux.HandleFunc("GET /api/destinations/{id}/word-template", handler.destinationWordTemplate)
 	mux.HandleFunc("GET /api/rules", handler.rules)
 	mux.HandleFunc("GET /api/rule-draft", handler.ruleDraft)
 	mux.HandleFunc("POST /api/rule-draft", handler.saveRuleDraft)
@@ -50,6 +55,27 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/rule-versions/{version}/restore", handler.restoreRules)
 	mux.HandleFunc("GET /api/diagnostics", handler.diagnostics)
 	return securityHeaders(mux)
+}
+
+func (handler Handler) restoreDefaultWordTemplate(writer http.ResponseWriter, _ *http.Request) {
+	path, err := handler.Server.RestoreDefaultWordTemplate()
+	if err != nil {
+		badRequest(writer, err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, map[string]string{"path": path})
+}
+
+func (handler Handler) destinationWordTemplate(writer http.ResponseWriter, request *http.Request) {
+	payload, filename, err := handler.Server.DestinationWordTemplate(request.PathValue("id"))
+	if err != nil {
+		badRequest(writer, err)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	base := strings.TrimSuffix(filename, ".docx")
+	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.docx"`, safeFilename(base)))
+	writer.Write(payload)
 }
 
 func (handler Handler) clientConfig(writer http.ResponseWriter, request *http.Request) {

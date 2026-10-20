@@ -26,4 +26,5 @@
 .topbar{margin-bottom:16px}
 .section-head.page-intro{margin:0 0 18px}
 .section-head.page-intro>p{max-width:850px;margin:0;color:var(--muted);line-height:1.5}
+.destination-modal{width:min(820px,calc(100vw - 30px))}.destination-modal form{max-height:84vh;overflow-y:auto;padding-right:4px}.form textarea{width:100%;min-height:190px;resize:vertical;border:1px solid #ccd5e1;border-radius:10px;padding:11px 12px;background:#fbfcfe;color:#17233a;font:12px/1.45 Consolas,"Courier New",monospace}.form textarea:focus{outline:3px solid rgba(36,94,234,.13);border-color:#5f89ee}.template-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.template-markers{display:grid;gap:6px;color:#68768c;font-size:11px;line-height:1.45;overflow-wrap:anywhere}.template-markers strong{color:#3a475d;font-size:12px}.template-field small,.template-markers small{font-weight:500;color:#7d899d}
 @media(max-width:760px){.history-head{align-items:flex-start;flex-direction:column}.route-modal{width:min(100% - 16px,900px)}.route-modal form{padding:17px}.route-control{grid-template-columns:1fr}.route-modal .modal-actions{flex-wrap:wrap}}

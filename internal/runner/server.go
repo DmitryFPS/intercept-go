@@ -48,17 +48,26 @@ type TransportSetup struct {
 
 // DestinationSetup содержит проверяемые поля нового внешнего направления.
 type DestinationSetup struct {
-	ID       string                 `json:"id"`
-	Name     string                 `json:"name"`
-	Kind     domain.DestinationKind `json:"kind"`
-	BotToken string                 `json:"bot_token,omitempty"`
-	ChatID   int64                  `json:"chat_id,omitempty"`
-	Template string                 `json:"template,omitempty"`
-	Folder   string                 `json:"folder,omitempty"`
-	Network  string                 `json:"network,omitempty"`
-	Prefix   string                 `json:"prefix,omitempty"`
-	Username string                 `json:"username,omitempty"`
-	Password string                 `json:"password,omitempty"`
+	ID              string                 `json:"id"`
+	Name            string                 `json:"name"`
+	Kind            domain.DestinationKind `json:"kind"`
+	BotToken        string                 `json:"bot_token,omitempty"`
+	ChatID          int64                  `json:"chat_id,omitempty"`
+	MessageTemplate string                 `json:"message_template,omitempty"`
+	Template        string                 `json:"template,omitempty"`
+	Folder          string                 `json:"folder,omitempty"`
+	Network         string                 `json:"network,omitempty"`
+	Prefix          string                 `json:"prefix,omitempty"`
+	Username        string                 `json:"username,omitempty"`
+	Password        string                 `json:"password,omitempty"`
+}
+
+// TemplateDefaults описывает стандартные шаблоны и обязательные метки.
+type TemplateDefaults struct {
+	Telegram        string   `json:"telegram"`
+	TelegramMarkers []string `json:"telegram_markers"`
+	WordPath        string   `json:"word_path"`
+	WordMarkers     []string `json:"word_markers"`
 }
 
 // Server владеет жизненным циклом центральной программы. Прикладные правила

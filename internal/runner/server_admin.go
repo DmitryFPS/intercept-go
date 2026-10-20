@@ -18,6 +18,7 @@ import (
 	"intercept/internal/application"
 	"intercept/internal/config"
 	"intercept/internal/domain"
+	"intercept/internal/infrastructure/docx"
 	"intercept/internal/infrastructure/secrets"
 	"intercept/internal/infrastructure/share"
 	stateDB "intercept/internal/infrastructure/sqlite"
@@ -79,7 +80,8 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 	}
 	destination := config.DestinationConfig{
 		Kind: setup.Kind, BotToken: setup.BotToken, ChatID: setup.ChatID,
-		Template: strings.TrimSpace(setup.Template), Folder: strings.TrimSpace(setup.Folder),
+		MessageTemplate: strings.TrimSpace(setup.MessageTemplate),
+		Template:        strings.TrimSpace(setup.Template), Folder: strings.TrimSpace(setup.Folder),
 		Network: strings.TrimSpace(setup.Network), Prefix: strings.TrimSpace(setup.Prefix),
 		Username: setup.Username, Password: setup.Password,
 	}
@@ -99,6 +101,12 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 	}
 	switch setup.Kind {
 	case domain.DestinationTelegram:
+		if destination.MessageTemplate == "" {
+			destination.MessageTemplate = telegram.DefaultMessageTemplate
+		}
+		if err := telegram.ValidateMessageTemplate(destination.MessageTemplate); err != nil {
+			return err
+		}
 		api, err := telegram.New(destination.BotToken, nil)
 		if err != nil {
 			return err
@@ -110,7 +118,7 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 			return fmt.Errorf("проверка Telegram-направления: %w", err)
 		}
 	case domain.DestinationWord:
-		if _, err := os.Stat(destination.Template); err != nil {
+		if err := docx.ValidateTemplate(destination.Template); err != nil {
 			return fmt.Errorf("проверка шаблона Word: %w", err)
 		}
 		if _, err := os.Stat(destination.Folder); err != nil {
@@ -385,13 +393,61 @@ func (server *Server) SafeDestinations() map[string]map[string]any {
 		if item, exists := rules.Destinations[id]; exists {
 			name = item.Name
 		}
+		messageTemplate := destination.MessageTemplate
+		if destination.Kind == domain.DestinationTelegram && strings.TrimSpace(messageTemplate) == "" {
+			messageTemplate = telegram.DefaultMessageTemplate
+		}
 		result[id] = map[string]any{
 			"name": name, "kind": destination.Kind, "chat_id": destination.ChatID,
-			"template": destination.Template, "folder": destination.Folder,
+			"message_template": messageTemplate,
+			"template":         destination.Template, "folder": destination.Folder,
 			"network": destination.Network, "prefix": destination.Prefix,
 		}
 	}
 	return result
+}
+
+// TemplateDefaults возвращает интерфейсу стандартные шаблоны без секретов.
+func (server *Server) TemplateDefaults() TemplateDefaults {
+	return TemplateDefaults{
+		Telegram: telegram.DefaultMessageTemplate, TelegramMarkers: telegram.MessageTemplateMarkers(),
+		WordPath: filepath.Join(server.BaseDir, "word_template.docx"), WordMarkers: docx.TemplateMarkers(),
+	}
+}
+
+// RestoreDefaultWordTemplate возвращает файл поставки рядом с программой.
+func (server *Server) RestoreDefaultWordTemplate() (string, error) {
+	path := filepath.Join(server.BaseDir, "word_template.docx")
+	if err := docx.RestoreDefaultTemplate(path); err != nil {
+		return "", err
+	}
+	if err := docx.ValidateTemplate(path); err != nil {
+		return "", fmt.Errorf("проверка восстановленного шаблона Word: %w", err)
+	}
+	return path, nil
+}
+
+// DestinationWordTemplate возвращает выбранный пользователем DOCX для просмотра.
+func (server *Server) DestinationWordTemplate(id string) ([]byte, string, error) {
+	server.mu.RLock()
+	destination, exists := server.config.Destinations[strings.TrimSpace(id)]
+	server.mu.RUnlock()
+	if !exists || destination.Kind != domain.DestinationWord {
+		return nil, "", errors.New("Word-получатель не найден")
+	}
+	file, err := os.Open(destination.Template)
+	if err != nil {
+		return nil, "", fmt.Errorf("открыть шаблон Word: %w", err)
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(io.LimitReader(file, 64*1024*1024+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("прочитать шаблон Word: %w", err)
+	}
+	if len(payload) > 64*1024*1024 {
+		return nil, "", errors.New("шаблон Word слишком велик для скачивания")
+	}
+	return payload, filepath.Base(destination.Template), nil
 }
 
 // Diagnostics формирует архив состояния и журналов без конфигурации и секретов.

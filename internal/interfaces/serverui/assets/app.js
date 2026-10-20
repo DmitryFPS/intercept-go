@@ -24,6 +24,7 @@ let rulesDirty = false;
 let currentPositionPage = 1;
 let ruleHistory = [];
 let ruleHistoryExpanded = false;
+let templateDefaults = { telegram: '', telegram_markers: [], word_path: '', word_markers: [] };
 const positionsPerPage = 12;
 const visibleRuleVersions = 5;
 
@@ -206,7 +207,8 @@ function destinationDetails(destination) {
   if (destination.kind === 'telegram') {
     return [
       ['Группа или канал', destination.chat_id || 'Не указано'],
-      ['Обозначение радиосети', destination.network || 'Не задано']
+      ['Обозначение радиосети', destination.network || 'Не задано'],
+      ['Шаблон сообщения', destination.message_template === templateDefaults.telegram ? 'Стандартный' : 'Пользовательский']
     ];
   }
   return [
@@ -248,6 +250,7 @@ function updateDestinationKind() {
   document.querySelector(`#destinationForm .kind.${kind}`).classList.remove('hidden');
   form.elements.bot_token.required = kind === 'telegram' && form.dataset.originalKind !== 'telegram';
   form.elements.chat_id.required = kind === 'telegram';
+  form.elements.message_template.required = kind === 'telegram';
   form.elements.network.required = true;
   form.elements.template.required = kind === 'word';
   form.elements.folder.required = kind === 'word';
@@ -265,16 +268,41 @@ function showDestinationDialog(id = '') {
   form.elements.name.value = item?.name || '';
   form.elements.kind.value = item?.kind || 'telegram';
   form.elements.chat_id.value = item?.chat_id || '';
-  form.elements.template.value = item?.template || '';
+  form.elements.message_template.value = item?.message_template || templateDefaults.telegram;
+  form.elements.template.value = item?.template || templateDefaults.word_path;
   form.elements.folder.value = item?.folder || '';
   form.elements.network.value = item?.network || '';
   form.elements.prefix.value = item?.prefix || '';
+  $('telegramTemplateMarkers').textContent = `Обязательные метки: ${templateDefaults.telegram_markers.join(', ')}`;
+  $('wordTemplateMarkers').textContent = templateDefaults.word_markers.join(', ');
+  const download = $('downloadWordTemplate');
+  download.classList.toggle('hidden', !item || item.kind !== 'word');
+  download.href = item && item.kind === 'word' ? `/api/destinations/${encodeURIComponent(id)}/word-template` : '#';
   $('destinationDialogTitle').textContent = item ? 'Изменить получателя' : 'Новый получатель';
   updateDestinationKind();
   openDialog('destinationDialog');
 }
 
 $('addDestination').addEventListener('click', () => showDestinationDialog());
+
+$('restoreTelegramTemplate').addEventListener('click', () => {
+  $('destinationForm').elements.message_template.value = templateDefaults.telegram;
+  notify('Стандартный шаблон Telegram восстановлен в форме. Сохраните получателя, чтобы применить его.', true);
+});
+
+$('restoreWordTemplate').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  setButtonBusy(button, true, 'Восстанавливаем…');
+  try {
+    const restored = await post('/api/templates/restore-word', {});
+    $('destinationForm').elements.template.value = restored.path;
+    notify('Стандартный шаблон Word восстановлен. Сохраните получателя, чтобы применить его.', true);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
 
 $('destinationsList').addEventListener('click', async event => {
   const button = event.target.closest('button[data-action]');
@@ -318,6 +346,7 @@ $('destinationForm').addEventListener('submit', async event => {
       kind: data.get('kind'),
       bot_token: data.get('bot_token'),
       chat_id: Number(data.get('chat_id') || 0),
+      message_template: data.get('message_template'),
       template: data.get('template'),
       folder: data.get('folder'),
       network: data.get('network'),
@@ -662,6 +691,7 @@ $('rulesHistory').addEventListener('click', async event => {
 
 async function initialize() {
   try {
+    templateDefaults = await request('/api/template-defaults');
     await loadOverview();
   } catch (error) {
     notify(error.message);

@@ -235,8 +235,9 @@ func (server *Server) gateways(cfg config.Server) map[string]application.Deliver
 			if err == nil {
 				result[id] = &telegram.Destination{
 					API: api, ChatID: destination.ChatID, Network: destination.Network,
-					StatePath: filepath.Join(server.BaseDir, "data", "telegram-"+safeID(id)+".json"),
-					Logger:    server.Logger,
+					MessageTemplate: destination.MessageTemplate,
+					StatePath:       filepath.Join(server.BaseDir, "data", "telegram-"+safeID(id)+".json"),
+					Logger:          server.Logger,
 				}
 			}
 		case domain.DestinationWord:

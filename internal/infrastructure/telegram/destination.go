@@ -15,11 +15,12 @@ import (
 
 // Destination синхронизирует блоки одного перехвата с Telegram-сообщениями.
 type Destination struct {
-	API       *Client
-	ChatID    int64
-	Network   string
-	StatePath string
-	Logger    *slog.Logger
+	API             *Client
+	ChatID          int64
+	Network         string
+	MessageTemplate string
+	StatePath       string
+	Logger          *slog.Logger
 
 	mu    sync.Mutex
 	locks map[string]*itemLockEntry
@@ -66,7 +67,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	present := make(map[string]bool, len(blocks))
 	for _, block := range blocks {
 		present[block.Key] = true
-		chunks := formatBlockChunks(event, block, delivery, destination.Network)
+		chunks := formatBlockChunks(event, block, delivery, destination.Network, destination.MessageTemplate)
 		renderHash := hashChunks(chunks)
 		stored := item.Blocks[block.Key]
 		if stored.Hash == renderHash && len(stored.MessageIDs) == len(chunks) && len(chunks) > 0 {

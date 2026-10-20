@@ -2,8 +2,10 @@ package telegram
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +14,47 @@ import (
 
 var legacyDatePrefix = regexp.MustCompile(`^\s*(\d{4})-(\d{2})-(\d{2})`)
 
+// DefaultMessageTemplate — редактируемый шаблон сообщения получателя.
+// Служебная пометка проверки и номер части длинного сообщения добавляются
+// программой снаружи, поэтому их невозможно случайно удалить из шаблона.
+const DefaultMessageTemplate = `Радиосеть <b>{{UNIT}}</b> - {{NETWORK}}
+{{FREQUENCY}} МГц (ID {{GROUP_ID}} AES-256)
+{{DATE}}г.
+
+{{CORRESPONDENTS}}
+
+{{TRANSCRIPT}}`
+
+var requiredMessageMarkers = []string{
+	"{{UNIT}}", "{{NETWORK}}", "{{FREQUENCY}}", "{{GROUP_ID}}",
+	"{{DATE}}", "{{CORRESPONDENTS}}", "{{TRANSCRIPT}}",
+}
+
+// MessageTemplateMarkers возвращает обязательные метки для подсказки в интерфейсе.
+func MessageTemplateMarkers() []string {
+	return append([]string(nil), requiredMessageMarkers...)
+}
+
+// ValidateMessageTemplate не позволяет сохранить шаблон, который потеряет
+// обязательные данные перехвата.
+func ValidateMessageTemplate(template string) error {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return errors.New("шаблон сообщения Telegram пуст")
+	}
+	var missing []string
+	for _, marker := range requiredMessageMarkers {
+		if !strings.Contains(template, marker) {
+			missing = append(missing, marker)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("в шаблоне Telegram отсутствуют обязательные метки: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // FormatEvent формирует сообщение без дополнительного обозначения радиосети.
 func FormatEvent(event domain.Event, review bool, notes ...string) string {
 	return FormatEventForNetwork(event, "", review, notes...)
@@ -19,6 +62,11 @@ func FormatEvent(event domain.Event, review bool, notes ...string) string {
 
 // FormatEventForNetwork формирует сообщение по утверждённому образцу Telegram.
 func FormatEventForNetwork(event domain.Event, network string, review bool, notes ...string) string {
+	return FormatEventWithTemplate(event, network, DefaultMessageTemplate, review, notes...)
+}
+
+// FormatEventWithTemplate формирует сообщение по выбранному пользователем шаблону.
+func FormatEventWithTemplate(event domain.Event, network, template string, review bool, notes ...string) string {
 	block := domain.ContentBlock{Text: event.Content}
 	if len(event.Blocks) > 0 {
 		block = event.Blocks[0]
@@ -30,10 +78,10 @@ func FormatEventForNetwork(event domain.Event, network string, review bool, note
 	if len(notes) > 0 {
 		delivery.Decision.Note = notes[0]
 	}
-	return formatBlock(event, block, delivery, network, "")
+	return formatBlock(event, block, delivery, network, template, "")
 }
 
-func formatBlockChunks(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network string) []string {
+func formatBlockChunks(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network, template string) []string {
 	parts := splitRunes(block.Text, 3000)
 	if len(parts) == 0 {
 		return nil
@@ -46,12 +94,12 @@ func formatBlockChunks(event domain.Event, block domain.ContentBlock, delivery d
 		}
 		copyBlock := block
 		copyBlock.Text = part
-		chunks = append(chunks, formatBlock(event, copyBlock, delivery, network, suffix))
+		chunks = append(chunks, formatBlock(event, copyBlock, delivery, network, template, suffix))
 	}
 	return chunks
 }
 
-func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network, suffix string) string {
+func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network, template, suffix string) string {
 	var builder strings.Builder
 	if delivery.Decision.Action == domain.RouteReview {
 		builder.WriteString("🔴 НОВОЕ ИЛИ ОШИБОЧНОЕ ПОДРАЗДЕЛЕНИЕ\n")
@@ -61,20 +109,6 @@ func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.
 		}
 		builder.WriteString("──────────────\n")
 	}
-	builder.WriteString("Радиосеть <b>")
-	builder.WriteString(escapeText(fallbackText(event.Position.UnitName, "—")))
-	builder.WriteString("</b>")
-	if network = strings.TrimSpace(network); network != "" {
-		builder.WriteString(" - ")
-		builder.WriteString(escapeText(network))
-	}
-	builder.WriteString("\n")
-	builder.WriteString(escapeText(fallbackText(event.Position.Frequency, "—")))
-	builder.WriteString(" МГц (ID ")
-	builder.WriteString(escapeText(fallbackText(event.Position.GroupCode, "—")))
-	builder.WriteString(" AES-256)\n")
-	builder.WriteString(eventDate(event))
-	builder.WriteString("г.\n\n")
 	callsigns := block.Callsigns
 	if len(callsigns) == 0 {
 		for _, code := range domain.ExtractCorrespondentCodes(block.Text) {
@@ -82,35 +116,51 @@ func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.
 		}
 	}
 	correspondents, lines := domain.PresentIntercept(block.Text, callsigns)
+	var correspondentText strings.Builder
 	for _, correspondent := range correspondents {
 		description := strings.TrimSpace(correspondent.Description)
 		if description == "" {
 			description = "военнослужащий " + fallbackText(event.Position.UnitName, "—") + ", мужской голос, украинская речь"
 		}
 		description = strings.TrimRight(description, ";") + ";"
-		builder.WriteString(fmt.Sprintf("%d. «<b>", correspondent.Number))
-		builder.WriteString(escapeText(correspondent.Label))
-		builder.WriteString("</b>» (id: ")
-		builder.WriteString(escapeText(correspondent.Code))
-		builder.WriteString(") ")
-		builder.WriteString(escapeText(description))
-		builder.WriteString("\n")
+		correspondentText.WriteString(fmt.Sprintf("%d. «<b>", correspondent.Number))
+		correspondentText.WriteString(escapeText(correspondent.Label))
+		correspondentText.WriteString("</b>» (id: ")
+		correspondentText.WriteString(escapeText(correspondent.Code))
+		correspondentText.WriteString(") ")
+		correspondentText.WriteString(escapeText(description))
+		correspondentText.WriteString("\n")
 	}
-	if len(correspondents) > 0 {
-		builder.WriteString("\n")
-	}
+	var transcript strings.Builder
 	for index, line := range lines {
 		if index > 0 {
-			builder.WriteString("\n")
+			transcript.WriteString("\n")
 		}
 		if line.Time {
-			builder.WriteString("<b>")
+			transcript.WriteString("<b>")
 		}
-		builder.WriteString(escapeText(line.Text))
+		transcript.WriteString(escapeText(line.Text))
 		if line.Time {
-			builder.WriteString("</b>")
+			transcript.WriteString("</b>")
 		}
 	}
+	if strings.TrimSpace(template) == "" {
+		template = DefaultMessageTemplate
+	}
+	replacements := map[string]string{
+		"{{UNIT}}":           escapeText(fallbackText(event.Position.UnitName, "—")),
+		"{{NETWORK}}":        escapeText(fallbackText(network, "—")),
+		"{{FREQUENCY}}":      escapeText(fallbackText(event.Position.Frequency, "—")),
+		"{{GROUP_ID}}":       escapeText(fallbackText(event.Position.GroupCode, "—")),
+		"{{DATE}}":           eventDate(event),
+		"{{CORRESPONDENTS}}": strings.TrimRight(correspondentText.String(), "\n"),
+		"{{TRANSCRIPT}}":     transcript.String(),
+	}
+	message := template
+	for _, marker := range requiredMessageMarkers {
+		message = strings.ReplaceAll(message, marker, replacements[marker])
+	}
+	builder.WriteString(strings.TrimSpace(message))
 	builder.WriteString(suffix)
 	return builder.String()
 }

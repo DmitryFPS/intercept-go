@@ -66,6 +66,35 @@ func TestFormatEventMatchesApprovedTelegramExample(t *testing.T) {
 	}
 }
 
+func TestCustomMessageTemplateControlsLayout(t *testing.T) {
+	t.Parallel()
+	event := domain.Event{
+		SourceAt: time.Date(2026, 10, 20, 17, 34, 0, 0, time.UTC),
+		Position: domain.Position{UnitName: "Гольназ", Frequency: "159.3000", GroupCode: "18902"},
+		Blocks: []domain.ContentBlock{{
+			Text:      "17.30\n-На связи. (52345)",
+			Callsigns: []domain.Callsign{{Number: 1, Code: "52345", Label: "Монако"}},
+		}},
+	}
+	template := "{{DATE}} | {{UNIT}} | {{NETWORK}} | {{FREQUENCY}} | {{GROUP_ID}}\n{{CORRESPONDENTS}}\n---\n{{TRANSCRIPT}}"
+	got := FormatEventWithTemplate(event, "39", template, false)
+	for _, expected := range []string{"20.10.2026 | Гольназ | 39 | 159.3000 | 18902", "«<b>Монако</b>»", "---", "<b>17:30</b>"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("пользовательский шаблон не применён, нет %q:\n%s", expected, got)
+		}
+	}
+}
+
+func TestMessageTemplateValidationListsMissingMarkers(t *testing.T) {
+	t.Parallel()
+	if err := ValidateMessageTemplate("{{UNIT}}"); err == nil || !strings.Contains(err.Error(), "{{TRANSCRIPT}}") {
+		t.Fatalf("ожидалась понятная ошибка отсутствующих меток: %v", err)
+	}
+	if err := ValidateMessageTemplate(DefaultMessageTemplate); err != nil {
+		t.Fatalf("стандартный шаблон не прошёл проверку: %v", err)
+	}
+}
+
 func TestFormatDeferredEventKeepsMarkerAndOriginalDate(t *testing.T) {
 	t.Parallel()
 	event := domain.Event{

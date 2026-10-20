@@ -2,11 +2,10 @@ package docx
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/xml"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,19 +18,13 @@ import (
 	"intercept/internal/domain"
 )
 
-// Шаблон в поставке побайтно совпадает с предоставленным пользователем файлом,
-// а собранный документ содержит те же фрагменты и их порядок.
+// Шаблон в поставке сохраняет оформление предоставленного пользователем файла,
+// а метки заменяются фрагментами в том же порядке.
 func TestBuildMatchesProvidedReferenceDocumentXML(t *testing.T) {
 	t.Parallel()
 	template := filepath.Join("..", "..", "..", "assets", "word_template.docx")
-	templatePayload, err := os.ReadFile(template)
-	if err != nil {
-		t.Fatal(err)
-	}
-	templateDigest := sha256.Sum256(templatePayload)
-	const providedTemplateSHA256 = "56e5349fc134a7bb177b04d79c539cae94e31d61a9a203e40d0023d073d3b987"
-	if got := strings.ToLower(fmt.Sprintf("%x", templateDigest)); got != providedTemplateSHA256 {
-		t.Fatalf("файл шаблона отличается от предоставленного эталона: %s", got)
+	if err := ValidateTemplate(template); err != nil {
+		t.Fatalf("шаблон поставки не прошёл проверку: %v", err)
 	}
 	payload, err := Build(template, Document{
 		Unit: "2 об 3 обр ОсН НГ", Frequency: "159.5750", GroupCode: "3", Network: "39",
@@ -63,6 +56,24 @@ func TestBuildMatchesProvidedReferenceDocumentXML(t *testing.T) {
 	}
 	if runs := documentRuns(t, documentXML(t, path)); !reflect.DeepEqual(runs, wantRuns) {
 		t.Fatalf("содержимое документа отличается от эталона:\nполучено: %#v\nожидалось: %#v", runs, wantRuns)
+	}
+}
+
+func TestEmbeddedDefaultTemplateMatchesReleaseAsset(t *testing.T) {
+	t.Parallel()
+	asset, err := os.ReadFile(filepath.Join("..", "..", "..", "assets", "word_template.docx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(asset, defaultTemplate) {
+		t.Fatal("встроенный шаблон Word отличается от файла поставки")
+	}
+	restored := filepath.Join(t.TempDir(), "word_template.docx")
+	if err := RestoreDefaultTemplate(restored); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateTemplate(restored); err != nil {
+		t.Fatalf("восстановленный шаблон не прошёл проверку: %v", err)
 	}
 }
 
@@ -335,6 +346,24 @@ func TestBuildRejectsDecompressionBomb(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateListsMissingMarkers(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "without-markers.docx")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	part, _ := writer.Create("word/document.xml")
+	_, _ = part.Write([]byte(`<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Обычный текст</w:t></w:r></w:p></w:body></w:document>`))
+	_ = writer.Close()
+	_ = file.Close()
+	err = ValidateTemplate(path)
+	if err == nil || !strings.Contains(err.Error(), markerTranscript) || !strings.Contains(err.Error(), markerUnit) {
+		t.Fatalf("ожидался список отсутствующих меток: %v", err)
+	}
+}
+
 func documentXML(t *testing.T, path string) string {
 	t.Helper()
 	archive, err := zip.OpenReader(path)
@@ -386,19 +415,11 @@ func documentRuns(t *testing.T, payload string) []string {
 
 func createTemplate(t *testing.T, path string) {
 	t.Helper()
-	file, err := os.Create(path)
+	payload, err := os.ReadFile(filepath.Join("..", "..", "..", "assets", "word_template.docx"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writer := zip.NewWriter(file)
-	parts := map[string]string{
-		"[Content_Types].xml": `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>`,
-		"word/document.xml":   `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>`,
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	for name, content := range parts {
-		part, _ := writer.Create(name)
-		part.Write([]byte(content))
-	}
-	writer.Close()
-	file.Close()
 }
