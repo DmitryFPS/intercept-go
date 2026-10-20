@@ -14,7 +14,10 @@ let clients = [];
 let rules = null;
 let rulesDirty = false;
 let currentPositionPage = 1;
+let ruleHistory = [];
+let ruleHistoryExpanded = false;
 const positionsPerPage = 12;
+const visibleRuleVersions = 5;
 
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -462,7 +465,8 @@ $('positionNext').addEventListener('click', () => {
 
 function routeControl(destination, decision = { action: 'skip', thread_id: 0 }) {
   const topic = destination.kind === 'telegram' ? `
-    <label>Тема получателя<input name="thread_${escapeHTML(destination.id)}" type="number" min="0" value="${Number(decision.thread_id || 0)}"><small>0 — основная тема</small></label>` : '<span class="route-hint">Дополнительная тема не требуется</span>';
+    <label>Тема получателя<input name="thread_${escapeHTML(destination.id)}" type="number" min="0" value="${Number(decision.thread_id || 0)}"><small>0 — основная тема</small></label>` : `
+    <div class="route-static-field"><span>Тема получателя</span><strong>Не требуется</strong><small>Для документов Word</small></div>`;
   return `<div class="route-control" data-route-destination="${escapeHTML(destination.id)}">
     <strong>${escapeHTML(destination.name)}</strong>
     <label>Действие<select name="action_${escapeHTML(destination.id)}"><option value="skip"${decision.action === 'skip' ? ' selected' : ''}>Не отправлять</option><option value="deliver"${decision.action === 'deliver' ? ' selected' : ''}>Отправлять</option><option value="review"${decision.action === 'review' ? ' selected' : ''}>Отправить на проверку</option></select></label>
@@ -554,13 +558,26 @@ $('publishRules').addEventListener('click', async event => {
 });
 
 async function loadRuleHistory() {
-  const history = await request('/api/rule-versions');
+  ruleHistory = await request('/api/rule-versions');
+  renderRuleHistory();
+}
+
+function renderRuleHistory() {
+  const history = ruleHistoryExpanded ? ruleHistory : ruleHistory.slice(0, visibleRuleVersions);
   $('rulesHistory').innerHTML = history.map(item => `
     <div class="simple-row" data-rule-version="${item.version}">
       <strong>Версия ${item.version}</strong><span>${escapeHTML(item.author)}</span><span>${formatDate(item.created_at)}</span>
       ${item.active ? '<span class="badge success">Действует</span>' : '<button class="button ghost" data-action="restore">Восстановить</button>'}
     </div>`).join('');
+  const toggle = $('toggleRuleHistory');
+  toggle.classList.toggle('hidden', ruleHistory.length <= visibleRuleVersions);
+  toggle.textContent = ruleHistoryExpanded ? 'Свернуть' : `Показать все (${ruleHistory.length})`;
 }
+
+$('toggleRuleHistory').addEventListener('click', () => {
+  ruleHistoryExpanded = !ruleHistoryExpanded;
+  renderRuleHistory();
+});
 
 $('rulesHistory').addEventListener('click', async event => {
   const button = event.target.closest('button[data-action="restore"]');
