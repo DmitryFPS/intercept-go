@@ -141,17 +141,21 @@ async function loadOverview() {
     refreshStatus(),
     request('/api/destinations'),
     request('/api/clients'),
-    request('/api/rules')
+    request('/api/rules'),
+    request('/api/rule-draft')
   ]);
   destinations = results[1] || {};
   clients = results[2] || [];
-  if (!rulesDirty) rules = results[3];
+  if (!rulesDirty) {
+    rules = results[4]?.exists ? results[4].rules : results[3];
+    rulesDirty = Boolean(results[4]?.exists);
+  }
   renderReadiness();
 }
 
 function renderReadiness() {
   const items = [
-    [Boolean(status?.transport_ok), 'Подключить связь с рабочими точками'],
+    [Boolean(status?.configured), 'Настроить связь с рабочими точками'],
     [Object.keys(destinations).length > 0, 'Добавить хотя бы одного получателя'],
     [clients.length > 0, 'Создать файл настроек рабочей точки'],
     [Object.keys(rules?.positions || {}).length > 0, 'Добавить позиции'],
@@ -186,7 +190,7 @@ $('transportForm').addEventListener('submit', async event => {
 });
 
 function destinationType(kind) {
-  return kind === 'telegram' ? 'Telegram' : 'Документ Word';
+  return kind === 'telegram' ? 'Telegram' : 'Документ Word · DOCX';
 }
 
 function destinationDetails(destination) {
@@ -194,9 +198,9 @@ function destinationDetails(destination) {
     return [['Группа или канал', destination.chat_id || 'Не указано']];
   }
   return [
-    ['Шаблон', destination.template || 'Не указан'],
-    ['Папка', destination.folder || 'Не указана'],
-    ['Обозначение', destination.network || 'Не задано']
+    ['Куда сохраняются документы', destination.folder || 'Не указано'],
+    ['Шаблон DOCX', destination.template || 'Не указан'],
+    ['Обозначение в имени файла', destination.network || 'Не задано']
   ];
 }
 
@@ -214,7 +218,7 @@ function renderDestinations() {
   $('destinationsList').innerHTML = entries.map(([id, item]) => `
     <article class="entity-card" data-destination-id="${escapeHTML(id)}">
       <div class="entity-card-head"><div><h3>${escapeHTML(item.name)}</h3><p>${escapeHTML(destinationType(item.kind))}</p></div><span class="badge success">Настроено</span></div>
-      <dl class="entity-meta">${destinationDetails(item).map(([label, value]) => `<dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd>`).join('')}</dl>
+      <dl class="entity-meta">${destinationDetails(item).map(([label, value]) => `<div class="entity-meta-row"><dt>${escapeHTML(label)}</dt><dd title="${escapeHTML(value)}">${escapeHTML(value)}</dd></div>`).join('')}</dl>
       <div class="entity-actions"><button class="button ghost" data-action="edit">Изменить</button><button class="button danger" data-action="delete">Удалить</button></div>
     </article>`).join('');
 }
@@ -386,14 +390,19 @@ $('clientForm').addEventListener('submit', async event => {
 });
 
 async function loadRules() {
-  rules = await request('/api/rules');
+  const [published, draft] = await Promise.all([
+    request('/api/rules'),
+    request('/api/rule-draft')
+  ]);
+  rules = draft?.exists ? draft.rules : published;
   rules.destinations ||= {};
   rules.positions ||= {};
   rules.unknown ||= {};
-  rulesDirty = false;
+  rulesDirty = Boolean(draft?.exists);
   currentPositionPage = 1;
   renderRules();
   await loadRuleHistory();
+  if (rulesDirty) notify('Неопубликованный черновик восстановлен из базы сервера.', true);
 }
 
 function positionName(key) {
@@ -408,13 +417,32 @@ function sortedRuleDestinations() {
   return Object.values(rules?.destinations || {}).sort((left, right) => left.name.localeCompare(right.name, 'ru'));
 }
 
+function cloneRules(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function routeDestinationPresentation(destination) {
+  const configured = destinations[destination.id] || {};
+  if (destination.kind === 'telegram') {
+    return {
+      type: 'Telegram',
+      detail: configured.chat_id ? `Группа: ${configured.chat_id}` : 'Telegram-группа или канал'
+    };
+  }
+  return {
+    type: 'Документ Word · DOCX',
+    detail: configured.folder ? `Папка: ${configured.folder}` : 'Папка назначения не указана'
+  };
+}
+
 function decisionSummary(decisions) {
   const chips = sortedRuleDestinations().flatMap(destination => {
     const decision = decisions?.[destination.id];
     if (!decision || decision.action === 'skip') return [];
     const action = decision.action === 'review' ? 'На проверку' : 'Отправлять';
     const topic = destination.kind === 'telegram' && decision.thread_id ? ` · тема ${decision.thread_id}` : '';
-    return [`<span class="route-chip${decision.action === 'review' ? ' review' : ''}">${escapeHTML(destination.name)} · ${action}${escapeHTML(topic)}</span>`];
+    const type = destination.kind === 'telegram' ? 'Telegram' : 'DOCX';
+    return [`<span class="route-chip${decision.action === 'review' ? ' review' : ''}">${escapeHTML(destination.name)} · ${type} · ${action}${escapeHTML(topic)}</span>`];
   });
   return chips.length ? chips.join('') : '<span class="route-chip empty">Не отправлять</span>';
 }
@@ -428,7 +456,9 @@ function renderRules() {
   const start = (currentPositionPage - 1) * positionsPerPage;
   const visible = filtered.slice(start, start + positionsPerPage);
 
-  $('rulesMeta').textContent = `Опубликована версия ${rules.version} · позиций: ${allKeys.length}`;
+  $('rulesMeta').textContent = rulesDirty
+    ? `Черновик сохранён · основа: версия ${rules.version} · позиций: ${allKeys.length}`
+    : `Опубликована версия ${rules.version} · позиций: ${allKeys.length}`;
   $('draftBadge').classList.toggle('hidden', !rulesDirty);
   $('publishRules').disabled = !rulesDirty;
   $('positionPrev').disabled = currentPositionPage <= 1;
@@ -464,11 +494,12 @@ $('positionNext').addEventListener('click', () => {
 });
 
 function routeControl(destination, decision = { action: 'skip', thread_id: 0 }) {
+  const presentation = routeDestinationPresentation(destination);
   const topic = destination.kind === 'telegram' ? `
     <label>Тема получателя<input name="thread_${escapeHTML(destination.id)}" type="number" min="0" value="${Number(decision.thread_id || 0)}"><small>0 — основная тема</small></label>` : `
-    <div class="route-static-field"><span>Тема получателя</span><strong>Не требуется</strong><small>Для документов Word</small></div>`;
+    <div class="route-static-field"><span>Тема Telegram</span><strong>Не используется</strong><small>Файл сохраняется в папку</small></div>`;
   return `<div class="route-control" data-route-destination="${escapeHTML(destination.id)}">
-    <strong>${escapeHTML(destination.name)}</strong>
+    <div class="route-destination"><strong>${escapeHTML(destination.name)}</strong><span>${escapeHTML(presentation.type)}</span><small title="${escapeHTML(presentation.detail)}">${escapeHTML(presentation.detail)}</small></div>
     <label>Действие<select name="action_${escapeHTML(destination.id)}"><option value="skip"${decision.action === 'skip' ? ' selected' : ''}>Не отправлять</option><option value="deliver"${decision.action === 'deliver' ? ' selected' : ''}>Отправлять</option><option value="review"${decision.action === 'review' ? ' selected' : ''}>Отправить на проверку</option></select></label>
     ${topic}
   </div>`;
@@ -495,7 +526,7 @@ $('unknownRoute').addEventListener('click', event => {
   if (event.target.closest('[data-route-edit]')) showPositionDialog('__unknown__');
 });
 
-$('positionsList').addEventListener('click', event => {
+$('positionsList').addEventListener('click', async event => {
   const button = event.target.closest('button[data-action]');
   const row = event.target.closest('[data-position-key]');
   if (!button || !row) return;
@@ -503,19 +534,30 @@ $('positionsList').addEventListener('click', event => {
   if (button.dataset.action === 'edit') showPositionDialog(key);
   if (button.dataset.action === 'delete') {
     if (!confirm(`Удалить позицию «${positionName(key)}» из черновика?`)) return;
+    const previous = cloneRules(rules);
     delete rules.positions[key];
-    rulesDirty = true;
-    renderRules();
-    notify('Позиция удалена из черновика. Опубликуйте маршруты, чтобы применить изменение.', true);
+    setButtonBusy(button, true, 'Удаляем…');
+    try {
+      await post('/api/rule-draft', rules);
+      rulesDirty = true;
+      renderRules();
+      notify('Позиция удалена, черновик сохранён в базе сервера.', true);
+    } catch (error) {
+      rules = previous;
+      renderRules();
+      notify(error.message);
+    }
   }
 });
 
-$('positionForm').addEventListener('submit', event => {
+$('positionForm').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"],button:not([type])');
   const data = new FormData(form);
   const originalKey = data.get('original_key');
   const unknown = originalKey === '__unknown__';
+  const previous = cloneRules(rules);
   const decisions = {};
   sortedRuleDestinations().forEach(destination => {
     decisions[destination.id] = {
@@ -535,10 +577,19 @@ $('positionForm').addEventListener('submit', event => {
     if (originalKey) delete rules.positions[originalKey];
     rules.positions[newKey] = decisions;
   }
-  rulesDirty = true;
-  closeDialog('positionDialog');
-  renderRules();
-  notify('Изменение сохранено в черновике.', true);
+  setButtonBusy(button, true, 'Сохраняем…');
+  try {
+    await post('/api/rule-draft', rules);
+    rulesDirty = true;
+    closeDialog('positionDialog');
+    renderRules();
+    notify('Черновик сохранён в базе сервера.', true);
+  } catch (error) {
+    rules = previous;
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
 });
 
 $('publishRules').addEventListener('click', async event => {
@@ -604,11 +655,5 @@ async function initialize() {
   }
   setInterval(() => refreshStatus().catch(() => {}), 5000);
 }
-
-window.addEventListener('beforeunload', event => {
-  if (!rulesDirty) return;
-  event.preventDefault();
-  event.returnValue = '';
-});
 
 initialize();

@@ -43,6 +43,8 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/destinations", handler.addDestination)
 	mux.HandleFunc("DELETE /api/destinations/{id}", handler.deleteDestination)
 	mux.HandleFunc("GET /api/rules", handler.rules)
+	mux.HandleFunc("GET /api/rule-draft", handler.ruleDraft)
+	mux.HandleFunc("POST /api/rule-draft", handler.saveRuleDraft)
 	mux.HandleFunc("POST /api/rules", handler.publishRules)
 	mux.HandleFunc("GET /api/rule-versions", handler.ruleVersions)
 	mux.HandleFunc("POST /api/rule-versions/{version}/restore", handler.restoreRules)
@@ -196,6 +198,31 @@ func (handler Handler) rules(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	localui.WriteJSON(writer, http.StatusOK, rules)
+}
+
+func (handler Handler) ruleDraft(writer http.ResponseWriter, request *http.Request) {
+	rules, exists, err := handler.Server.RuleDraft(request.Context())
+	if err != nil {
+		badRequest(writer, err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, struct {
+		Exists bool           `json:"exists"`
+		Rules  domain.RuleSet `json:"rules"`
+	}{Exists: exists, Rules: rules})
+}
+
+func (handler Handler) saveRuleDraft(writer http.ResponseWriter, request *http.Request) {
+	var rules domain.RuleSet
+	if err := localui.ReadJSON(request, &rules, 4*1024*1024); err != nil {
+		badRequest(writer, err)
+		return
+	}
+	if err := handler.Server.SaveRuleDraft(request.Context(), rules); err != nil {
+		badRequest(writer, err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (handler Handler) publishRules(writer http.ResponseWriter, request *http.Request) {

@@ -304,6 +304,20 @@ func (server *Server) Rules(ctx context.Context) (domain.RuleSet, error) {
 	return server.Store.ActiveRules(ctx)
 }
 
+// RuleDraft возвращает автоматически сохранённый неопубликованный черновик.
+func (server *Server) RuleDraft(ctx context.Context) (domain.RuleSet, bool, error) {
+	return server.Store.RuleDraft(ctx)
+}
+
+// SaveRuleDraft проверяет и сохраняет черновик без изменения действующих маршрутов.
+func (server *Server) SaveRuleDraft(ctx context.Context, rules domain.RuleSet) error {
+	canonical, err := canonicalRules(rules)
+	if err != nil {
+		return err
+	}
+	return server.Store.SaveRuleDraft(ctx, canonical)
+}
+
 // PublishRules проверяет и публикует матрицу как новую целостную версию.
 func (server *Server) PublishRules(ctx context.Context, rules domain.RuleSet, author string) error {
 	canonical, err := canonicalRules(rules)

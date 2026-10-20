@@ -19,6 +19,39 @@ type RuleVersion struct {
 	Active    bool      `json:"active"`
 }
 
+const ruleDraftValueName = "route_draft"
+
+// RuleDraft возвращает неопубликованный черновик маршрутов, если он существует.
+func (store *ServerStore) RuleDraft(ctx context.Context) (domain.RuleSet, bool, error) {
+	value, exists, err := store.Value(ctx, ruleDraftValueName)
+	if err != nil || !exists {
+		return domain.RuleSet{}, exists, err
+	}
+	var rules domain.RuleSet
+	if err := json.Unmarshal([]byte(value), &rules); err != nil {
+		return domain.RuleSet{}, false, errors.New("черновик маршрутов повреждён")
+	}
+	if err := rules.Validate(); err != nil {
+		return domain.RuleSet{}, false, fmt.Errorf("черновик маршрутов некорректен: %w", err)
+	}
+	return rules, true, nil
+}
+
+// SaveRuleDraft сохраняет единственный актуальный черновик поверх предыдущего.
+func (store *ServerStore) SaveRuleDraft(ctx context.Context, rules domain.RuleSet) error {
+	if err := rules.Validate(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(rules)
+	if err != nil {
+		return fmt.Errorf("кодировать черновик маршрутов: %w", err)
+	}
+	if err := store.SaveValue(ctx, ruleDraftValueName, string(payload)); err != nil {
+		return fmt.Errorf("сохранить черновик маршрутов: %w", err)
+	}
+	return nil
+}
+
 // ActiveRules возвращает единственную действующую версию маршрутов.
 func (store *ServerStore) ActiveRules(ctx context.Context) (domain.RuleSet, error) {
 	var payload []byte
@@ -115,6 +148,9 @@ func (store *ServerStore) PublishRules(ctx context.Context, rules domain.RuleSet
 		VALUES(?, ?, ?, ?, 1)`, rules.Version, payload, author,
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("опубликовать маршруты: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM server_values WHERE name=?", ruleDraftValueName); err != nil {
+		return fmt.Errorf("удалить опубликованный черновик: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("завершить публикацию маршрутов: %w", err)

@@ -122,7 +122,11 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		packets, next, err := receiver.Packets(ctx, offset)
 		if err != nil {
 			if ctx.Err() == nil {
-				server.warn("Не удалось получить данные из Telegram", err)
+				server.warn(
+					"Telegram временно недоступен",
+					"Связь прервалась. Программа повторит запрос автоматически; настройки и очереди сохранены.",
+					err,
+				)
 				time.Sleep(5 * time.Second)
 			}
 			continue
@@ -183,7 +187,11 @@ func (server *Server) deliveryLoop(ctx context.Context, service *application.Del
 	for {
 		count, err := service.RunOnce(ctx, 100)
 		if err != nil && ctx.Err() == nil {
-			server.warn("Ошибка очереди доставки", err)
+			server.warn(
+				"Не удалось доставить результат",
+				"Результат сохранён в очереди. Программа повторит отправку автоматически.",
+				err,
+			)
 		}
 		if count > 0 {
 			now := time.Now().UTC()
@@ -311,7 +319,7 @@ func (server *Server) fail(title string, err error) {
 	})
 }
 
-func (server *Server) warn(title string, err error) {
+func (server *Server) warn(title, detail string, err error) {
 	if errors.Is(err, context.Canceled) {
 		return
 	}
@@ -319,7 +327,7 @@ func (server *Server) warn(title string, err error) {
 	server.update(func(status *ServerStatus) {
 		status.State = "waiting"
 		status.Title = title
-		status.Detail = "Очереди сохранены. Повтор будет выполнен автоматически. " + err.Error()
+		status.Detail = detail
 		status.TransportOK = false
 	})
 }

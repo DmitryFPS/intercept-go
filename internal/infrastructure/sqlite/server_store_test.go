@@ -114,6 +114,51 @@ func TestServerStoreKeepsRuleHistoryForRestore(t *testing.T) {
 	}
 }
 
+// Черновик маршрутов переживает повторное открытие базы и удаляется только после публикации.
+func TestServerStorePersistsRuleDraftUntilPublish(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "server.db")
+	db, err := OpenState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := serverTestRules()
+	draft.Positions["name:черновик"] = map[string]domain.RouteDecision{
+		"a": {Action: domain.RouteDeliver, ThreadID: 77},
+	}
+	if err := store.SaveRuleDraft(ctx, draft); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = OpenState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err = NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	restored, exists, err := store.RuleDraft(ctx)
+	if err != nil || !exists || restored.Positions["name:черновик"]["a"].ThreadID != 77 {
+		t.Fatalf("черновик не восстановлен: exists=%v rules=%+v err=%v", exists, restored, err)
+	}
+	if err := store.PublishRules(ctx, draft, "публикация"); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := store.RuleDraft(ctx); err != nil || exists {
+		t.Fatalf("опубликованный черновик остался в базе: exists=%v err=%v", exists, err)
+	}
+}
+
 // Неизвестный отправитель попадает в карантин, а карантин сразу удерживается в заданных пределах.
 func TestServerStoreAuthorizesTransportAndCapsQuarantineImmediately(t *testing.T) {
 	t.Parallel()
