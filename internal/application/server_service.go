@@ -152,6 +152,7 @@ func (service *DeliveryService) RunOnce(ctx context.Context, limit int) (int, er
 	if err != nil {
 		return 0, err
 	}
+	jobs = limitParallelWordDestinations(jobs)
 	maxConcurrent := service.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = 4
@@ -190,6 +191,26 @@ func (service *DeliveryService) RunOnce(ctx context.Context, limit int) (int, er
 		}
 	}
 	return delivered, firstError
+}
+
+// limitParallelWordDestinations оставляет в одном проходе не более одной
+// операции для каждого Word-получателя. Telegram-темы по-прежнему могут
+// отправляться параллельно, а DOCX не конкурируют за общий файл состояния и
+// не тратят серверное окно на бесполезные повторы «операция ещё выполняется».
+func limitParallelWordDestinations(jobs []DeliveryJob) []DeliveryJob {
+	seenWord := make(map[string]struct{})
+	selected := make([]DeliveryJob, 0, len(jobs))
+	for _, job := range jobs {
+		if job.Delivery.Destination.Kind == domain.DestinationWord {
+			key := job.Delivery.Destination.ID
+			if _, exists := seenWord[key]; exists {
+				continue
+			}
+			seenWord[key] = struct{}{}
+		}
+		selected = append(selected, job)
+	}
+	return selected
 }
 
 func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob) (bool, error) {

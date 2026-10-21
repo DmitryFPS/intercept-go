@@ -282,6 +282,38 @@ func (queue *memoryDeliveryQueue) PendingDeliveries(_ context.Context, _ int, _ 
 	return queue.jobs, nil
 }
 
+func TestLimitParallelWordDestinations(t *testing.T) {
+	t.Parallel()
+	word := domain.Destination{ID: "word-39", Kind: domain.DestinationWord}
+	otherWord := domain.Destination{ID: "word-archive", Kind: domain.DestinationWord}
+	telegram := domain.Destination{ID: "telegram", Kind: domain.DestinationTelegram}
+	jobs := []DeliveryJob{
+		{Delivery: domain.PlannedDelivery{Destination: word}},
+		{Delivery: domain.PlannedDelivery{Destination: telegram}},
+		{Delivery: domain.PlannedDelivery{Destination: word}},
+		{Delivery: domain.PlannedDelivery{Destination: otherWord}},
+		{Delivery: domain.PlannedDelivery{Destination: telegram}},
+	}
+
+	selected := limitParallelWordDestinations(jobs)
+	if len(selected) != 4 {
+		t.Fatalf("ожидалось четыре независимые операции, получено %d", len(selected))
+	}
+	wordCount := 0
+	telegramCount := 0
+	for _, job := range selected {
+		switch job.Delivery.Destination.ID {
+		case word.ID:
+			wordCount++
+		case telegram.ID:
+			telegramCount++
+		}
+	}
+	if wordCount != 1 || telegramCount != 2 {
+		t.Fatalf("Word=%d, Telegram=%d; Word должен быть последовательным, Telegram — параллельным", wordCount, telegramCount)
+	}
+}
+
 func (queue *memoryDeliveryQueue) MarkDelivered(_ context.Context, eventID, destinationID string, _ time.Time) error {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
