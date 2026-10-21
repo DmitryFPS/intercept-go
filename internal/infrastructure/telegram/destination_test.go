@@ -249,6 +249,7 @@ func TestDestinationEditsCombinedRecordWithoutDuplicates(t *testing.T) {
 	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
 	event := domain.Event{
 		Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
+		SourceAt: time.Date(2026, 10, 21, 8, 40, 3, 0, time.UTC),
 		Position: domain.Position{UnitName: "позиция"},
 		Blocks: []domain.ContentBlock{
 			{Key: "12.00", Sequence: 0, Text: "12.00\n-Первое"},
@@ -261,6 +262,9 @@ func TestDestinationEditsCombinedRecordWithoutDuplicates(t *testing.T) {
 	if len(texts) != 1 || !strings.Contains(texts[0], "<b>12:00</b>") || !strings.Contains(texts[0], "<b>12:01</b>") {
 		t.Fatalf("временные блоки не объединены в первом сообщении: %#v", texts)
 	}
+	if strings.Contains(texts[0], "(отредактировано") {
+		t.Fatalf("у первой отправки не должно быть отметки редактирования: %q", texts[0])
+	}
 	event.Blocks = []domain.ContentBlock{{Key: "12.00", Sequence: 0, Text: "12.00\n-Первое исправлено"}}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
@@ -269,8 +273,18 @@ func TestDestinationEditsCombinedRecordWithoutDuplicates(t *testing.T) {
 	if strings.Join(methods, ",") != strings.Join(want, ",") {
 		t.Fatalf("неожиданные действия Telegram: %v", methods)
 	}
-	if len(texts) != 2 || !strings.Contains(texts[1], "Первое исправлено") {
+	if len(texts) != 2 || !strings.Contains(texts[1], "Первое исправлено") ||
+		!strings.HasSuffix(texts[1], "(отредактировано 11:40:03)") {
 		t.Fatalf("исправленный текст не передан через editMessageText: %#v", texts)
+	}
+	if !strings.Contains(texts[1], "Первое исправлено\n\n(отредактировано 11:40:03)") {
+		t.Fatalf("перед отметкой редактирования должна быть одна пустая строка: %q", texts[1])
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 2 {
+		t.Fatalf("неизменённая запись после правки отправлена повторно: %v", methods)
 	}
 	if len(destination.locks) != 0 {
 		t.Fatalf("служебные блокировки не освобождены: %d", len(destination.locks))

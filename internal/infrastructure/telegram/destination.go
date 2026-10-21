@@ -62,14 +62,13 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	item.ThreadID = threadID
 
 	const recordStateKey = "__record__"
-	chunks := formatEventChunks(event, delivery, destination.Network, destination.Protection, destination.MessageTemplate)
-	if len(chunks) == 0 {
+	baseChunks := formatEventChunks(event, delivery, destination.Network, destination.Protection, destination.MessageTemplate)
+	if len(baseChunks) == 0 {
 		if err := destination.deleteAll(ctx, item.Blocks); err != nil {
 			return err
 		}
 		return destination.saveItem(itemKey, destinationItem{}, true)
 	}
-	renderHash := hashChunks(chunks)
 	stored, combinedState := item.Blocks[recordStateKey]
 	if !combinedState {
 		// Состояние старых версий хранило отдельные сообщения для каждого
@@ -77,15 +76,33 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		// переход не создавал дубликаты и не терял возможность редактирования.
 		stored.MessageIDs = legacyMessageIDs(item.Blocks)
 	}
-	if stored.Hash == renderHash && len(stored.MessageIDs) == len(chunks) {
+	baseHash := hashChunks(baseChunks)
+	storedBaseHash := stored.SourceHash
+	if storedBaseHash == "" {
+		// Состояние до появления явной отметки хранило только итоговый текст.
+		storedBaseHash = stored.Hash
+	}
+	if combinedState && storedBaseHash == baseHash {
 		return nil
 	}
+	chunks := baseChunks
+	if combinedState && len(stored.MessageIDs) > 0 {
+		editedAt := event.SourceAt
+		if editedAt.IsZero() {
+			editedAt = time.Now().UTC()
+		}
+		chunks = formatEventChunksWithEditedAt(
+			event, delivery, destination.Network, destination.Protection,
+			destination.MessageTemplate, editedAt,
+		)
+	}
+	renderHash := hashChunks(chunks)
 	messageIDs, err := destination.upsertBlock(ctx, threadID, stored.MessageIDs, chunks)
 	if err != nil {
 		return fmt.Errorf("синхронизировать запись: %w", err)
 	}
 	item.Blocks = map[string]destinationBlock{
-		recordStateKey: {Hash: renderHash, MessageIDs: messageIDs, Sequence: 0},
+		recordStateKey: {Hash: renderHash, SourceHash: baseHash, MessageIDs: messageIDs, Sequence: 0},
 	}
 	return destination.saveItem(itemKey, item, false)
 }

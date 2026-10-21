@@ -21,6 +21,7 @@ type destinationItem struct {
 
 type destinationBlock struct {
 	Hash       string  `json:"hash"`
+	SourceHash string  `json:"source_hash,omitempty"`
 	MessageIDs []int64 `json:"message_ids"`
 	Sequence   int     `json:"sequence"`
 }
