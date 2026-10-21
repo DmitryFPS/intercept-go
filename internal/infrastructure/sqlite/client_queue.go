@@ -279,7 +279,10 @@ func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, tele
 		telegramMessageID, time.Now().UTC().Format(time.RFC3339Nano),
 		time.Now().UTC().Add(30*time.Second).Format(time.RFC3339Nano), eventID,
 	)
-	return changedExactlyOnce(result, err, "отметить загрузку")
+	// Центр может подтвердить маленький пакет быстрее, чем Send вернёт
+	// управление этому потоку. Поздняя промежуточная отметка загрузки не должна
+	// откатывать конечное состояние и не является ошибкой.
+	return terminalTransition(queue.db, ctx, result, err, eventID, "отметить загрузку")
 }
 
 // ExpireDue завершает события, которые уже нельзя впервые передавать.

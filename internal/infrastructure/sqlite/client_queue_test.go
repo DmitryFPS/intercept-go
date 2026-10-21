@@ -414,3 +414,43 @@ func TestClientQueuePagesAndProtectsActiveMessagesFromDeletion(t *testing.T) {
 		t.Fatalf("очистка затронула активную очередь: %+v err=%v", stats, err)
 	}
 }
+
+// Быстрый центр иногда подтверждает пакет до возврата Send на рабочей точке.
+// Поздняя запись промежуточного состояния не должна давать ложную ошибку или
+// возвращать событие из конечного состояния обратно в очередь.
+func TestLateUploadDoesNotUndoAcknowledgement(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "fast-ack", ClientID: "client", CreatedAt: now, ObservedAt: now, SourceAt: now,
+		ExpiresAt: now.Add(time.Hour), Source: domain.SourceRecord{UUID: "source-fast-ack"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "текст", ContentDigest: "digest-fast-ack",
+	}
+	if err := queue.Enqueue(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkAcknowledged(ctx, event.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkUploaded(ctx, event.ID, 77); err != nil {
+		t.Fatalf("поздняя отметка загрузки дала ошибку: %v", err)
+	}
+	stats, err := queue.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Acknowledged != 1 || stats.Pending != 0 || stats.Uploaded != 0 {
+		t.Fatalf("подтверждение было отменено: %+v", stats)
+	}
+}
