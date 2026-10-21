@@ -13,7 +13,8 @@ import (
 	"intercept/internal/domain"
 )
 
-// Destination синхронизирует блоки одного перехвата с Telegram-сообщениями.
+// Destination синхронизирует одну запись EAVC с одним сообщением Telegram либо
+// с несколькими частями, только если запись превышает ограничение Telegram.
 type Destination struct {
 	API             *Client
 	ChatID          int64
@@ -59,44 +60,46 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	}
 	item.ThreadID = threadID
 
-	blocks := append([]domain.ContentBlock(nil), event.Blocks...)
-	if blocks == nil {
-		blocks = domain.SplitContentBlocks(event.Content)
+	const recordStateKey = "__record__"
+	chunks := formatEventChunks(event, delivery, destination.Network, destination.MessageTemplate)
+	if len(chunks) == 0 {
+		if err := destination.deleteAll(ctx, item.Blocks); err != nil {
+			return err
+		}
+		return destination.saveItem(itemKey, destinationItem{}, true)
 	}
-	sort.SliceStable(blocks, func(left, right int) bool { return blocks[left].Sequence < blocks[right].Sequence })
-	present := make(map[string]bool, len(blocks))
+	renderHash := hashChunks(chunks)
+	stored, combinedState := item.Blocks[recordStateKey]
+	if !combinedState {
+		// Состояние старых версий хранило отдельные сообщения для каждого
+		// времени. Переиспользуем их идентификаторы при первом обновлении, чтобы
+		// переход не создавал дубликаты и не терял возможность редактирования.
+		stored.MessageIDs = legacyMessageIDs(item.Blocks)
+	}
+	if stored.Hash == renderHash && len(stored.MessageIDs) == len(chunks) {
+		return nil
+	}
+	messageIDs, err := destination.upsertBlock(ctx, threadID, stored.MessageIDs, chunks)
+	if err != nil {
+		return fmt.Errorf("синхронизировать запись: %w", err)
+	}
+	item.Blocks = map[string]destinationBlock{
+		recordStateKey: {Hash: renderHash, MessageIDs: messageIDs, Sequence: 0},
+	}
+	return destination.saveItem(itemKey, item, false)
+}
+
+func legacyMessageIDs(blocks map[string]destinationBlock) []int64 {
+	ordered := make([]destinationBlock, 0, len(blocks))
 	for _, block := range blocks {
-		present[block.Key] = true
-		chunks := formatBlockChunks(event, block, delivery, destination.Network, destination.MessageTemplate)
-		renderHash := hashChunks(chunks)
-		stored := item.Blocks[block.Key]
-		if stored.Hash == renderHash && len(stored.MessageIDs) == len(chunks) && len(chunks) > 0 {
-			continue
-		}
-		messageIDs, err := destination.upsertBlock(ctx, threadID, stored.MessageIDs, chunks)
-		if err != nil {
-			return fmt.Errorf("синхронизировать блок %s: %w", block.Key, err)
-		}
-		item.Blocks[block.Key] = destinationBlock{
-			Hash: renderHash, MessageIDs: messageIDs, Sequence: block.Sequence,
-		}
-		if err := destination.saveItem(itemKey, item, false); err != nil {
-			return err
-		}
+		ordered = append(ordered, block)
 	}
-	for key, stored := range item.Blocks {
-		if present[key] {
-			continue
-		}
-		if err := destination.deleteMessages(ctx, stored.MessageIDs); err != nil {
-			return fmt.Errorf("удалить исчезнувший блок %s: %w", key, err)
-		}
-		delete(item.Blocks, key)
-		if err := destination.saveItem(itemKey, item, false); err != nil {
-			return err
-		}
+	sort.SliceStable(ordered, func(left, right int) bool { return ordered[left].Sequence < ordered[right].Sequence })
+	var ids []int64
+	for _, block := range ordered {
+		ids = append(ids, block.MessageIDs...)
 	}
-	return destination.saveItem(itemKey, item, len(item.Blocks) == 0)
+	return ids
 }
 
 func (destination *Destination) lockItem(key string) func() {

@@ -477,8 +477,9 @@ function routeDestinationPresentation(destination) {
   };
 }
 
-function decisionSummary(decisions) {
+function decisionSummary(decisions, recipientID = '') {
   const chips = sortedRuleDestinations().flatMap(destination => {
+    if (recipientID && destination.id !== recipientID) return [];
     const decision = decisions?.[destination.id];
     if (!decision || decision.action === 'skip') return [];
     const action = decision.action === 'review' ? 'На проверку' : 'Отправлять';
@@ -489,38 +490,79 @@ function decisionSummary(decisions) {
   return chips.length ? chips.join('') : '<span class="route-chip empty">Не отправлять</span>';
 }
 
+function routeUsesRecipient(decisions, recipientID) {
+  if (!recipientID) return true;
+  const decision = decisions?.[recipientID];
+  return Boolean(decision && decision.action !== 'skip');
+}
+
+function syncRecipientFilter(allKeys) {
+  const select = $('recipientFilter');
+  const previous = select.value;
+  const options = sortedRuleDestinations().map(destination => {
+    const count = allKeys.filter(key => routeUsesRecipient(rules.positions[key], destination.id)).length;
+    const type = destination.kind === 'telegram' ? 'Telegram' : 'DOCX';
+    return `<option value="${escapeHTML(destination.id)}">${escapeHTML(destination.name)} · ${type} (${count})</option>`;
+  });
+  select.innerHTML = `<option value="">Все получатели (${allKeys.length})</option>${options.join('')}`;
+  if ([...select.options].some(option => option.value === previous)) select.value = previous;
+}
+
 function renderRules() {
   const allKeys = Object.keys(rules.positions).sort((left, right) => positionName(left).localeCompare(positionName(right), 'ru'));
+  syncRecipientFilter(allKeys);
   const query = $('positionSearch').value.trim().toLocaleLowerCase('ru-RU');
-  const filtered = allKeys.filter(key => positionName(key).toLocaleLowerCase('ru-RU').includes(query));
+  const recipientID = $('recipientFilter').value;
+  const filtered = allKeys.filter(key =>
+    positionName(key).toLocaleLowerCase('ru-RU').includes(query) &&
+    routeUsesRecipient(rules.positions[key], recipientID)
+  );
   const pages = Math.max(1, Math.ceil(filtered.length / positionsPerPage));
   currentPositionPage = Math.min(currentPositionPage, pages);
   const start = (currentPositionPage - 1) * positionsPerPage;
   const visible = filtered.slice(start, start + positionsPerPage);
 
   $('rulesMeta').textContent = rulesDirty
-    ? `Черновик сохранён · основа: версия ${rules.version} · позиций: ${allKeys.length}`
-    : `Опубликована версия ${rules.version} · позиций: ${allKeys.length}`;
+    ? `Черновик сохранён · основа: версия ${rules.version}`
+    : `Опубликована версия ${rules.version}`;
   $('draftBadge').classList.toggle('hidden', !rulesDirty);
+  $('routeFilterCount').textContent = `Показано: ${filtered.length} из ${allKeys.length}`;
+  $('clearRouteFilters').disabled = !query && !recipientID;
   $('publishRules').disabled = !rulesDirty;
   $('positionPrev').disabled = currentPositionPage <= 1;
   $('positionNext').disabled = currentPositionPage >= pages;
   $('positionPage').textContent = `Страница ${currentPositionPage} из ${pages}`;
+  $('positionPage').parentElement.classList.toggle('hidden', filtered.length <= positionsPerPage);
+  $('positionsList').dataset.emptyMessage = query || recipientID
+    ? 'По выбранным условиям позиции не найдены'
+    : 'Пока ничего не добавлено';
 
   $('unknownRoute').innerHTML = `
     <div><h3>Новые и неопознанные позиции</h3><p>Правило применяется, если отдельная позиция ещё не добавлена.</p></div>
-    <div class="route-summary">${decisionSummary(rules.unknown)}</div>
+    <div class="route-summary">${decisionSummary(rules.unknown, recipientID)}</div>
     <div class="route-card-actions"><button class="button ghost" data-route-edit="__unknown__">Настроить</button></div>`;
 
   $('positionsList').innerHTML = visible.map(key => `
     <article class="route-card" data-position-key="${escapeHTML(key)}">
       <div><h3>${escapeHTML(positionName(key))}</h3><p>Индивидуальный маршрут</p></div>
-      <div class="route-summary">${decisionSummary(rules.positions[key])}</div>
+      <div class="route-summary">${decisionSummary(rules.positions[key], recipientID)}</div>
       <div class="route-card-actions"><button class="button ghost" data-action="edit">Изменить</button><button class="button danger" data-action="delete">Удалить</button></div>
     </article>`).join('');
 }
 
 $('positionSearch').addEventListener('input', () => {
+  currentPositionPage = 1;
+  renderRules();
+});
+
+$('recipientFilter').addEventListener('change', () => {
+  currentPositionPage = 1;
+  renderRules();
+});
+
+$('clearRouteFilters').addEventListener('click', () => {
+  $('positionSearch').value = '';
+  $('recipientFilter').value = '';
   currentPositionPage = 1;
   renderRules();
 });

@@ -44,7 +44,14 @@
 
   <section id="routes" class="page">
     <div class="section-head page-intro"><p>Укажите, куда отправлять данные для каждой позиции.</p><button id="addPosition" class="button primary">Добавить позицию</button></div>
-    <div class="route-toolbar card"><label class="search"><span>Найти позицию</span><input id="positionSearch" placeholder="Начните вводить название"></label><div><span id="rulesMeta" class="muted"></span><span id="draftBadge" class="badge warning hidden">Есть неопубликованный черновик</span></div></div>
+    <div class="route-toolbar card">
+      <div class="route-filters">
+        <label class="search"><span>Найти позицию</span><input id="positionSearch" placeholder="Начните вводить название"></label>
+        <label class="route-filter"><span>Получатель</span><select id="recipientFilter"><option value="">Все получатели</option></select></label>
+        <button id="clearRouteFilters" class="button ghost" type="button" disabled>Сбросить</button>
+      </div>
+      <div class="route-toolbar-meta"><span id="routeFilterCount" class="muted"></span><span id="rulesMeta" class="muted"></span><span id="draftBadge" class="badge warning hidden">Есть неопубликованный черновик</span></div>
+    </div>
     <article id="unknownRoute" class="route-card system-route"></article><div id="positionsList" class="route-list empty-state"></div>
     <div class="pagination"><button id="positionPrev" class="button ghost">Назад</button><span id="positionPage"></span><button id="positionNext" class="button ghost">Дальше</button></div>
     <div class="publish-bar"><div><strong>Черновик автоматически сохраняется в центре</strong><small>Он сохранится после обновления страницы и начнёт действовать только после публикации.</small></div><button id="publishRules" class="button primary">Опубликовать маршруты</button></div>

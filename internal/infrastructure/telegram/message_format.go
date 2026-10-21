@@ -67,10 +67,7 @@ func FormatEventForNetwork(event domain.Event, network string, review bool, note
 
 // FormatEventWithTemplate формирует сообщение по выбранному пользователем шаблону.
 func FormatEventWithTemplate(event domain.Event, network, template string, review bool, notes ...string) string {
-	block := domain.ContentBlock{Text: event.Content}
-	if len(event.Blocks) > 0 {
-		block = event.Blocks[0]
-	}
+	block := combinedEventBlock(event)
 	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver}}
 	if review {
 		delivery.Decision.Action = domain.RouteReview
@@ -79,6 +76,44 @@ func FormatEventWithTemplate(event domain.Event, network, template string, revie
 		delivery.Decision.Note = notes[0]
 	}
 	return formatBlock(event, block, delivery, network, template, "")
+}
+
+// combinedEventBlock сохраняет одну запись EAVC одним сообщением: общий список
+// корреспондентов выводится один раз, а временные части идут подряд в исходном
+// порядке. Разделение на несколько сообщений остаётся только защитой от лимита
+// длины Telegram и выполняется позже в formatBlockChunks.
+func combinedEventBlock(event domain.Event) domain.ContentBlock {
+	blocks := append([]domain.ContentBlock(nil), event.Blocks...)
+	if len(blocks) == 0 {
+		blocks = domain.SplitContentBlocks(event.Content)
+	}
+	if len(blocks) == 0 {
+		return domain.ContentBlock{Text: event.Content}
+	}
+	sort.SliceStable(blocks, func(left, right int) bool { return blocks[left].Sequence < blocks[right].Sequence })
+	texts := make([]string, 0, len(blocks))
+	callsigns := make([]domain.Callsign, 0)
+	seenCallsign := make(map[string]bool)
+	for _, block := range blocks {
+		if text := strings.TrimSpace(block.Text); text != "" {
+			texts = append(texts, text)
+		}
+		for _, callsign := range block.Callsigns {
+			key := domain.NormalizeCorrespondentCode(callsign.Code)
+			if key == "" || seenCallsign[key] {
+				continue
+			}
+			seenCallsign[key] = true
+			callsigns = append(callsigns, callsign)
+		}
+	}
+	return domain.ContentBlock{
+		Key: "record", Text: strings.Join(texts, "\n\n"), Callsigns: callsigns,
+	}
+}
+
+func formatEventChunks(event domain.Event, delivery domain.PlannedDelivery, network, template string) []string {
+	return formatBlockChunks(event, combinedEventBlock(event), delivery, network, template)
 }
 
 func formatBlockChunks(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network, template string) []string {
@@ -90,7 +125,7 @@ func formatBlockChunks(event domain.Event, block domain.ContentBlock, delivery d
 	for index, part := range parts {
 		suffix := ""
 		if len(parts) > 1 {
-			suffix = fmt.Sprintf("\n\n(%d/%d)", index+1, len(parts))
+			suffix = fmt.Sprintf("\n\n(часть %d из %d)", index+1, len(parts))
 		}
 		copyBlock := block
 		copyBlock.Text = part

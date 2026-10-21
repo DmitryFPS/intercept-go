@@ -66,6 +66,34 @@ func TestFormatEventMatchesApprovedTelegramExample(t *testing.T) {
 	}
 }
 
+func TestFormatEventKeepsSeveralTimeBlocksInOneMessage(t *testing.T) {
+	t.Parallel()
+	event := domain.Event{
+		SourceAt: time.Date(2026, 10, 20, 17, 34, 0, 0, time.UTC),
+		Position: domain.Position{UnitName: "Гольназ", Frequency: "159.3000", GroupCode: "18902"},
+		Blocks: []domain.ContentBlock{
+			{
+				Key: "17.30", Sequence: 0, Text: "17.30\n-На связи. (52345)",
+				Callsigns: []domain.Callsign{{Number: 1, Code: "52345", Label: "Монако"}},
+			},
+			{
+				Key: "20.51", Sequence: 1, Text: "20.51\n-Принял, продолжаю работу. (52325)",
+				Callsigns: []domain.Callsign{{Number: 6, Code: "52325", Label: "Торба"}},
+			},
+		},
+	}
+	got := FormatEventForNetwork(event, "313", false)
+	for _, expected := range []string{
+		"1. «<b>Монако</b>»", "6. «<b>Торба</b>»",
+		"<b>17:30</b>\n/1/ На связи.",
+		"<b>20:51</b>\n/6/ Принял, продолжаю работу.",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("в объединённом сообщении нет %q:\n%s", expected, got)
+		}
+	}
+}
+
 func TestCustomMessageTemplateControlsLayout(t *testing.T) {
 	t.Parallel()
 	event := domain.Event{
@@ -120,8 +148,9 @@ func TestFormatDeferredEventKeepsMarkerAndOriginalDate(t *testing.T) {
 	}
 }
 
-// При изменении перехвата существующие сообщения редактируются или удаляются, а дубликаты не создаются.
-func TestDestinationEditsAndDeletesBlocksWithoutDuplicates(t *testing.T) {
+// При изменении перехвата одно объединённое сообщение редактируется, а
+// исчезнувший временной блок не оставляет отдельный дубликат.
+func TestDestinationEditsCombinedRecordWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 	var methods []string
 	var texts []string
@@ -164,15 +193,18 @@ func TestDestinationEditsAndDeletesBlocksWithoutDuplicates(t *testing.T) {
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
+	if len(texts) != 1 || !strings.Contains(texts[0], "<b>12:00</b>") || !strings.Contains(texts[0], "<b>12:01</b>") {
+		t.Fatalf("временные блоки не объединены в первом сообщении: %#v", texts)
+	}
 	event.Blocks = []domain.ContentBlock{{Key: "12.00", Sequence: 0, Text: "12.00\n-Первое исправлено"}}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"sendMessage", "sendMessage", "editMessageText", "deleteMessage"}
+	want := []string{"sendMessage", "editMessageText"}
 	if strings.Join(methods, ",") != strings.Join(want, ",") {
 		t.Fatalf("неожиданные действия Telegram: %v", methods)
 	}
-	if len(texts) != 3 || !strings.Contains(texts[2], "Первое исправлено") {
+	if len(texts) != 2 || !strings.Contains(texts[1], "Первое исправлено") {
 		t.Fatalf("исправленный текст не передан через editMessageText: %#v", texts)
 	}
 	if len(destination.locks) != 0 {
