@@ -28,8 +28,6 @@ var (
 )
 
 const (
-	editedMark = "(отредактировано)"
-
 	markerUnit            = "{{UNIT}}"
 	markerNetwork         = "{{NETWORK}}"
 	markerFrequency       = "{{FREQUENCY}}"
@@ -202,6 +200,9 @@ func validateTemplateXML(payload string) error {
 }
 
 func renderTemplateXML(payload string, document Document) (string, error) {
+	if document.Edited && document.EditedAt.IsZero() {
+		return "", errors.New("для отредактированного документа не задано время изменения")
+	}
 	correspondents, lines := domain.PresentIntercept(document.Content, document.Callsigns)
 	payload = replaceBlock(payload, markerCorrespondents, func(paragraph string) string {
 		var result strings.Builder
@@ -233,7 +234,7 @@ func renderTemplateXML(payload string, document Document) (string, error) {
 		if !document.Edited {
 			return ""
 		}
-		return renderParagraph(paragraph, nil) + renderParagraph(paragraph, []styledRun{{Text: editedMark}})
+		return renderParagraph(paragraph, nil) + renderParagraph(paragraph, []styledRun{{Text: editedMark(document.EditedAt)}})
 	})
 
 	date := document.Date
@@ -261,6 +262,10 @@ func renderTemplateXML(payload string, document Document) (string, error) {
 	}
 	payload = strings.ReplaceAll(payload, "AES-256", escapeXMLText(fallback(document.Protection, "—")))
 	return payload, nil
+}
+
+func editedMark(editedAt time.Time) string {
+	return "(отредактировано " + editedAt.In(time.FixedZone("MSK", 3*60*60)).Format("15:04:05") + ")"
 }
 
 func escapeXMLText(value string) string {

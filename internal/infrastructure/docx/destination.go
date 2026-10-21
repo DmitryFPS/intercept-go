@@ -120,7 +120,10 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 		}
 		document.Edited = record.Edited || (exists && record.Render != "" && record.Render != render)
 		if document.Edited {
-			document.EditedAt = time.Now().UTC()
+			document.EditedAt = event.SourceAt
+			if document.EditedAt.IsZero() {
+				document.EditedAt = time.Now().UTC()
+			}
 		}
 		payload, err := Build(destination.TemplatePath, document)
 		if err != nil {

@@ -213,8 +213,8 @@ func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 	}
 }
 
-// Исправленный документ сохраняет точную пометку рабочей Python-версии.
-func TestEditedDocumentKeepsLegacyMark(t *testing.T) {
+// Исправленный документ показывает время редакции отдельно от радиопереговоров.
+func TestEditedDocumentShowsEditTimeOutsideTranscript(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	template := filepath.Join(root, "template.docx")
@@ -230,8 +230,19 @@ func TestEditedDocumentKeepsLegacyMark(t *testing.T) {
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if xml := documentXML(t, path); !strings.Contains(xml, "(отредактировано)") || strings.Contains(xml, "отредактировано в") {
-		t.Fatalf("пометка редактирования отличается от Python-версии: %s", xml)
+	if xml := documentXML(t, path); !strings.Contains(xml, "(отредактировано 18:30:00)") || strings.Contains(xml, "[ИЗМЕНЕНО") {
+		t.Fatalf("неверная пометка редактирования: %s", xml)
+	}
+}
+
+func TestEditedDocumentRequiresEditTime(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	_, err := Build(template, Document{Unit: "позиция", Content: "12.00\n-Текст", Edited: true})
+	if err == nil || !strings.Contains(err.Error(), "не задано время изменения") {
+		t.Fatalf("ожидалась проверка времени редакции: %v", err)
 	}
 }
 
@@ -259,6 +270,7 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 		t.Fatalf("до правки ожидалось два документа: %#v", before)
 	}
 	firstName := filepath.Base(before[0])
+	event.SourceAt = time.Date(2026, 10, 19, 6, 47, 31, 0, time.UTC)
 	event.Content = "10.00\n-Первый исправлен"
 	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
 		t.Fatal(err)
@@ -270,7 +282,7 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 	if filepath.Base(files[0]) != firstName {
 		t.Fatalf("правка создала новый номер вместо перезаписи: до=%q после=%q", firstName, filepath.Base(files[0]))
 	}
-	if xml := documentXML(t, files[0]); !strings.Contains(xml, "(отредактировано)") || !strings.Contains(xml, "Первый исправлен") {
+	if xml := documentXML(t, files[0]); !strings.Contains(xml, "(отредактировано 09:47:31)") || !strings.Contains(xml, "Первый исправлен") {
 		t.Fatal("изменённый документ не перезаписан с пометкой")
 	}
 }

@@ -74,20 +74,28 @@ func TestFormatEventKeepsSeveralTimeBlocksInOneMessage(t *testing.T) {
 		Position: domain.Position{UnitName: "Гольназ", Frequency: "159.3000", GroupCode: "18902"},
 		Blocks: []domain.ContentBlock{
 			{
-				Key: "17.30", Sequence: 0, Text: "17.30\n-На связи. (52345)",
-				Callsigns: []domain.Callsign{{Number: 1, Code: "52345", Label: "Монако"}},
+				Key: "17.30", Sequence: 0, Text: "17.30\n-На связи. (52345)\n-Слышу уверенно. (52325)",
+				Callsigns: []domain.Callsign{
+					{Number: 1, Code: "52345", Label: "Монако"},
+					{Number: 2, Code: "52325", Label: "Торба"},
+				},
 			},
 			{
-				Key: "20.51", Sequence: 1, Text: "20.51\n-Принял, продолжаю работу. (52325)",
-				Callsigns: []domain.Callsign{{Number: 6, Code: "52325", Label: "Торба"}},
+				Key: "20.51", Sequence: 1, Text: "20.51\n-Принял, продолжаю работу. (61021)",
+				Callsigns: []domain.Callsign{{Number: 3, Code: "61021", Label: "Рубин"}},
+			},
+			{
+				Key: "21.14", Sequence: 2, Text: "21.14\n-Доложите обстановку. (61022)\n-Без изменений. (52345)",
+				Callsigns: []domain.Callsign{{Number: 4, Code: "61022", Label: "Вектор"}},
 			},
 		},
 	}
 	got := FormatEventForNetwork(event, "313", false)
 	for _, expected := range []string{
-		"1. «<b>Монако</b>»", "6. «<b>Торба</b>»",
-		"<b>17:30</b>\n/1/ На связи.",
-		"<b>20:51</b>\n/6/ Принял, продолжаю работу.",
+		"1. «<b>Монако</b>»", "2. «<b>Торба</b>»", "3. «<b>Рубин</b>»", "4. «<b>Вектор</b>»",
+		"<b>17:30</b>\n/1/ На связи.\n/2/ Слышу уверенно.",
+		"<b>20:51</b>\n/3/ Принял, продолжаю работу.",
+		"<b>21:14</b>\n/4/ Доложите обстановку.\n/1/ Без изменений.",
 	} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("в объединённом сообщении нет %q:\n%s", expected, got)
