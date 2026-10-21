@@ -44,6 +44,7 @@ type DestinationConfig struct {
 	Template        string                 `json:"template,omitempty"`
 	Folder          string                 `json:"folder,omitempty"`
 	Network         string                 `json:"network,omitempty"`
+	Protection      string                 `json:"protection,omitempty"`
 	Prefix          string                 `json:"prefix,omitempty"`
 	Username        string                 `json:"username,omitempty"`
 	Password        string                 `json:"password,omitempty"`
@@ -73,11 +74,11 @@ func (cfg Server) Validate() error {
 		switch destination.Kind {
 		case domain.DestinationTelegram:
 			if !validBotToken(destination.BotToken) || destination.ChatID == 0 {
-				return fmt.Errorf("Telegram-направление %q заполнено неверно", id)
+				return fmt.Errorf("telegram-направление %q заполнено неверно", id)
 			}
 		case domain.DestinationWord:
 			if strings.TrimSpace(destination.Template) == "" || strings.TrimSpace(destination.Folder) == "" {
-				return fmt.Errorf("Word-направление %q заполнено неверно", id)
+				return fmt.Errorf("word-направление %q заполнено неверно", id)
 			}
 		default:
 			return fmt.Errorf("направление %q имеет неизвестный тип", id)

@@ -5,9 +5,12 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"intercept/internal/domain"
 	stateDB "intercept/internal/infrastructure/sqlite"
 )
 
@@ -29,6 +32,111 @@ type ClientStatus struct {
 	EAVCPath           string              `json:"eavc_path,omitempty"`
 	Queue              stateDB.ClientStats `json:"queue"`
 	Version            string              `json:"version"`
+	Processing         bool                `json:"processing"`
+}
+
+// QueueEventsPage — безопасная страница локальной очереди сообщений.
+type QueueEventsPage struct {
+	Items     []stateDB.QueueEvent `json:"items"`
+	Total     int                  `json:"total"`
+	Limit     int                  `json:"limit"`
+	Offset    int                  `json:"offset"`
+	State     string               `json:"state"`
+	Clearable bool                 `json:"clearable"`
+}
+
+// QueueEvents показывает оператору сообщения выбранного этапа обработки.
+func (client *Client) QueueEvents(ctx context.Context, state string, limit, offset int) (QueueEventsPage, error) {
+	queue, closeQueue, err := client.openQueue(ctx)
+	if err != nil {
+		return QueueEventsPage{}, err
+	}
+	defer closeQueue()
+	items, total, err := queue.EventsPage(ctx, state, limit, offset)
+	if err != nil {
+		return QueueEventsPage{}, err
+	}
+	for index := range items {
+		items[index].Reason = publicQueueReason(state, items[index].Reason)
+	}
+	return QueueEventsPage{
+		Items: items, Total: total, Limit: limit, Offset: offset, State: state,
+		Clearable: state == "acknowledged" || state == "expired",
+	}, nil
+}
+
+// ClearQueueEvents очищает только завершённые сообщения.
+func (client *Client) ClearQueueEvents(ctx context.Context, state string) (int, error) {
+	queue, closeQueue, err := client.openQueue(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer closeQueue()
+	count, err := queue.ClearTerminal(ctx, state)
+	if err != nil {
+		return 0, err
+	}
+	stats, statsErr := queue.Stats(ctx)
+	if statsErr == nil {
+		client.update(func(status *ClientStatus) { status.Queue = stats })
+	}
+	return count, nil
+}
+
+func (client *Client) openQueue(ctx context.Context) (*stateDB.ClientQueue, func(), error) {
+	db, err := stateDB.OpenState(filepath.Join(client.BaseDir, "data", "client.db"))
+	if err != nil {
+		return nil, func() {}, err
+	}
+	queue, err := stateDB.NewClientQueue(ctx, db)
+	if err != nil {
+		db.Close()
+		return nil, func() {}, err
+	}
+	return queue, func() { _ = db.Close() }, nil
+}
+
+func publicQueueReason(state, reason string) string {
+	if state == "pending" {
+		return "Ожидает первой попытки отправки или следующего автоматического повтора."
+	}
+	if state == "uploaded" {
+		return "Передано через Telegram, ожидается подтверждение центра."
+	}
+	if state == "acknowledged" {
+		return "Центр подтвердил получение сообщения."
+	}
+	switch strings.TrimSpace(reason) {
+	case "", domain.FreshnessExpired:
+		return "Истёк допустимый срок отправки — 30 минут."
+	default:
+		return "Сообщение не удалось доставить за допустимое время."
+	}
+}
+
+// StartProcessing запускает обработку вручную, используя сохранённые настройки.
+func (client *Client) StartProcessing() error {
+	if _, err := os.Stat(client.configPath()); err != nil {
+		return errors.New("сначала загрузите настройки рабочей точки")
+	}
+	return client.restartWorker(client.applicationContext())
+}
+
+// StopProcessing безопасно останавливает обработку, не удаляя настройки и очередь.
+func (client *Client) StopProcessing() {
+	client.stopWorker()
+	client.update(func(status *ClientStatus) {
+		status.State = "paused"
+		status.Title = "Обработка остановлена"
+		status.Detail = "Настройки и очередь сохранены. Для продолжения нажмите «Старт»."
+		status.Processing = false
+		status.TelegramOK = false
+	})
+}
+
+// RefreshProcessing перечитывает настройки и немедленно переподключает источники.
+func (client *Client) RefreshProcessing() error {
+	return client.StartProcessing()
 }
 
 // Client управляет жизненным циклом переносимого приложения.
@@ -60,6 +168,17 @@ func (client *Client) Start(ctx context.Context) {
 	client.mu.Lock()
 	client.rootContext = ctx
 	client.mu.Unlock()
+	if _, err := os.Stat(client.configPath()); errors.Is(err, os.ErrNotExist) {
+		if installed, installErr := client.installProvisionedConfig(); installErr != nil {
+			client.fail(
+				"Не удалось применить подготовленные настройки",
+				"Передайте администратору архив диагностики.",
+				installErr,
+			)
+		} else if installed {
+			client.Logger.Info("первичная настройка выполнена без действий оператора")
+		}
+	}
 	if _, err := os.Stat(client.configPath()); err == nil {
 		if err := client.restartWorker(ctx); err != nil {
 			client.fail(

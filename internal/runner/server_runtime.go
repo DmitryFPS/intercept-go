@@ -32,6 +32,15 @@ func (server *Server) restartWorker(parent context.Context) error {
 	if err != nil {
 		return err
 	}
+	for id, destination := range cfg.Destinations {
+		if strings.TrimSpace(destination.Protection) == "" {
+			destination.Protection = telegram.DefaultProtection
+		}
+		if destination.Kind == domain.DestinationTelegram {
+			destination.MessageTemplate = telegram.MigrateMessageTemplate(destination.MessageTemplate)
+		}
+		cfg.Destinations[id] = destination
+	}
 	server.stopWorkerLocked()
 	workerContext, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
@@ -45,6 +54,7 @@ func (server *Server) restartWorker(parent context.Context) error {
 	server.status.Detail = "Проверяем связь и получателей."
 	server.status.InviteLink = cfg.Transport.InviteLink
 	server.status.Destinations = destinationIDs(cfg.Destinations)
+	server.status.Processing = true
 	server.mu.Unlock()
 	go func() {
 		defer close(done)
@@ -71,6 +81,7 @@ func (server *Server) stopWorkerLocked() {
 	if done != nil {
 		<-done
 	}
+	server.update(func(status *ServerStatus) { status.Processing = false })
 }
 
 func (server *Server) run(ctx context.Context, cfg config.Server) {
@@ -249,6 +260,7 @@ func (server *Server) gateways(cfg config.Server) map[string]application.Deliver
 			if err == nil {
 				result[id] = &telegram.Destination{
 					API: api, ChatID: destination.ChatID, Network: destination.Network,
+					Protection:      destination.Protection,
 					MessageTemplate: destination.MessageTemplate,
 					StatePath:       filepath.Join(server.BaseDir, "data", "telegram-"+safeID(id)+".json"),
 					Logger:          server.Logger,
@@ -258,7 +270,7 @@ func (server *Server) gateways(cfg config.Server) map[string]application.Deliver
 			result[id] = &docx.Destination{
 				TemplatePath: destination.Template, Folder: destination.Folder,
 				StatePath: filepath.Join(server.BaseDir, "data", "word-"+safeID(id)+".json"),
-				Network:   destination.Network, Prefix: destination.Prefix,
+				Network:   destination.Network, Protection: destination.Protection, Prefix: destination.Prefix,
 				Username: destination.Username, Password: destination.Password,
 			}
 		}

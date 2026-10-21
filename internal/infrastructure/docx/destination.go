@@ -23,6 +23,7 @@ type Destination struct {
 	Folder       string
 	StatePath    string
 	Network      string
+	Protection   string
 	Prefix       string
 	Username     string
 	Password     string
@@ -45,11 +46,8 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	if settings.Prefix == "" {
 		settings.Prefix = "СТНД"
 	}
-	if settings.Network == "" {
-		settings.Network = defaultNetwork
-	}
 	if settings.TemplatePath == "" || settings.Folder == "" || settings.StatePath == "" {
-		return errors.New("Word-направление настроено не полностью")
+		return errors.New("word-направление настроено не полностью")
 	}
 	unlock, acquired := tryDestinationLock(settings.StatePath)
 	if !acquired {
@@ -106,7 +104,7 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 		}
 		document := Document{
 			Unit: event.Position.UnitName, Frequency: event.Position.Frequency,
-			GroupCode: event.Position.GroupCode, Network: destination.Network,
+			GroupCode: event.Position.GroupCode, Network: destination.Network, Protection: destination.Protection,
 			Date: date, SourceUpdatedAt: event.Source.UpdatedAt, Operator: event.UpdatedBy, Content: block.Text,
 			Callsigns: block.Callsigns,
 		}

@@ -1,5 +1,8 @@
 const element = id => document.getElementById(id);
 const formatTime = value => value ? new Date(value).toLocaleString('ru-RU') : 'Ещё не было';
+const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, character => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+})[character]);
 let searchController;
 
 function showMessage(text = '', tone = 'error') {
@@ -23,7 +26,8 @@ async function refresh() {
     element('detail').textContent = status.detail;
     element('stateLabel').textContent = ({
       running: 'ВСЁ В ПОРЯДКЕ', waiting: 'ПОВТОРИМ АВТОМАТИЧЕСКИ',
-      error: 'ТРЕБУЕТСЯ ПОМОЩЬ', setup: 'ПЕРВЫЙ ЗАПУСК', starting: 'ЗАПУСК'
+      error: 'ТРЕБУЕТСЯ ПОМОЩЬ', setup: 'ПЕРВЫЙ ЗАПУСК', starting: 'ЗАПУСК',
+      paused: 'ОСТАНОВЛЕНО'
     })[status.state] || 'СОСТОЯНИЕ';
     element('version').textContent = 'Версия ' + status.version;
     element('identity').classList.toggle('hidden', !status.configured);
@@ -41,12 +45,103 @@ async function refresh() {
     element('uploaded').textContent = status.queue?.uploaded || 0;
     element('acknowledged').textContent = status.queue?.acknowledged || 0;
     element('expired').textContent = status.queue?.expired || 0;
+    element('controlStart').disabled = status.processing || !status.configured;
+    element('controlStop').disabled = !status.processing;
+    element('controlRefresh').disabled = !status.configured;
     if (status.eavc_path && !element('eavcPath').value) element('eavcPath').value = status.eavc_path;
   } catch (error) {
     console.error(error);
     showMessage('Интерфейс временно не отвечает. Программа попробует обновить состояние автоматически.');
   }
 }
+
+async function controlProcessing(action, button, busyText) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = busyText;
+  try {
+    await requestJSON(`/api/control/${action}`, {method: 'POST'});
+    showMessage(action === 'stop' ? 'Обработка остановлена. Очередь сохранена.' : 'Команда выполнена.', 'success');
+    await refresh();
+  } catch (error) {
+    showMessage(error.message);
+  } finally {
+    button.textContent = original;
+  }
+}
+
+element('controlStart').addEventListener('click', event => controlProcessing('start', event.currentTarget, 'Запускаем…'));
+element('controlStop').addEventListener('click', event => controlProcessing('stop', event.currentTarget, 'Останавливаем…'));
+element('controlRefresh').addEventListener('click', event => controlProcessing('refresh', event.currentTarget, 'Обновляем…'));
+
+const queueLabels = {
+  pending: {
+    title: 'Ожидают отправки',
+    description: 'Сообщения ещё не переданы. Программа отправит их автоматически; удалять их вручную нельзя.'
+  },
+  uploaded: {
+    title: 'Загружены, ждут центр',
+    description: 'Сообщения переданы через Telegram и исчезнут отсюда после подтверждения центра.'
+  },
+  acknowledged: {
+    title: 'Подтверждены центром',
+    description: 'Центр подтвердил получение. Этот архив можно очистить вручную.'
+  },
+  expired: {
+    title: 'Не отправлены старше 30 минут',
+    description: 'Срок безопасной отправки истёк. Эти сообщения остались только в локальном архиве.'
+  }
+};
+const queuePageSize = 20;
+let queueState = 'pending';
+let queueOffset = 0;
+
+async function loadQueuePage(offset = 0) {
+  const data = await requestJSON(`/api/queue/${queueState}?limit=${queuePageSize}&offset=${Math.max(0, offset)}`, {cache: 'no-store'});
+  queueOffset = data.offset;
+  const list = element('queueList');
+  if (!data.items.length) {
+    list.innerHTML = '<p class="empty-expired">В этом списке сообщений нет.</p>';
+  } else {
+    list.innerHTML = data.items.map(item => `<article>
+      <div class="expired-meta"><strong>${escapeHTML(item.position || 'Позиция не указана')}</strong><span>${escapeHTML(formatTime(item.source_at || item.status_at))}</span></div>
+      <p>${escapeHTML(item.reason)}</p><pre>${escapeHTML(item.content || 'Текст отсутствует')}</pre>
+    </article>`).join('');
+  }
+  const current = data.total ? Math.floor(data.offset / data.limit) + 1 : 1;
+  const pages = Math.max(1, Math.ceil(data.total / data.limit));
+  element('queuePage').textContent = `Страница ${current} из ${pages} · всего ${data.total}`;
+  element('queuePrev').disabled = data.offset === 0;
+  element('queueNext').disabled = data.offset + data.limit >= data.total;
+  element('clearQueue').classList.toggle('hidden', !data.clearable || data.total === 0);
+}
+
+document.querySelectorAll('[data-queue-state]').forEach(button => button.addEventListener('click', async () => {
+  queueState = button.dataset.queueState;
+  queueOffset = 0;
+  element('queueDialogTitle').textContent = queueLabels[queueState].title;
+  element('queueDialogDescription').textContent = queueLabels[queueState].description;
+  try {
+    await loadQueuePage();
+    element('queueDialog').showModal();
+  } catch (error) {
+    showMessage(error.message);
+  }
+}));
+element('closeQueue').addEventListener('click', () => element('queueDialog').close());
+element('queuePrev').addEventListener('click', () => loadQueuePage(queueOffset - queuePageSize));
+element('queueNext').addEventListener('click', () => loadQueuePage(queueOffset + queuePageSize));
+element('clearQueue').addEventListener('click', async () => {
+  if (!confirm('Очистить этот завершённый список? Ожидающие доставки сообщения затронуты не будут.')) return;
+  try {
+    const result = await requestJSON(`/api/queue/${queueState}`, {method: 'DELETE'});
+    showMessage(`Удалено записей: ${result.removed}.`, 'success');
+    await loadQueuePage(0);
+    await refresh();
+  } catch (error) {
+    showMessage(error.message);
+  }
+});
 
 async function searchEAVC(extended) {
   searchController = new AbortController();

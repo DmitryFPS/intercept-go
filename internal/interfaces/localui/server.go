@@ -139,6 +139,19 @@ func WriteJSON(writer http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(writer).Encode(value)
 }
 
+// SecurityHeaders добавляет единый набор ограничений для обоих локальных
+// интерфейсов. Он расположен здесь, чтобы клиент и центр не расходились в
+// настройках защиты при дальнейших изменениях.
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("X-Content-Type-Options", "nosniff")
+		writer.Header().Set("X-Frame-Options", "DENY")
+		writer.Header().Set("Cache-Control", "no-store, max-age=0")
+		writer.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'")
+		next.ServeHTTP(writer, request)
+	})
+}
+
 // ReadJSON ограничивает размер, запрещает лишние поля и посторонние данные.
 func ReadJSON(request *http.Request, target any, maxBytes int64) error {
 	if request.Method != http.MethodPost && request.Method != http.MethodPut {

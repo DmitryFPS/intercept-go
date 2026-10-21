@@ -50,14 +50,16 @@ func TestDependencyDirection(t *testing.T) {
 	}
 	for _, rule := range rules {
 		directory := filepath.Join(repositoryRoot, filepath.FromSlash(rule.directory))
-		packages, err := parser.ParseDir(token.NewFileSet(), directory, nil, parser.ImportsOnly)
+		entries, err := filepath.Glob(filepath.Join(directory, "*.go"))
 		if err != nil {
 			t.Fatalf("прочитать %s: %v", rule.directory, err)
 		}
-		for _, pkg := range packages {
-			for filename, file := range pkg.Files {
-				checkImports(t, repositoryRoot, filename, file, rule.forbidden)
+		for _, filename := range entries {
+			file, parseErr := parser.ParseFile(token.NewFileSet(), filename, nil, parser.ImportsOnly)
+			if parseErr != nil {
+				t.Fatalf("прочитать %s: %v", filename, parseErr)
 			}
+			checkImports(t, repositoryRoot, filename, file, rule.forbidden)
 		}
 	}
 }

@@ -82,8 +82,14 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 		Kind: setup.Kind, BotToken: setup.BotToken, ChatID: setup.ChatID,
 		MessageTemplate: strings.TrimSpace(setup.MessageTemplate),
 		Template:        strings.TrimSpace(setup.Template), Folder: strings.TrimSpace(setup.Folder),
-		Network: strings.TrimSpace(setup.Network), Prefix: strings.TrimSpace(setup.Prefix),
+		Network: strings.TrimSpace(setup.Network), Protection: strings.TrimSpace(setup.Protection), Prefix: strings.TrimSpace(setup.Prefix),
 		Username: setup.Username, Password: setup.Password,
+	}
+	if destination.Network == "" {
+		return errors.New("не задано обозначение радиосети")
+	}
+	if destination.Protection == "" {
+		return errors.New("не задано обозначение защиты")
 	}
 	existingDestination, destinationExists := cfg.Destinations[id]
 	if destinationExists && existingDestination.Kind == destination.Kind {
@@ -104,6 +110,7 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 		if destination.MessageTemplate == "" {
 			destination.MessageTemplate = telegram.DefaultMessageTemplate
 		}
+		destination.MessageTemplate = telegram.MigrateMessageTemplate(destination.MessageTemplate)
 		if err := telegram.ValidateMessageTemplate(destination.MessageTemplate); err != nil {
 			return err
 		}
@@ -307,6 +314,73 @@ func (server *Server) ClientConfig(ctx context.Context, clientID string) ([]byte
 	return payload, client, nil
 }
 
+// ClientPackage собирает готовую папку рабочей точки: оператору достаточно
+// распаковать ZIP на Рабочий стол и запустить EXE. Индивидуальный JSON будет
+// автоматически принят при первом запуске и перенесён в защищённое хранилище.
+func (server *Server) ClientPackage(ctx context.Context, clientID string) ([]byte, application.RegisteredClient, error) {
+	payload, client, err := server.ClientConfig(ctx, clientID)
+	if err != nil {
+		return nil, application.RegisteredClient{}, err
+	}
+	executablePath := filepath.Join(server.BaseDir, "station-template", "EAVC Connect Station.exe")
+	executable, err := os.ReadFile(executablePath)
+	if err != nil {
+		return nil, application.RegisteredClient{}, fmt.Errorf("шаблон программы рабочей точки не найден: %w", err)
+	}
+	var output bytes.Buffer
+	archive := zip.NewWriter(&output)
+	folder := "EAVC Connect Station-" + safePackageName(client.Number) + "/"
+	entries := []struct {
+		name string
+		data []byte
+	}{
+		{folder + "EAVC Connect Station.exe", executable},
+		{folder + provisionedClientConfigName, payload},
+		{folder + "ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt", []byte(clientPackageReadme)},
+	}
+	for _, entry := range entries {
+		header := &zip.FileHeader{Name: entry.name, Method: zip.Deflate}
+		header.Modified = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
+		part, createErr := archive.CreateHeader(header)
+		if createErr != nil {
+			return nil, application.RegisteredClient{}, fmt.Errorf("создать комплект точки: %w", createErr)
+		}
+		if _, writeErr := part.Write(entry.data); writeErr != nil {
+			return nil, application.RegisteredClient{}, fmt.Errorf("записать комплект точки: %w", writeErr)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return nil, application.RegisteredClient{}, fmt.Errorf("завершить комплект точки: %w", err)
+	}
+	return output.Bytes(), client, nil
+}
+
+func safePackageName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "point"
+	}
+	return strings.Map(func(char rune) rune {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' ||
+			char >= '0' && char <= '9' || char >= 'А' && char <= 'я' || char == 'Ё' || char == 'ё' ||
+			char == '-' || char == '_' {
+			return char
+		}
+		return '-'
+	}, value)
+}
+
+const clientPackageReadme = `EAVC CONNECT — РАБОЧАЯ ТОЧКА
+
+1. Скопируйте всю распакованную папку на Рабочий стол.
+2. Запустите «EAVC Connect Station.exe».
+3. Если база EAVC не найдена автоматически, укажите её в блоке «Где находится EAVC».
+
+Настройки уже подготовлены администратором. Вводить токены, ключи и коды не требуется.
+Не удаляйте папки data и logs после первого запуска: в них находятся защищённые настройки, очередь и журналы.
+При неисправности нажмите «Скачать диагностику» и отправьте ZIP администратору.
+`
+
 // Rules возвращает действующую опубликованную матрицу маршрутов.
 func (server *Server) Rules(ctx context.Context) (domain.RuleSet, error) {
 	return server.Store.ActiveRules(ctx)
@@ -397,11 +471,16 @@ func (server *Server) SafeDestinations() map[string]map[string]any {
 		if destination.Kind == domain.DestinationTelegram && strings.TrimSpace(messageTemplate) == "" {
 			messageTemplate = telegram.DefaultMessageTemplate
 		}
+		messageTemplate = telegram.MigrateMessageTemplate(messageTemplate)
+		protection := destination.Protection
+		if strings.TrimSpace(protection) == "" {
+			protection = telegram.DefaultProtection
+		}
 		result[id] = map[string]any{
 			"name": name, "kind": destination.Kind, "chat_id": destination.ChatID,
 			"message_template": messageTemplate,
 			"template":         destination.Template, "folder": destination.Folder,
-			"network": destination.Network, "prefix": destination.Prefix,
+			"network": destination.Network, "protection": protection, "prefix": destination.Prefix,
 		}
 	}
 	return result
@@ -433,7 +512,7 @@ func (server *Server) DestinationWordTemplate(id string) ([]byte, string, error)
 	destination, exists := server.config.Destinations[strings.TrimSpace(id)]
 	server.mu.RUnlock()
 	if !exists || destination.Kind != domain.DestinationWord {
-		return nil, "", errors.New("Word-получатель не найден")
+		return nil, "", errors.New("word-получатель не найден")
 	}
 	file, err := os.Open(destination.Template)
 	if err != nil {

@@ -68,7 +68,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	}
 	if client.SenderBotID != packet.SenderBotID ||
 		!sameUsername(client.SenderBotUsername, packet.SenderBotUsername) {
-		return PacketResult{}, errors.New("Telegram-бот не принадлежит указанной точке")
+		return PacketResult{}, errors.New("telegram-бот не принадлежит указанной точке")
 	}
 	if client.ChatID != packet.ChatID || client.ThreadID != packet.ThreadID {
 		return PacketResult{}, errors.New("пакет поступил не из темы зарегистрированной точки")

@@ -26,6 +26,7 @@
     <div class="setup-card card"><div><span class="eyebrow">ПОРЯДОК НАСТРОЙКИ</span><h2>Что нужно сделать до первого теста</h2><p>Программа ничего не подставляет за вас. Получатели, рабочие точки и маршруты появляются только после вашего сохранения.</p></div><div id="readiness" class="checklist"></div></div>
     <div class="stats"><article><small>РАБОЧИХ ТОЧЕК</small><strong id="statClients">0</strong></article><article><small>ПОЛУЧЕНО</small><strong id="statEvents">0</strong></article><article><small>ОЖИДАЕТ ОТПРАВКИ</small><strong id="statPending">0</strong></article><article><small>ДОСТАВЛЕНО</small><strong id="statDelivered">0</strong></article><article><small>ПРОСРОЧЕНО</small><strong id="statExpired">0</strong></article><article><small>ОТКЛОНЕНО</small><strong id="statRejected">0</strong></article></div>
     <div class="two-columns"><article class="card"><div class="card-head"><h3>Последняя активность</h3></div><dl><dt>Принят пакет</dt><dd id="lastReceived">Ещё не было</dd><dt>Выполнен маршрут</dt><dd id="lastDelivery">Ещё не было</dd></dl></article><article class="card"><div class="card-head"><h3>Диагностика</h3></div><p>Архив содержит состояние и технические журналы без токенов.</p><a class="button secondary" href="/api/diagnostics">Скачать диагностику</a></article></div>
+    <div class="card control-panel"><div><h3>Ручное управление</h3><p>Остановка сохраняет настройки и очереди. Обновление перечитывает настройки и переподключает транспорт.</p></div><div class="control-actions"><button id="controlStart" class="button primary" type="button">Старт</button><button id="controlStop" class="button ghost" type="button">Стоп</button><button id="controlRefresh" class="button secondary" type="button">Обновить</button></div></div>
   </section>
 
   <section id="transport" class="page">
@@ -66,6 +67,7 @@
     <label class="full">Название<input name="name" required placeholder="Введите любое понятное вам название"><small>Название задаёте вы. Оно не влияет на способ и место доставки.</small></label>
     <label class="full">Способ доставки<select name="kind"><option value="telegram">Telegram</option><option value="word">Документ Word в папку</option></select></label>
     <label class="full">Обозначение радиосети<input name="network" required placeholder="Например: 39 или 313"><small>Будет напечатано после названия радиосети в Telegram или документе Word.</small></label>
+    <label class="full">Обозначение защиты<input name="protection" required placeholder="Например: AES-256"><small>Задаётся вами и подставляется в Telegram и Word вместо скрытого значения.</small></label>
     <div class="kind telegram full subform">
       <label>Токен бота<input name="bot_token" type="password" autocomplete="off" placeholder="Вставьте токен"></label>
       <label>ID группы или канала<input name="chat_id" type="number" placeholder="Начинается с -100"></label>

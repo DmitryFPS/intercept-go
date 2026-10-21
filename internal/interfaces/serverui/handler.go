@@ -37,6 +37,7 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/clients", handler.clients)
 	mux.HandleFunc("POST /api/clients", handler.addClient)
 	mux.HandleFunc("GET /api/clients/{id}/config", handler.clientConfig)
+	mux.HandleFunc("GET /api/clients/{id}/package", handler.clientPackage)
 	mux.HandleFunc("GET /api/destinations", func(writer http.ResponseWriter, _ *http.Request) {
 		localui.WriteJSON(writer, http.StatusOK, handler.Server.SafeDestinations())
 	})
@@ -54,7 +55,28 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/rule-versions", handler.ruleVersions)
 	mux.HandleFunc("POST /api/rule-versions/{version}/restore", handler.restoreRules)
 	mux.HandleFunc("GET /api/diagnostics", handler.diagnostics)
-	return securityHeaders(mux)
+	mux.HandleFunc("POST /api/control/{action}", handler.control)
+	return localui.SecurityHeaders(mux)
+}
+
+func (handler Handler) control(writer http.ResponseWriter, request *http.Request) {
+	var err error
+	switch request.PathValue("action") {
+	case "start":
+		err = handler.Server.StartProcessing()
+	case "stop":
+		handler.Server.StopProcessing()
+	case "refresh":
+		err = handler.Server.RefreshProcessing()
+	default:
+		handler.publicError(writer, http.StatusNotFound, "Неизвестная команда управления.", nil)
+		return
+	}
+	if err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось выполнить команду. Проверьте настройки и повторите попытку.", err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, handler.Server.Status())
 }
 
 func (handler Handler) restoreDefaultWordTemplate(writer http.ResponseWriter, _ *http.Request) {
@@ -86,6 +108,18 @@ func (handler Handler) clientConfig(writer http.ResponseWriter, request *http.Re
 	}
 	filename := "EAVC Connect Station-" + safeFilename(client.Number) + ".json"
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	writer.Write(payload)
+}
+
+func (handler Handler) clientPackage(writer http.ResponseWriter, request *http.Request) {
+	payload, client, err := handler.Server.ClientPackage(request.Context(), request.PathValue("id"))
+	if err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось подготовить готовый комплект рабочей точки.", err)
+		return
+	}
+	filename := "EAVC Connect Station-" + safeFilename(client.Number) + ".zip"
+	writer.Header().Set("Content-Type", "application/zip")
 	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	writer.Write(payload)
 }
@@ -285,14 +319,4 @@ func safeFilename(value string) string {
 		}
 		return '-'
 	}, value)
-}
-
-func securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("X-Content-Type-Options", "nosniff")
-		writer.Header().Set("X-Frame-Options", "DENY")
-		writer.Header().Set("Cache-Control", "no-store, max-age=0")
-		writer.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'")
-		next.ServeHTTP(writer, request)
-	})
 }

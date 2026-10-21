@@ -27,7 +27,7 @@ func TestBuildMatchesProvidedReferenceDocumentXML(t *testing.T) {
 		t.Fatalf("шаблон поставки не прошёл проверку: %v", err)
 	}
 	payload, err := Build(template, Document{
-		Unit: "2 об 3 обр ОсН НГ", Frequency: "159.5750", GroupCode: "3", Network: "39",
+		Unit: "2 об 3 обр ОсН НГ", Frequency: "159.5750", GroupCode: "3", Network: "39", Protection: "AES-256",
 		Date: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC),
 		Callsigns: []domain.Callsign{
 			{Number: 1, Code: "783693", Label: "Марс, Шило"},
@@ -46,8 +46,8 @@ func TestBuildMatchesProvidedReferenceDocumentXML(t *testing.T) {
 		"ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ",
 		"Радиосеть ", "2 об 3 обр ОсН НГ", " - 39",
 		"159.5750 МГц (гр. ID 3 AES-256)", "21.08.2026г.",
-		"1.«", "Марс, Шило", "» (id: 783693) – военнослужащий 2 об 3 обр ОсН НГ, мужской голос, украинская речь;",
-		"15.«", "Швидкий, Лоза", "» (id: 17384) – военнослужащий 2 об 3 обр ОсН НГ, мужской голос, украинская речь;",
+		"1.«", "Марс, Шило", "» (id: 783693) – сведения не указаны;",
+		"15.«", "Швидкий, Лоза", "» (id: 17384) – сведения не указаны;",
 		"03:51", "/1/ ... Марсу на прием.", "03:52", "/15/ Швидкий на приеме, что?",
 		"/1/ ... все нормально ... чтокаешь?",
 		"/15/ 5-ые сутки них*я не жрал, потому что воды нихр*на нет, пришлите нам 10 литров воды, пожалуйста, я прошу.",
@@ -118,7 +118,7 @@ func TestDestinationBuildsOneDocumentPerTimeBlockWithoutDuplicates(t *testing.T)
 	createTemplate(t, template)
 	destination := Destination{
 		TemplatePath: template, Folder: filepath.Join(root, "out"),
-		StatePath: filepath.Join(root, "state", "word.json"), Network: "313", Prefix: "СТНД",
+		StatePath: filepath.Join(root, "state", "word.json"), Network: "313", Protection: "AES-256", Prefix: "СТНД",
 	}
 	event := domain.Event{
 		ID: "event-1", ClientID: "textile", CreatedAt: time.Now(), ObservedAt: time.Now(),
@@ -167,7 +167,7 @@ func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 	createTemplate(t, template)
 	destination := Destination{
 		TemplatePath: template, Folder: filepath.Join(root, "out"),
-		StatePath: filepath.Join(root, "state", "word.json"), Prefix: "СТНД",
+		StatePath: filepath.Join(root, "state", "word.json"), Network: "313", Protection: "AES-256", Prefix: "СТНД",
 	}
 	event := domain.Event{
 		ID: "event-deferred", ClientID: "textile", CreatedAt: time.Now(),
@@ -204,7 +204,7 @@ func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 		"ДНЕПРОПЕТРОВСКОЕ НАПРАВЛЕНИЕ",
 		"Радиосеть ", "2 об 3 обр ОсН НГ (отложенный режим)", " - 313",
 		"159.5750 МГц (гр. ID 3 AES-256)", "18.10.2026г.",
-		"1.«", "Марс", "» (id: 783693) – военнослужащий 2 об 3 обр ОсН НГ (отложенный режим), мужской голос, украинская речь;",
+		"1.«", "Марс", "» (id: 783693) – сведения не указаны;",
 		"03:51", "/1/ На приём.",
 		"Дежурный оператор: ", "Позывной", "Старший смены МГ ", "1", ": ", "Позывной",
 	}

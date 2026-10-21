@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -30,6 +31,29 @@ type Client struct {
 	Cryptography ClientCrypto       `json:"cryptography"`
 	Polling      ClientPolling      `json:"polling"`
 	Authenticity ClientAuthenticity `json:"authenticity"`
+}
+
+// IssuerFingerprint возвращает разбитый на группы SHA-256 отпечаток ключа центра.
+func IssuerFingerprint(key ed25519.PublicKey) string {
+	digest := sha256.Sum256(key)
+	// 64 бита достаточно для ручной сверки, а четыре группы можно без ошибок
+	// продиктовать или перенести на рабочую точку.
+	hexValue := strings.ToUpper(fmt.Sprintf("%x", digest[:8]))
+	groups := make([]string, 0, len(hexValue)/4)
+	for index := 0; index < len(hexValue); index += 4 {
+		groups = append(groups, hexValue[index:index+4])
+	}
+	return strings.Join(groups, "-")
+}
+
+// NormalizeFingerprint убирает разделители для безопасного сравнения кода.
+func NormalizeFingerprint(value string) string {
+	return strings.ToUpper(strings.Map(func(char rune) rune {
+		if char >= '0' && char <= '9' || char >= 'A' && char <= 'F' || char >= 'a' && char <= 'f' {
+			return char
+		}
+		return -1
+	}, value))
 }
 
 // EAVC описывает источник данных, не смешивая его путь с настройками Telegram.

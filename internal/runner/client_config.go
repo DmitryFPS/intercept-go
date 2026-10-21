@@ -18,7 +18,11 @@ import (
 	"intercept/internal/infrastructure/telegram"
 )
 
+const provisionedClientConfigName = "EAVC Connect Station.json"
+
 // ImportConfig проверяет полученные настройки и только после этого заменяет рабочие.
+// При первой установке доверие задаёт сам комплект, полученный от администратора.
+// Все последующие файлы обязаны быть подписаны тем же центром.
 func (client *Client) ImportConfig(ctx context.Context, payload []byte) error {
 	cfg, err := config.DecodeClient(bytes.NewReader(payload))
 	if err != nil {
@@ -39,22 +43,60 @@ func (client *Client) ImportConfig(ctx context.Context, payload []byte) error {
 	if !strings.EqualFold(me.Username, strings.TrimPrefix(cfg.Transport.BotUsername, "@")) {
 		return errors.New("токен принадлежит другому Telegram-боту")
 	}
-	if err := os.MkdirAll(filepath.Dir(client.configPath()), 0o700); err != nil {
-		return fmt.Errorf("создать папку данных: %w", err)
-	}
 	canonical, _ := json.Marshal(cfg)
-	if err := secrets.Save(client.configPath(), canonical); err != nil {
+	if err := client.persistConfig(canonical, issuer, firstImport); err != nil {
 		return err
-	}
-	if firstImport {
-		if err := secrets.Save(client.trustedIssuerPath(), issuer); err != nil {
-			return fmt.Errorf("сохранить доверенный ключ сервера: %w", err)
-		}
 	}
 	if err := client.restartWorker(client.applicationContext()); err != nil {
 		return err
 	}
 	client.Logger.Info("настройки точки импортированы", "client_id", cfg.ClientID, "client_number", cfg.ClientNumber)
+	return nil
+}
+
+// installProvisionedConfig принимает файл, уже вложенный администратором в
+// готовую папку программы. Сетевая проверка здесь не нужна: целостность файла
+// подтверждает подпись, а доступ к Telegram рабочий процесс проверит сам.
+func (client *Client) installProvisionedConfig() (bool, error) {
+	path := filepath.Join(client.BaseDir, provisionedClientConfigName)
+	payload, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("прочитать подготовленные настройки: %w", err)
+	}
+	cfg, err := config.DecodeClient(bytes.NewReader(payload))
+	if err != nil {
+		return false, fmt.Errorf("проверить подготовленные настройки: %w", err)
+	}
+	issuer, firstImport, err := client.verifyTrustedIssuer(cfg)
+	if err != nil {
+		return false, err
+	}
+	canonical, _ := json.Marshal(cfg)
+	if err := client.persistConfig(canonical, issuer, firstImport); err != nil {
+		return false, err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		client.Logger.Warn("не удалось удалить открытый файл первичной настройки", "error", err)
+	}
+	client.Logger.Info("готовые настройки точки установлены", "client_id", cfg.ClientID, "client_number", cfg.ClientNumber)
+	return true, nil
+}
+
+func (client *Client) persistConfig(payload, issuer []byte, firstImport bool) error {
+	if err := os.MkdirAll(filepath.Dir(client.configPath()), 0o700); err != nil {
+		return fmt.Errorf("создать папку данных: %w", err)
+	}
+	if firstImport {
+		if err := secrets.Save(client.trustedIssuerPath(), issuer); err != nil {
+			return fmt.Errorf("сохранить доверенный ключ центра: %w", err)
+		}
+	}
+	if err := secrets.Save(client.configPath(), payload); err != nil {
+		return fmt.Errorf("сохранить настройки точки: %w", err)
+	}
 	return nil
 }
 

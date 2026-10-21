@@ -19,6 +19,7 @@ type Destination struct {
 	API             *Client
 	ChatID          int64
 	Network         string
+	Protection      string
 	MessageTemplate string
 	StatePath       string
 	Logger          *slog.Logger
@@ -36,7 +37,7 @@ type itemLockEntry struct {
 // текущее состояние записи EAVC без дубликатов.
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
 	if destination.API == nil || destination.ChatID == 0 || strings.TrimSpace(destination.StatePath) == "" {
-		return errors.New("Telegram-направление настроено не полностью")
+		return errors.New("telegram-направление настроено не полностью")
 	}
 	itemKey := strings.TrimSpace(event.Source.UUID)
 	if itemKey == "" {
@@ -61,7 +62,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	item.ThreadID = threadID
 
 	const recordStateKey = "__record__"
-	chunks := formatEventChunks(event, delivery, destination.Network, destination.MessageTemplate)
+	chunks := formatEventChunks(event, delivery, destination.Network, destination.Protection, destination.MessageTemplate)
 	if len(chunks) == 0 {
 		if err := destination.deleteAll(ctx, item.Blocks); err != nil {
 			return err

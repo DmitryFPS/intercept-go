@@ -352,3 +352,65 @@ func TestClientQueueConsumesLateAndDuplicateAcknowledgements(t *testing.T) {
 		}
 	}
 }
+
+// Экран очереди показывает все этапы, но разрешает очищать только завершённые.
+func TestClientQueuePagesAndProtectsActiveMessagesFromDeletion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeEvent := func(id string) domain.Event {
+		return domain.Event{
+			ID: id, ClientID: "client", CreatedAt: now, ObservedAt: now, SourceAt: now,
+			ExpiresAt: now.Add(time.Hour), Source: domain.SourceRecord{UUID: "source-" + id},
+			Position: domain.Position{UnitName: "позиция " + id}, Mode: domain.SourceModeNormal,
+			Content: "текст " + id, ContentDigest: "digest-" + id,
+		}
+	}
+	for _, id := range []string{"pending", "uploaded", "acknowledged", "expired"} {
+		if err := queue.Enqueue(ctx, makeEvent(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := queue.MarkUploaded(ctx, "uploaded", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkUploaded(ctx, "acknowledged", 11); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkAcknowledged(ctx, "acknowledged", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkExpired(ctx, "expired", now, domain.FreshnessExpired); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"pending", "uploaded", "acknowledged", "expired"} {
+		items, total, err := queue.EventsPage(ctx, state, 20, 0)
+		if err != nil || total != 1 || len(items) != 1 || items[0].Content != "текст "+state {
+			t.Fatalf("неверная страница %s: total=%d items=%#v err=%v", state, total, items, err)
+		}
+	}
+	for _, state := range []string{"pending", "uploaded"} {
+		if _, err := queue.ClearTerminal(ctx, state); err == nil {
+			t.Fatalf("активное состояние %s удалось удалить", state)
+		}
+	}
+	for _, state := range []string{"acknowledged", "expired"} {
+		removed, err := queue.ClearTerminal(ctx, state)
+		if err != nil || removed != 1 {
+			t.Fatalf("завершённое состояние %s не очищено: removed=%d err=%v", state, removed, err)
+		}
+	}
+	stats, err := queue.Stats(ctx)
+	if err != nil || stats.Pending != 1 || stats.Uploaded != 1 || stats.Acknowledged != 0 || stats.Expired != 0 {
+		t.Fatalf("очистка затронула активную очередь: %+v err=%v", stats, err)
+	}
+}

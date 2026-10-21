@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -120,6 +121,62 @@ func TestMessageTemplateValidationListsMissingMarkers(t *testing.T) {
 	}
 	if err := ValidateMessageTemplate(DefaultMessageTemplate); err != nil {
 		t.Fatalf("стандартный шаблон не прошёл проверку: %v", err)
+	}
+}
+
+func TestMessageTemplateValidationRejectsUnsafeHTML(t *testing.T) {
+	t.Parallel()
+	for _, invalid := range []string{
+		strings.Replace(DefaultMessageTemplate, "<b>", `<b onclick="x">`, 1),
+		strings.Replace(DefaultMessageTemplate, "<b>", "<script>", 1),
+		strings.Replace(DefaultMessageTemplate, "</b>", "</i>", 1),
+	} {
+		if err := ValidateMessageTemplate(invalid); err == nil {
+			t.Fatalf("опасное или повреждённое HTML-оформление принято: %q", invalid)
+		}
+	}
+}
+
+func TestTelegramLengthBoundaryAndBalancedChunks(t *testing.T) {
+	t.Parallel()
+	for _, size := range []int{4095, 4096, 4097} {
+		parts := splitHTMLMessage(strings.Repeat("я", size), maxTelegramMessageRunes)
+		want := 1
+		if size > maxTelegramMessageRunes {
+			want = 2
+		}
+		if len(parts) != want {
+			t.Fatalf("длина %d: частей %d, ожидалось %d", size, len(parts), want)
+		}
+	}
+	event := domain.Event{
+		SourceAt: time.Now(), Position: domain.Position{UnitName: "Точка", Frequency: "100.100", GroupCode: "A1"},
+		Blocks: []domain.ContentBlock{{Text: "12.00\n" + strings.Repeat("Длинный текст & < >. ", 900), Callsigns: []domain.Callsign{{Number: 1, Code: "1", Label: "Марс", Description: strings.Repeat("описание ", 350)}}}},
+	}
+	chunks := formatEventChunks(event, domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver}}, "313", "СВОЯ-ЗАЩИТА", DefaultMessageTemplate)
+	if len(chunks) < 2 {
+		t.Fatal("длинное итоговое сообщение должно быть разделено")
+	}
+	for index, chunk := range chunks {
+		if runeLen(chunk) > maxTelegramMessageRunes {
+			t.Fatalf("часть %d длиннее лимита: %d", index+1, runeLen(chunk))
+		}
+		var root struct{}
+		if err := xml.Unmarshal([]byte("<root>"+chunk+"</root>"), &root); err != nil {
+			t.Fatalf("часть %d содержит несбалансированный HTML: %v", index+1, err)
+		}
+	}
+}
+
+func TestMissingDescriptionIsNotInvented(t *testing.T) {
+	t.Parallel()
+	event := domain.Event{
+		SourceAt: time.Now(), Position: domain.Position{UnitName: "Точка"},
+		Blocks: []domain.ContentBlock{{Text: "12.00\n-Принято. (7)", Callsigns: []domain.Callsign{{Number: 7, Code: "7", Label: "Марс"}}}},
+	}
+	message := FormatEventForNetwork(event, "313", false)
+	if !strings.Contains(message, "сведения не указаны") || strings.Contains(message, "мужской голос") {
+		t.Fatalf("программа подставила неподтверждённые сведения: %s", message)
 	}
 }
 

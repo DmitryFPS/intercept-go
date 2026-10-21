@@ -43,7 +43,7 @@ func (client *Client) restartWorker(parent context.Context) error {
 	client.status = ClientStatus{
 		State: "starting", Title: "Запуск", Detail: "Проверяем базу EAVC и Telegram.",
 		Configured: true, ClientID: cfg.ClientID, ClientName: cfg.ClientName,
-		ClientNumber: cfg.ClientNumber, Version: client.Version,
+		ClientNumber: cfg.ClientNumber, Version: client.Version, Processing: true,
 	}
 	client.mu.Unlock()
 	go func() {
@@ -71,6 +71,7 @@ func (client *Client) stopWorkerLocked() {
 	if done != nil {
 		<-done
 	}
+	client.update(func(status *ClientStatus) { status.Processing = false })
 }
 
 func (client *Client) run(ctx context.Context, cfg config.Client) {

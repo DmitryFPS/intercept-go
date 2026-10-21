@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -37,6 +38,32 @@ type ServerStatus struct {
 	Version      string              `json:"version"`
 	InviteLink   string              `json:"invite_link,omitempty"`
 	Destinations []string            `json:"destinations"`
+	Processing   bool                `json:"processing"`
+}
+
+// StartProcessing запускает приём и доставку вручную по сохранённым настройкам.
+func (server *Server) StartProcessing() error {
+	if _, err := os.Stat(server.configPath()); err != nil {
+		return errors.New("сначала настройте связь с рабочими точками")
+	}
+	return server.restartWorker(server.applicationContext())
+}
+
+// StopProcessing безопасно останавливает приём и доставку, сохраняя очереди.
+func (server *Server) StopProcessing() {
+	server.stopWorker()
+	server.update(func(status *ServerStatus) {
+		status.State = "paused"
+		status.Title = "Обработка остановлена"
+		status.Detail = "Настройки и очереди сохранены. Для продолжения нажмите «Старт»."
+		status.Processing = false
+		status.TransportOK = false
+	})
+}
+
+// RefreshProcessing перечитывает настройки и немедленно переподключает транспорт.
+func (server *Server) RefreshProcessing() error {
+	return server.StartProcessing()
 }
 
 // TransportSetup содержит поля первого экрана настройки транспорта.
@@ -57,6 +84,7 @@ type DestinationSetup struct {
 	Template        string                 `json:"template,omitempty"`
 	Folder          string                 `json:"folder,omitempty"`
 	Network         string                 `json:"network,omitempty"`
+	Protection      string                 `json:"protection,omitempty"`
 	Prefix          string                 `json:"prefix,omitempty"`
 	Username        string                 `json:"username,omitempty"`
 	Password        string                 `json:"password,omitempty"`

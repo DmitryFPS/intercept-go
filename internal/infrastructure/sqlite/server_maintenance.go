@@ -24,6 +24,8 @@ type MaintenanceResult struct {
 	Rules    int
 }
 
+const serverTerminalEventLimit = 200000
+
 // PurgeOld удаляет завершённые задания и старый карантин, не затрагивая
 // ожидающие доставки, настройки точек и действующие маршруты.
 func (store *ServerStore) PurgeOld(
@@ -40,12 +42,20 @@ func (store *ServerStore) PurgeOld(
 	var result MaintenanceResult
 	events, err := tx.ExecContext(ctx, `
 		DELETE FROM received_events
-		WHERE received_at < ?
-		  AND NOT EXISTS (
+		WHERE NOT EXISTS (
 			SELECT 1 FROM delivery_jobs
 			WHERE delivery_jobs.event_id=received_events.event_id
 			  AND delivery_jobs.state='pending'
-		  )`, terminalBefore.UTC().Format(time.RFC3339Nano))
+		  )
+		  AND (received_at < ? OR event_id NOT IN (
+			SELECT candidate.event_id FROM received_events candidate
+			WHERE NOT EXISTS (
+				SELECT 1 FROM delivery_jobs jobs
+				WHERE jobs.event_id=candidate.event_id AND jobs.state='pending'
+			)
+			ORDER BY candidate.received_at DESC, candidate.event_id DESC
+			LIMIT ?
+		  ))`, terminalBefore.UTC().Format(time.RFC3339Nano), serverTerminalEventLimit)
 	if err != nil {
 		return MaintenanceResult{}, fmt.Errorf("очистить завершённые доставки: %w", err)
 	}

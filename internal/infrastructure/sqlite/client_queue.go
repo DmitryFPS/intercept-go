@@ -19,6 +19,8 @@ type ClientQueue struct {
 	db *sql.DB
 }
 
+const clientTerminalRecordLimit = 100000
+
 // ClientStats содержит счётчики, безопасные для экрана оператора.
 type ClientStats struct {
 	Pending      int `json:"pending"`
@@ -27,10 +29,99 @@ type ClientStats struct {
 	Expired      int `json:"expired"`
 }
 
+// QueueEvent описывает сообщение очереди для локального экрана точки.
+// Токены, ключи и транспортные идентификаторы сюда намеренно не входят.
+type QueueEvent struct {
+	EventID  string            `json:"event_id"`
+	Position string            `json:"position"`
+	SourceAt time.Time         `json:"source_at"`
+	StatusAt time.Time         `json:"status_at"`
+	Reason   string            `json:"reason"`
+	Content  string            `json:"content"`
+	Mode     domain.SourceMode `json:"mode"`
+}
+
+// EventsPage возвращает одну страницу выбранного состояния очереди. Содержимое
+// расшифровывается только для локального интерфейса.
+func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, offset int) ([]QueueEvent, int, error) {
+	if limit < 1 || limit > 100 || offset < 0 {
+		return nil, 0, errors.New("неверные параметры страницы очереди")
+	}
+	switch state {
+	case "pending", "uploaded", "acknowledged", "expired":
+	default:
+		return nil, 0, errors.New("неизвестное состояние очереди")
+	}
+	var total int
+	if err := queue.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_events WHERE state=?", state).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("посчитать сообщения очереди: %w", err)
+	}
+	rows, err := queue.db.QueryContext(ctx, `
+		SELECT event_id, payload_json,
+		       COALESCE(expired_at, acknowledged_at, uploaded_at, created_at), last_error
+		FROM client_events WHERE state=?
+		ORDER BY COALESCE(expired_at, acknowledged_at, uploaded_at, created_at) DESC, event_id DESC
+		LIMIT ? OFFSET ?`, state, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("прочитать сообщения очереди: %w", err)
+	}
+	defer rows.Close()
+	result := make([]QueueEvent, 0, limit)
+	for rows.Next() {
+		var eventID, statusText, reason string
+		var protected []byte
+		if err := rows.Scan(&eventID, &protected, &statusText, &reason); err != nil {
+			return nil, 0, fmt.Errorf("прочитать сообщение очереди: %w", err)
+		}
+		plain, err := unprotectDatabaseValue(protected)
+		if err != nil {
+			return nil, 0, fmt.Errorf("открыть сообщение очереди: %w", err)
+		}
+		var event domain.Event
+		if err := json.Unmarshal(plain, &event); err != nil {
+			return nil, 0, fmt.Errorf("разобрать сообщение очереди: %w", err)
+		}
+		statusAt, err := time.Parse(time.RFC3339Nano, statusText)
+		if err != nil {
+			return nil, 0, fmt.Errorf("разобрать время сообщения: %w", err)
+		}
+		result = append(result, QueueEvent{
+			EventID: eventID, Position: event.Position.UnitName, SourceAt: event.SourceAt,
+			StatusAt: statusAt, Reason: reason, Content: event.Content, Mode: event.Mode,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("завершить чтение сообщений очереди: %w", err)
+	}
+	return result, total, nil
+}
+
+// ClearTerminal удаляет подтверждённые либо просроченные сообщения по явной
+// команде оператора. Активные состояния этим методом удалить невозможно.
+func (queue *ClientQueue) ClearTerminal(ctx context.Context, state string) (int, error) {
+	if state != "acknowledged" && state != "expired" {
+		return 0, errors.New("активную очередь очищать запрещено")
+	}
+	result, err := queue.db.ExecContext(ctx, "DELETE FROM client_events WHERE state=?", state)
+	if err != nil {
+		return 0, fmt.Errorf("очистить завершённые сообщения: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("определить число очищенных сообщений: %w", err)
+	}
+	return int(count), nil
+}
+
 // PurgeTerminal удаляет только давно завершённые события. Активная очередь,
 // ожидающая отправки или подтверждения, этим обслуживанием не затрагивается.
 func (queue *ClientQueue) PurgeTerminal(ctx context.Context, before time.Time) (int, error) {
-	result, err := queue.db.ExecContext(ctx, `
+	tx, err := queue.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("начать очистку клиента: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
 		DELETE FROM client_events
 		WHERE (state='acknowledged' AND acknowledged_at IS NOT NULL AND acknowledged_at < ?)
 		   OR (state='expired' AND expired_at IS NOT NULL AND expired_at < ?)`,
@@ -42,7 +133,26 @@ func (queue *ClientQueue) PurgeTerminal(ctx context.Context, before time.Time) (
 	if err != nil {
 		return 0, fmt.Errorf("определить число очищенных событий клиента: %w", err)
 	}
-	return int(count), nil
+	overflow, err := tx.ExecContext(ctx, `
+		DELETE FROM client_events
+		WHERE state IN ('acknowledged','expired')
+		  AND event_id NOT IN (
+			SELECT event_id FROM client_events
+			WHERE state IN ('acknowledged','expired')
+			ORDER BY COALESCE(acknowledged_at, expired_at, created_at) DESC, event_id DESC
+			LIMIT ?
+		  )`, clientTerminalRecordLimit)
+	if err != nil {
+		return 0, fmt.Errorf("ограничить завершённые события клиента: %w", err)
+	}
+	overflowCount, err := overflow.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("определить число ограниченных событий клиента: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("завершить очистку клиента: %w", err)
+	}
+	return int(count + overflowCount), nil
 }
 
 // Compact возвращает SQLite свободные страницы и ограничивает WAL-файл.

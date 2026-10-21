@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$DistRoot
@@ -10,6 +10,7 @@ Set-StrictMode -Version Latest
 $resolvedDist = (Resolve-Path -LiteralPath $DistRoot).Path
 $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EAVCConnectSmoke-" + [guid]::NewGuid().ToString('N'))
 $processes = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+$succeeded = $false
 
 function Wait-LocalApi {
     param(
@@ -21,7 +22,7 @@ function Wait-LocalApi {
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
         if ($Process.HasExited) {
-            throw "Приложение завершилось до запуска локального интерфейса: $($Process.StartInfo.FileName)"
+            throw "Приложение завершилось с кодом $($Process.ExitCode) до запуска локального интерфейса: $($Process.StartInfo.FileName)"
         }
         try {
             Invoke-WebRequest -Uri $BootstrapUri -WebSession $Session -UseBasicParsing -TimeoutSec 2 | Out-Null
@@ -81,17 +82,18 @@ try {
         if ([string]::IsNullOrWhiteSpace([string]$status.version)) {
             throw "Приложение $($case.Exe) вернуло статус без версии"
         }
-		$diagnosticsUri = $case.Uri.Replace('/api/status', '/api/diagnostics')
-		$diagnostics = Invoke-WebRequest -Uri $diagnosticsUri -WebSession $session -UseBasicParsing -TimeoutSec 5
-		if ($diagnostics.Headers['Content-Type'] -notlike 'application/zip*' -or $diagnostics.RawContentLength -lt 100) {
-			throw "Приложение $($case.Exe) не сформировало диагностический ZIP"
-		}
+        $diagnosticsUri = $case.Uri.Replace('/api/status', '/api/diagnostics')
+        $diagnostics = Invoke-WebRequest -Uri $diagnosticsUri -WebSession $session -UseBasicParsing -TimeoutSec 5
+        if ($diagnostics.Headers['Content-Type'] -notlike 'application/zip*' -or $diagnostics.RawContentLength -lt 100) {
+            throw "Приложение $($case.Exe) не сформировало диагностический ZIP"
+        }
         if (-not $process.HasExited) {
             Stop-Process -Id $process.Id -Force
             $process.WaitForExit()
         }
         $processes.Remove($process) | Out-Null
     }
+    $succeeded = $true
     Write-Host 'Smoke-тест переносимых архивов пройден.' -ForegroundColor Green
 }
 finally {
@@ -102,8 +104,12 @@ finally {
     }
     $resolvedSmoke = [System.IO.Path]::GetFullPath($smokeRoot)
     $resolvedTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-    if ($resolvedSmoke.StartsWith($resolvedTemp, [System.StringComparison]::OrdinalIgnoreCase) -and
+    if ($succeeded -and
+        $resolvedSmoke.StartsWith($resolvedTemp, [System.StringComparison]::OrdinalIgnoreCase) -and
         (Split-Path -Leaf $resolvedSmoke).StartsWith('EAVCConnectSmoke-')) {
         Remove-Item -LiteralPath $resolvedSmoke -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    elseif (-not $succeeded) {
+        Write-Warning "Каталог неудачного smoke-теста сохранён: $resolvedSmoke"
     }
 }

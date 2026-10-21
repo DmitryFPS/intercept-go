@@ -28,13 +28,13 @@ var (
 )
 
 const (
-	defaultNetwork = "313"
-	editedMark     = "(отредактировано)"
+	editedMark = "(отредактировано)"
 
 	markerUnit            = "{{UNIT}}"
 	markerNetwork         = "{{NETWORK}}"
 	markerFrequency       = "{{FREQUENCY}}"
 	markerGroupID         = "{{GROUP_ID}}"
+	markerProtection      = "{{PROTECTION}}"
 	markerDate            = "{{DATE}}"
 	markerCorrespondents  = "{{CORRESPONDENTS}}"
 	markerTranscript      = "{{TRANSCRIPT}}"
@@ -61,6 +61,7 @@ type Document struct {
 	Frequency       string
 	GroupCode       string
 	Network         string
+	Protection      string
 	Date            time.Time
 	Operator        string
 	Content         string
@@ -111,7 +112,7 @@ func Build(templatePath string, document Document) ([]byte, error) {
 	writer := zip.NewWriter(&output)
 	for _, name := range order {
 		header := &zip.FileHeader{Name: name, Method: zip.Deflate}
-		header.SetModTime(time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC))
+		header.Modified = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 		part, err := writer.CreateHeader(header)
 		if err != nil {
 			return nil, fmt.Errorf("создать часть DOCX %s: %w", name, err)
@@ -207,7 +208,7 @@ func renderTemplateXML(payload string, document Document) (string, error) {
 		for _, correspondent := range correspondents {
 			description := strings.TrimSpace(correspondent.Description)
 			if description == "" {
-				description = "военнослужащий " + fallback(document.Unit, "—") + ", мужской голос, украинская речь"
+				description = "сведения не указаны"
 			}
 			description = strings.TrimRight(description, ";") + ";"
 			result.WriteString(renderParagraph(paragraph, []styledRun{
@@ -244,11 +245,12 @@ func renderTemplateXML(payload string, document Document) (string, error) {
 		dateText = match[3] + "." + match[2] + "." + match[1]
 	}
 	replacements := map[string]string{
-		markerUnit:      fallback(document.Unit, "н/у"),
-		markerNetwork:   fallback(document.Network, defaultNetwork),
-		markerFrequency: fallback(document.Frequency, "—"),
-		markerGroupID:   fallback(document.GroupCode, "—"),
-		markerDate:      dateText,
+		markerUnit:       fallback(document.Unit, "н/у"),
+		markerNetwork:    fallback(document.Network, "—"),
+		markerFrequency:  fallback(document.Frequency, "—"),
+		markerGroupID:    fallback(document.GroupCode, "—"),
+		markerProtection: fallback(document.Protection, "—"),
+		markerDate:       dateText,
 	}
 	for marker, value := range replacements {
 		var replaced bool
@@ -257,7 +259,14 @@ func renderTemplateXML(payload string, document Document) (string, error) {
 			return "", fmt.Errorf("не удалось заполнить метку Word %s", marker)
 		}
 	}
+	payload = strings.ReplaceAll(payload, "AES-256", escapeXMLText(fallback(document.Protection, "—")))
 	return payload, nil
+}
+
+func escapeXMLText(value string) string {
+	var builder strings.Builder
+	_ = xml.EscapeText(&builder, []byte(value))
+	return builder.String()
 }
 
 func replaceBlock(payload, marker string, render func(string) string) string {

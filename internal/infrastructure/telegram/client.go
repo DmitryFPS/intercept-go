@@ -344,7 +344,7 @@ func (client *Client) DownloadFile(ctx context.Context, filePath string, maxByte
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Telegram вернул HTTP %d при скачивании файла", response.StatusCode)
+		return nil, fmt.Errorf("telegram вернул HTTP %d при скачивании файла", response.StatusCode)
 	}
 	limited := io.LimitReader(response.Body, maxBytes+1)
 	payload, err := io.ReadAll(limited)
@@ -383,7 +383,7 @@ func (client *Client) callJSON(ctx context.Context, method string, input any, ou
 func (client *Client) do(request *http.Request, output any) error {
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("Telegram %s: %s", methodName(request.URL.Path), client.safeError(err))
+		return fmt.Errorf("telegram %s: %s", methodName(request.URL.Path), client.safeError(err))
 	}
 	defer response.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, 4*1024*1024))
@@ -392,7 +392,7 @@ func (client *Client) do(request *http.Request, output any) error {
 	}
 	var result apiResponse
 	if err := json.Unmarshal(payload, &result); err != nil {
-		return fmt.Errorf("Telegram вернул некорректный ответ, HTTP %d", response.StatusCode)
+		return fmt.Errorf("telegram вернул некорректный ответ, HTTP %d", response.StatusCode)
 	}
 	if response.StatusCode != http.StatusOK || !result.OK {
 		description := strings.TrimSpace(result.Description)
@@ -407,7 +407,7 @@ func (client *Client) do(request *http.Request, output any) error {
 			client.sends.blockFor(after + time.Second)
 			return &rateLimitError{after: after, description: description}
 		}
-		return fmt.Errorf("Telegram: %s (код %d)", description, result.ErrorCode)
+		return fmt.Errorf("telegram: %s (код %d)", description, result.ErrorCode)
 	}
 	if output != nil && len(result.Result) != 0 {
 		if err := json.Unmarshal(result.Result, output); err != nil {

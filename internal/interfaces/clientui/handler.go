@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"time"
 
 	"intercept/internal/interfaces/localui"
@@ -33,8 +34,61 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/eavc/search", handler.searchEAVC)
 	mux.HandleFunc("POST /api/eavc/select", handler.selectEAVC)
 	mux.HandleFunc("POST /api/transport/check", handler.checkTransport)
+	mux.HandleFunc("POST /api/control/{action}", handler.control)
 	mux.HandleFunc("GET /api/diagnostics", handler.diagnostics)
-	return securityHeaders(mux)
+	mux.HandleFunc("GET /api/queue/{state}", handler.queueEvents)
+	mux.HandleFunc("DELETE /api/queue/{state}", handler.clearQueueEvents)
+	return localui.SecurityHeaders(mux)
+}
+
+func (handler Handler) queueEvents(writer http.ResponseWriter, request *http.Request) {
+	limit := 20
+	offset := 0
+	if value := request.URL.Query().Get("limit"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			limit = parsed
+		}
+	}
+	if value := request.URL.Query().Get("offset"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			offset = parsed
+		}
+	}
+	page, err := handler.Client.QueueEvents(request.Context(), request.PathValue("state"), limit, offset)
+	if err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось открыть список сообщений.", err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, page)
+}
+
+func (handler Handler) clearQueueEvents(writer http.ResponseWriter, request *http.Request) {
+	count, err := handler.Client.ClearQueueEvents(request.Context(), request.PathValue("state"))
+	if err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось очистить список сообщений.", err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, map[string]int{"removed": count})
+}
+
+func (handler Handler) control(writer http.ResponseWriter, request *http.Request) {
+	var err error
+	switch request.PathValue("action") {
+	case "start":
+		err = handler.Client.StartProcessing()
+	case "stop":
+		handler.Client.StopProcessing()
+	case "refresh":
+		err = handler.Client.RefreshProcessing()
+	default:
+		handler.publicError(writer, http.StatusNotFound, "Неизвестная команда управления.", nil)
+		return
+	}
+	if err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось выполнить команду. Проверьте настройки и повторите попытку.", err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, handler.Client.Status())
 }
 
 func (handler Handler) checkTransport(writer http.ResponseWriter, request *http.Request) {
@@ -128,14 +182,4 @@ func (handler Handler) publicError(writer http.ResponseWriter, status int, messa
 		handler.Client.Logger.Warn("операция интерфейса не выполнена", "message", message, "error", err)
 	}
 	localui.WriteJSON(writer, status, map[string]string{"error": message})
-}
-
-func securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("X-Content-Type-Options", "nosniff")
-		writer.Header().Set("X-Frame-Options", "DENY")
-		writer.Header().Set("Cache-Control", "no-store, max-age=0")
-		writer.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'")
-		next.ServeHTTP(writer, request)
-	})
 }

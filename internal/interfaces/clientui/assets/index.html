@@ -20,8 +20,11 @@
       <article><span id="tgDot" class="dot"></span><div><strong>Передача через Telegram</strong><small id="tgText">Не проверена</small></div></article>
       <article><span id="ackDot" class="dot"></span><div><strong>Подтверждение центра</strong><small id="ackText">Ещё не получено</small></div></article>
     </section>
-    <section class="queue"><div><small>ОЖИДАЮТ ОТПРАВКИ</small><strong id="pending">0</strong></div><div><small>ЗАГРУЖЕНЫ, ЖДУТ ЦЕНТР</small><strong id="uploaded">0</strong></div><div><small>ПОДТВЕРЖДЕНЫ</small><strong id="acknowledged">0</strong></div><div><small>НЕ ОТПРАВЛЕНЫ СТАРШЕ 30 МИНУТ</small><strong id="expired">0</strong></div></section>
+    <section class="queue"><button class="queue-detail" data-queue-state="pending" type="button"><small>ОЖИДАЮТ ОТПРАВКИ</small><strong id="pending">0</strong><span>Посмотреть</span></button><button class="queue-detail" data-queue-state="uploaded" type="button"><small>ЗАГРУЖЕНЫ, ЖДУТ ЦЕНТР</small><strong id="uploaded">0</strong><span>Посмотреть</span></button><button class="queue-detail" data-queue-state="acknowledged" type="button"><small>ПОДТВЕРЖДЕНЫ</small><strong id="acknowledged">0</strong><span>Посмотреть</span></button><button class="queue-detail" data-queue-state="expired" type="button"><small>НЕ ОТПРАВЛЕНЫ СТАРШЕ 30 МИНУТ</small><strong id="expired">0</strong><span>Посмотреть</span></button></section>
     <section class="actions">
+      <button id="controlStart" class="primary" type="button">Старт</button>
+      <button id="controlStop" class="secondary" type="button">Стоп</button>
+      <button id="controlRefresh" class="secondary" type="button">Обновить</button>
       <label class="primary">Загрузить настройки<input id="configFile" type="file" accept="application/json,.json"></label>
       <button id="checkTransport" class="secondary" type="button">Проверить связь с центром</button>
       <a class="secondary" href="/api/diagnostics">Скачать диагностику</a>
@@ -36,6 +39,7 @@
     <p id="message" class="message" role="status" aria-live="polite"></p>
     <footer>Оставьте программу открытой. После восстановления связи отправятся только данные не старше 30 минут.</footer>
   </main>
+  <dialog id="queueDialog" class="expired-dialog"><div class="dialog-head"><div><span class="eyebrow">ЛОКАЛЬНАЯ ОЧЕРЕДЬ</span><h2 id="queueDialogTitle">Сообщения</h2></div><button id="closeQueue" class="secondary" type="button">Закрыть</button></div><p id="queueDialogDescription"></p><div id="queueList" class="expired-list"></div><div class="dialog-pages"><button id="clearQueue" class="danger-action hidden" type="button">Очистить список</button><button id="queuePrev" class="secondary" type="button">Назад</button><span id="queuePage"></span><button id="queueNext" class="secondary" type="button">Дальше</button></div></dialog>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -134,6 +134,9 @@ async function refreshStatus() {
   $('sidebarDot').style.background = status.transport_ok ? '#16a565' : (status.configured ? '#dd941a' : '#8190a5');
   $('transportBadge').textContent = status.transport_ok ? 'Связь работает' : (status.configured ? 'Настроено, нужна связь' : 'Не настроено');
   $('transportBadge').className = `badge ${status.transport_ok ? 'success' : (status.configured ? 'warning' : 'neutral')}`;
+  $('controlStart').disabled = status.processing || !status.configured;
+  $('controlStop').disabled = !status.processing;
+  $('controlRefresh').disabled = !status.configured;
 
   const stats = status.stats || {};
   $('statClients').textContent = stats.clients || 0;
@@ -145,6 +148,23 @@ async function refreshStatus() {
   $('lastReceived').textContent = formatDate(status.last_received);
   $('lastDelivery').textContent = formatDate(status.last_delivery);
 }
+
+async function controlProcessing(action, button, busyText) {
+  setButtonBusy(button, true, busyText);
+  try {
+    await post(`/api/control/${action}`, {});
+    await refreshStatus();
+    notify(action === 'stop' ? 'Обработка остановлена. Очереди сохранены.' : 'Команда выполнена.', true);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+}
+
+$('controlStart').addEventListener('click', event => controlProcessing('start', event.currentTarget, 'Запускаем…'));
+$('controlStop').addEventListener('click', event => controlProcessing('stop', event.currentTarget, 'Останавливаем…'));
+$('controlRefresh').addEventListener('click', event => controlProcessing('refresh', event.currentTarget, 'Обновляем…'));
 
 async function loadOverview() {
   const results = await Promise.all([
@@ -272,6 +292,7 @@ function showDestinationDialog(id = '') {
   form.elements.template.value = item?.template || templateDefaults.word_path;
   form.elements.folder.value = item?.folder || '';
   form.elements.network.value = item?.network || '';
+  form.elements.protection.value = item?.protection || 'AES-256';
   form.elements.prefix.value = item?.prefix || '';
   $('telegramTemplateMarkers').textContent = `Обязательные метки: ${templateDefaults.telegram_markers.join(', ')}`;
   $('wordTemplateMarkers').textContent = templateDefaults.word_markers.join(', ');
@@ -350,6 +371,7 @@ $('destinationForm').addEventListener('submit', async event => {
       template: data.get('template'),
       folder: data.get('folder'),
       network: data.get('network'),
+      protection: data.get('protection'),
       prefix: data.get('prefix'),
       username: data.get('username'),
       password: data.get('password')
@@ -383,7 +405,7 @@ function renderClients() {
     <article class="entity-card">
       <div class="entity-card-head"><div><h3>${escapeHTML(client.name)}</h3><p>Точка № ${escapeHTML(client.number)}</p></div><span class="badge ${client.active ? 'success' : 'neutral'}">${client.active ? 'Активна' : 'Отключена'}</span></div>
       <dl class="entity-meta"><dt>Бот</dt><dd>${escapeHTML(client.bot || 'Не указан')}</dd><dt>Тема обмена</dt><dd>${escapeHTML(client.thread_id)}</dd></dl>
-      <div class="entity-actions"><a class="button ghost" href="/api/clients/${encodeURIComponent(client.id)}/config">Скачать файл настроек</a></div>
+      <div class="entity-actions"><a class="button primary" href="/api/clients/${encodeURIComponent(client.id)}/package">Скачать готовую программу</a><a class="button ghost" href="/api/clients/${encodeURIComponent(client.id)}/config">Скачать новые настройки JSON</a></div>
     </article>`).join('');
 }
 

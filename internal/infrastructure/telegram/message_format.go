@@ -2,12 +2,15 @@ package telegram
 
 import (
 	"crypto/sha256"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"intercept/internal/domain"
 )
@@ -17,8 +20,10 @@ var legacyDatePrefix = regexp.MustCompile(`^\s*(\d{4})-(\d{2})-(\d{2})`)
 // DefaultMessageTemplate — редактируемый шаблон сообщения получателя.
 // Служебная пометка проверки и номер части длинного сообщения добавляются
 // программой снаружи, поэтому их невозможно случайно удалить из шаблона.
+const DefaultProtection = "AES-256"
+
 const DefaultMessageTemplate = `Радиосеть <b>{{UNIT}}</b> - {{NETWORK}}
-{{FREQUENCY}} МГц (ID {{GROUP_ID}} AES-256)
+{{FREQUENCY}} МГц (ID {{GROUP_ID}} {{PROTECTION}})
 {{DATE}}г.
 
 {{CORRESPONDENTS}}
@@ -27,7 +32,14 @@ const DefaultMessageTemplate = `Радиосеть <b>{{UNIT}}</b> - {{NETWORK}}
 
 var requiredMessageMarkers = []string{
 	"{{UNIT}}", "{{NETWORK}}", "{{FREQUENCY}}", "{{GROUP_ID}}",
-	"{{DATE}}", "{{CORRESPONDENTS}}", "{{TRANSCRIPT}}",
+	"{{PROTECTION}}", "{{DATE}}", "{{CORRESPONDENTS}}", "{{TRANSCRIPT}}",
+}
+
+const maxTelegramMessageRunes = 4096
+
+var allowedTemplateTags = map[string]bool{
+	"b": true, "strong": true, "i": true, "em": true, "u": true, "ins": true,
+	"s": true, "strike": true, "del": true, "code": true, "pre": true, "blockquote": true,
 }
 
 // MessageTemplateMarkers возвращает обязательные метки для подсказки в интерфейсе.
@@ -52,7 +64,39 @@ func ValidateMessageTemplate(template string) error {
 		sort.Strings(missing)
 		return fmt.Errorf("в шаблоне Telegram отсутствуют обязательные метки: %s", strings.Join(missing, ", "))
 	}
+	if len([]rune(template)) > 3500 {
+		return errors.New("шаблон Telegram слишком длинный")
+	}
+	decoder := xml.NewDecoder(strings.NewReader("<root>" + template + "</root>"))
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("в шаблоне Telegram нарушено HTML-оформление: %w", err)
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local == "root" {
+			continue
+		}
+		if !allowedTemplateTags[start.Name.Local] || len(start.Attr) > 0 {
+			return fmt.Errorf("в шаблоне Telegram недопустимый тег <%s> или его атрибуты", start.Name.Local)
+		}
+	}
 	return nil
+}
+
+// MigrateMessageTemplate переводит старый редактируемый шаблон на явную метку
+// защиты. Значение защиты хранится в настройках получателя, а не в коде макета.
+func MigrateMessageTemplate(template string) string {
+	if strings.Contains(template, "{{PROTECTION}}") {
+		return template
+	}
+	if strings.Contains(template, "AES-256") {
+		return strings.Replace(template, "AES-256", "{{PROTECTION}}", 1)
+	}
+	return strings.Replace(template, "{{GROUP_ID}}", "{{GROUP_ID}} {{PROTECTION}}", 1)
 }
 
 // FormatEvent формирует сообщение без дополнительного обозначения радиосети.
@@ -75,7 +119,7 @@ func FormatEventWithTemplate(event domain.Event, network, template string, revie
 	if len(notes) > 0 {
 		delivery.Decision.Note = notes[0]
 	}
-	return formatBlock(event, block, delivery, network, template, "")
+	return formatBlock(event, block, delivery, network, DefaultProtection, template, "")
 }
 
 // combinedEventBlock сохраняет одну запись EAVC одним сообщением: общий список
@@ -112,29 +156,19 @@ func combinedEventBlock(event domain.Event) domain.ContentBlock {
 	}
 }
 
-func formatEventChunks(event domain.Event, delivery domain.PlannedDelivery, network, template string) []string {
-	return formatBlockChunks(event, combinedEventBlock(event), delivery, network, template)
+func formatEventChunks(event domain.Event, delivery domain.PlannedDelivery, network, protection, template string) []string {
+	message := formatBlock(event, combinedEventBlock(event), delivery, network, protection, template, "")
+	parts := splitHTMLMessage(message, maxTelegramMessageRunes-48)
+	if len(parts) <= 1 {
+		return parts
+	}
+	for index := range parts {
+		parts[index] += fmt.Sprintf("\n\n(часть %d из %d)", index+1, len(parts))
+	}
+	return parts
 }
 
-func formatBlockChunks(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network, template string) []string {
-	parts := splitRunes(block.Text, 3000)
-	if len(parts) == 0 {
-		return nil
-	}
-	chunks := make([]string, 0, len(parts))
-	for index, part := range parts {
-		suffix := ""
-		if len(parts) > 1 {
-			suffix = fmt.Sprintf("\n\n(часть %d из %d)", index+1, len(parts))
-		}
-		copyBlock := block
-		copyBlock.Text = part
-		chunks = append(chunks, formatBlock(event, copyBlock, delivery, network, template, suffix))
-	}
-	return chunks
-}
-
-func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network, template, suffix string) string {
+func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network, protection, template, suffix string) string {
 	var builder strings.Builder
 	if delivery.Decision.Action == domain.RouteReview {
 		builder.WriteString("🔴 НОВОЕ ИЛИ ОШИБОЧНОЕ ПОДРАЗДЕЛЕНИЕ\n")
@@ -155,7 +189,7 @@ func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.
 	for _, correspondent := range correspondents {
 		description := strings.TrimSpace(correspondent.Description)
 		if description == "" {
-			description = "военнослужащий " + fallbackText(event.Position.UnitName, "—") + ", мужской голос, украинская речь"
+			description = "сведения не указаны"
 		}
 		description = strings.TrimRight(description, ";") + ";"
 		correspondentText.WriteString(fmt.Sprintf("%d. «<b>", correspondent.Number))
@@ -187,6 +221,7 @@ func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.
 		"{{NETWORK}}":        escapeText(fallbackText(network, "—")),
 		"{{FREQUENCY}}":      escapeText(fallbackText(event.Position.Frequency, "—")),
 		"{{GROUP_ID}}":       escapeText(fallbackText(event.Position.GroupCode, "—")),
+		"{{PROTECTION}}":     escapeText(fallbackText(protection, "—")),
 		"{{DATE}}":           eventDate(event),
 		"{{CORRESPONDENTS}}": strings.TrimRight(correspondentText.String(), "\n"),
 		"{{TRANSCRIPT}}":     transcript.String(),
@@ -200,6 +235,89 @@ func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.
 	return builder.String()
 }
 
+type htmlMessageToken struct {
+	raw   string
+	name  string
+	close bool
+}
+
+func splitHTMLMessage(message string, limit int) []string {
+	tokens := tokenizeHTMLMessage(strings.TrimSpace(message))
+	if len([]rune(message)) <= limit {
+		return []string{strings.TrimSpace(message)}
+	}
+	var chunks []string
+	var current strings.Builder
+	var stack []string
+	for _, token := range tokens {
+		nextStack := append([]string(nil), stack...)
+		if token.name != "" {
+			if token.close {
+				if len(nextStack) > 0 {
+					nextStack = nextStack[:len(nextStack)-1]
+				}
+			} else {
+				nextStack = append(nextStack, token.name)
+			}
+		}
+		if current.Len() > 0 && runeLen(current.String()+token.raw+closingTags(nextStack)) > limit {
+			chunks = append(chunks, strings.TrimSpace(current.String()+closingTags(stack)))
+			current.Reset()
+			current.WriteString(openingTags(stack))
+		}
+		current.WriteString(token.raw)
+		stack = nextStack
+	}
+	if tail := strings.TrimSpace(current.String() + closingTags(stack)); tail != "" {
+		chunks = append(chunks, tail)
+	}
+	return chunks
+}
+
+func tokenizeHTMLMessage(message string) []htmlMessageToken {
+	var result []htmlMessageToken
+	for len(message) > 0 {
+		if message[0] == '<' {
+			if end := strings.IndexByte(message, '>'); end >= 0 {
+				raw := message[:end+1]
+				name := strings.Trim(strings.TrimSuffix(strings.TrimPrefix(raw, "<"), ">"), " /")
+				result = append(result, htmlMessageToken{raw: raw, name: name, close: strings.HasPrefix(raw, "</")})
+				message = message[end+1:]
+				continue
+			}
+		}
+		if message[0] == '&' {
+			if end := strings.IndexByte(message, ';'); end >= 0 && end < 16 {
+				result = append(result, htmlMessageToken{raw: message[:end+1]})
+				message = message[end+1:]
+				continue
+			}
+		}
+		_, size := utf8.DecodeRuneInString(message)
+		result = append(result, htmlMessageToken{raw: message[:size]})
+		message = message[size:]
+	}
+	return result
+}
+
+func openingTags(stack []string) string {
+	var builder strings.Builder
+	for _, name := range stack {
+		builder.WriteString("<" + name + ">")
+	}
+	return builder.String()
+}
+
+func closingTags(stack []string) string {
+	var builder strings.Builder
+	for index := len(stack) - 1; index >= 0; index-- {
+		builder.WriteString("</" + stack[index] + ">")
+	}
+	return builder.String()
+}
+
+func runeLen(value string) int { return len([]rune(value)) }
+
 func eventDate(event domain.Event) string {
 	if match := legacyDatePrefix.FindStringSubmatch(event.Source.UpdatedAt); match != nil {
 		return match[3] + "." + match[2] + "." + match[1]
@@ -212,30 +330,6 @@ func eventDate(event domain.Event) string {
 		date = event.CreatedAt
 	}
 	return date.In(time.FixedZone("MSK", 3*60*60)).Format("02.01.2006")
-}
-
-func splitRunes(value string, limit int) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	runes := []rune(value)
-	var result []string
-	for len(runes) > limit {
-		cut := limit
-		for cut > limit/2 && runes[cut] != '\n' {
-			cut--
-		}
-		if cut <= limit/2 {
-			cut = limit
-		}
-		result = append(result, strings.TrimSpace(string(runes[:cut])))
-		runes = runes[cut:]
-	}
-	if tail := strings.TrimSpace(string(runes)); tail != "" {
-		result = append(result, tail)
-	}
-	return result
 }
 
 func hashChunks(chunks []string) string {
