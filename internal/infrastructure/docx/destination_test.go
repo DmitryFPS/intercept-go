@@ -47,11 +47,11 @@ func TestBuildMatchesProvidedReferenceDocumentXML(t *testing.T) {
 		"Радиосеть ", "2 об 3 обр ОсН НГ", " - 39",
 		"159.5750 МГц (гр. ID 3 AES-256)", "21.08.2026г.",
 		"1.«", "Марс, Шило", "» (id: 783693) – сведения не указаны;",
-		"15.«", "Швидкий, Лоза", "» (id: 17384) – сведения не указаны;",
-		"03:51", "/1/ ... Марсу на прием.", "03:52", "/15/ Швидкий на приеме, что?",
+		"2.«", "Швидкий, Лоза", "» (id: 17384) – сведения не указаны;",
+		"03:51", "/1/ ... Марсу на прием.", "03:52", "/2/ Швидкий на приеме, что?",
 		"/1/ ... все нормально ... чтокаешь?",
-		"/15/ 5-ые сутки них*я не жрал, потому что воды нихр*на нет, пришлите нам 10 литров воды, пожалуйста, я прошу.",
-		"/15/ Ну скидывали ... что нам той воды.",
+		"/2/ 5-ые сутки них*я не жрал, потому что воды нихр*на нет, пришлите нам 10 литров воды, пожалуйста, я прошу.",
+		"/2/ Ну скидывали ... что нам той воды.",
 		"Дежурный оператор: ", "Позывной", "Старший смены МГ ", "1", ": ", "Позывной",
 	}
 	if runs := documentRuns(t, documentXML(t, path)); !reflect.DeepEqual(runs, wantRuns) {
@@ -77,9 +77,9 @@ func TestEmbeddedDefaultTemplateMatchesReleaseAsset(t *testing.T) {
 	}
 }
 
-// Описание карточки EAVC и её настоящий номер должны попадать в Word без
-// подмены на порядковые 1, 2, 3.
-func TestBuildUsesEAVCCallsignNumberAndDescription(t *testing.T) {
+// Описание карточки EAVC сохраняется, а её внутренний номер не должен
+// попадать в итоговый документ.
+func TestBuildUsesLocalCallsignNumberAndEAVCDescription(t *testing.T) {
 	t.Parallel()
 	template := filepath.Join("..", "..", "..", "assets", "word_template.docx")
 	payload, err := Build(template, Document{
@@ -100,8 +100,8 @@ func TestBuildUsesEAVCCallsignNumberAndDescription(t *testing.T) {
 	}
 	runs := documentRuns(t, documentXML(t, path))
 	for _, expected := range []string{
-		"6.«", "Торба", "» (id: 52325) – Старший группы Гольназ, мужской голос, украинская речь;",
-		"17:30", "/6/ Монако Торбе на связь.",
+		"1.«", "Торба", "» (id: 52325) – Старший группы Гольназ, мужской голос, украинская речь;",
+		"17:30", "/1/ Монако Торбе на связь.",
 	} {
 		if !slices.Contains(runs, expected) {
 			t.Fatalf("в Word отсутствует %q: %#v", expected, runs)

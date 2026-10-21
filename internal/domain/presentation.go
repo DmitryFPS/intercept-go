@@ -3,7 +3,6 @@ package domain
 import (
 	"fmt"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -16,8 +15,8 @@ var (
 )
 
 // PresentedCorrespondent содержит ровно те сведения, которые показываются
-// перед текстом перехвата. Number — номер карточки позывного в EAVC, а не
-// искусственная нумерация по порядку появления в сообщении.
+// перед текстом перехвата. Number — локальный порядковый номер корреспондента
+// в текущем перехвате. Внутренний номер карточки EAVC наружу не выводится.
 type PresentedCorrespondent struct {
 	Number      int
 	Code        string
@@ -48,27 +47,12 @@ func PresentIntercept(content string, callsigns []Callsign) ([]PresentedCorrespo
 	}
 
 	codes := ExtractCorrespondentCodes(content)
-	usedNumbers := make(map[int]bool)
-	for _, code := range codes {
-		if number := int(byCode[NormalizeCorrespondentCode(code)].Number); number > 0 {
-			usedNumbers[number] = true
-		}
-	}
-	nextNumber := 1
 	numbers := make(map[string]int, len(codes))
 	correspondents := make([]PresentedCorrespondent, 0, len(codes))
-	for _, rawCode := range codes {
+	for index, rawCode := range codes {
 		code := NormalizeCorrespondentCode(rawCode)
 		callsign := byCode[code]
-		number := int(callsign.Number)
-		if number <= 0 {
-			for usedNumbers[nextNumber] {
-				nextNumber++
-			}
-			number = nextNumber
-			usedNumbers[number] = true
-			nextNumber++
-		}
+		number := index + 1
 		numbers[code] = number
 		label := strings.TrimSpace(callsign.Label)
 		if label == "" {
@@ -82,9 +66,6 @@ func PresentIntercept(content string, callsigns []Callsign) ([]PresentedCorrespo
 			Number: number, Code: rawCode, Label: label, Description: description,
 		})
 	}
-	sort.SliceStable(correspondents, func(left, right int) bool {
-		return correspondents[left].Number < correspondents[right].Number
-	})
 
 	lines := make([]PresentedLine, 0)
 	for _, raw := range strings.Split(normalizeBlockText(content), "\n") {
@@ -115,9 +96,6 @@ func PresentIntercept(content string, callsigns []Callsign) ([]PresentedCorrespo
 }
 
 func richerCallsign(candidate, current Callsign) bool {
-	if candidate.Number > 0 && current.Number <= 0 {
-		return true
-	}
 	if strings.TrimSpace(candidate.Description) != "" && strings.TrimSpace(current.Description) == "" {
 		return true
 	}
