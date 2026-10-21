@@ -83,41 +83,63 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 	if blocks == nil {
 		blocks = domain.SplitContentBlocks(event.Content)
 	}
+	content := strings.TrimSpace(event.Content)
+	if content == "" {
+		parts := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			if text := strings.TrimSpace(block.Text); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		content = strings.Join(parts, "\n\n")
+	}
+	callsigns := make([]domain.Callsign, 0)
+	for _, block := range blocks {
+		callsigns = append(callsigns, block.Callsigns...)
+	}
 	sourceKey := strings.TrimSpace(event.Source.UUID)
 	if sourceKey == "" {
 		sourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
 	}
 	prefix := sourceKey + "|"
-	present := make(map[string]bool, len(blocks))
-	for _, block := range blocks {
-		key := prefix + block.Key
-		present[key] = true
-		digest := digestText(block.Text)
-		record, exists := current.Blocks[key]
-		if !exists {
-			current.LastNumber++
-			record.Number = current.LastNumber
+	key := prefix + "record"
+	record, exists := current.Blocks[key]
+	legacyMigration := false
+	if !exists {
+		for legacyKey, legacyRecord := range current.Blocks {
+			if !strings.HasPrefix(legacyKey, prefix) || legacyKey == key {
+				continue
+			}
+			if !legacyMigration || legacyRecord.Number < record.Number {
+				record = legacyRecord
+				legacyMigration = true
+			}
 		}
-		date := event.SourceAt
-		if date.IsZero() {
-			date = event.ObservedAt
-		}
-		document := Document{
-			Unit: event.Position.UnitName, Frequency: event.Position.Frequency,
-			GroupCode: event.Position.GroupCode, Network: destination.Network, Protection: destination.Protection,
-			Date: date, SourceUpdatedAt: event.Source.UpdatedAt, Operator: event.UpdatedBy, Content: block.Text,
-			Callsigns: block.Callsigns,
-		}
-		render := renderDigest(document)
-		filename := destination.documentName(record.Number, event.Position.UnitName)
-		target, err := safeDestinationPath(destination.Folder, filename)
-		if err != nil {
-			return err
-		}
-		if exists && ((record.Render != "" && record.Render == render) ||
-			(record.Render == "" && record.Hash == digest && record.Filename == filename)) {
-			continue
-		}
+	}
+	if !exists && !legacyMigration {
+		current.LastNumber++
+		record.Number = current.LastNumber
+	}
+	digest := digestText(content)
+	date := event.SourceAt
+	if date.IsZero() {
+		date = event.ObservedAt
+	}
+	document := Document{
+		Unit: event.Position.UnitName, Frequency: event.Position.Frequency,
+		GroupCode: event.Position.GroupCode, Network: destination.Network, Protection: destination.Protection,
+		Date: date, SourceUpdatedAt: event.Source.UpdatedAt, Operator: event.UpdatedBy, Content: content,
+		Callsigns: callsigns,
+	}
+	render := renderDigest(document)
+	filename := destination.documentName(record.Number, event.Position.UnitName)
+	target, err := safeDestinationPath(destination.Folder, filename)
+	if err != nil {
+		return err
+	}
+	unchanged := exists && ((record.Render != "" && record.Render == render) ||
+		(record.Render == "" && record.Hash == digest && record.Filename == filename))
+	if !unchanged {
 		document.Edited = record.Edited || (exists && record.Render != "" && record.Render != render)
 		if document.Edited {
 			document.EditedAt = event.SourceAt
@@ -125,9 +147,9 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 				document.EditedAt = time.Now().UTC()
 			}
 		}
-		payload, err := Build(destination.TemplatePath, document)
-		if err != nil {
-			return err
+		payload, buildErr := Build(destination.TemplatePath, document)
+		if buildErr != nil {
+			return buildErr
 		}
 		if err := writeAtomic(ctx, target, payload); err != nil {
 			return err
@@ -135,26 +157,18 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if record.Filename != "" && record.Filename != filename {
-			if previous, pathErr := safeDestinationPath(destination.Folder, record.Filename); pathErr == nil {
-				_ = os.Remove(previous)
-			}
-		}
 		record.Hash = digest
 		record.Render = render
 		record.Filename = filename
 		record.Edited = document.Edited
 		record.UpdatedAt = time.Now().UTC()
-		current.Blocks[key] = record
-		if err := saveState(destination.StatePath, current); err != nil {
-			return err
-		}
 	}
+	current.Blocks[key] = record
 	for key, record := range current.Blocks {
-		if !strings.HasPrefix(key, prefix) || present[key] {
+		if !strings.HasPrefix(key, prefix) || key == prefix+"record" {
 			continue
 		}
-		if record.Filename != "" {
+		if record.Filename != "" && record.Filename != filename {
 			if obsolete, pathErr := safeDestinationPath(destination.Folder, record.Filename); pathErr == nil {
 				_ = os.Remove(obsolete)
 			}

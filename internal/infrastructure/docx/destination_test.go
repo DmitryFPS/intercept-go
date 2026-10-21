@@ -109,8 +109,9 @@ func TestBuildUsesLocalCallsignNumberAndEAVCDescription(t *testing.T) {
 	}
 }
 
-// Каждый временной блок перехвата создаёт один Word-документ, а повторная обработка не порождает копий.
-func TestDestinationBuildsOneDocumentPerTimeBlockWithoutDuplicates(t *testing.T) {
+// Все временные блоки одного перехвата остаются в одном Word-документе, а
+// повторная обработка не порождает копий.
+func TestDestinationBuildsOneDocumentForAllTimeBlocksWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -133,11 +134,11 @@ func TestDestinationBuildsOneDocumentPerTimeBlockWithoutDuplicates(t *testing.T)
 		t.Fatalf("duplicate deliver: %v", err)
 	}
 	files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
-	if len(files) != 2 {
-		t.Fatalf("ожидалось два документа без дублей: %#v", files)
+	if len(files) != 1 {
+		t.Fatalf("ожидался один документ без дублей: %#v", files)
 	}
 	numbers, err := StateNumbers(destination.StatePath)
-	if err != nil || len(numbers) != 2 || numbers[0] != 1 || numbers[1] != 2 {
+	if err != nil || len(numbers) != 1 || numbers[0] != 1 {
 		t.Fatalf("номера: %#v %v", numbers, err)
 	}
 	archive, err := zip.OpenReader(files[0])
@@ -152,9 +153,96 @@ func TestDestinationBuildsOneDocumentPerTimeBlockWithoutDuplicates(t *testing.T)
 		reader, _ := file.Open()
 		payload, _ := io.ReadAll(reader)
 		reader.Close()
-		if !strings.Contains(string(payload), "1 мб 155 омбр") {
-			t.Fatal("подразделение не попало в документ")
+		for _, expected := range []string{"1 мб 155 омбр", "10:00", "Первый", "10:05", "Второй"} {
+			if !strings.Contains(string(payload), expected) {
+				t.Fatalf("в объединённый документ не попало %q", expected)
+			}
 		}
+	}
+}
+
+func TestDestinationKeepsSharedLocalNumbersAcrossTimeBlocks(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	destination := Destination{
+		TemplatePath: template, Folder: filepath.Join(root, "out"),
+		StatePath: filepath.Join(root, "state", "word.json"), Network: "313", Prefix: "СТНД",
+	}
+	event := domain.Event{
+		Source:   domain.SourceRecord{ID: 3, UUID: "source-multi-time"},
+		SourceAt: time.Date(2026, 10, 21, 11, 16, 0, 0, time.UTC),
+		Position: domain.Position{UnitName: "1 мб 155 омбр", Frequency: "100.100", GroupCode: "A1"},
+		Content:  "11.02\n-Первый доклад. (52325)\n-Ответ. (52345)\n11.09\n-Повтор. (52325)\n11.16\n-Подтверждаю. (52345)",
+		Blocks: []domain.ContentBlock{
+			{Key: "11.02", Text: "11.02\n-Первый доклад. (52325)\n-Ответ. (52345)", Callsigns: []domain.Callsign{
+				{Number: 25, Code: "52345", Label: "Монако"},
+				{Number: 26, Code: "52325", Label: "Торба"},
+			}},
+			{Key: "11.09", Text: "11.09\n-Повтор. (52325)", Callsigns: []domain.Callsign{{Number: 26, Code: "52325", Label: "Торба"}}},
+			{Key: "11.16", Text: "11.16\n-Подтверждаю. (52345)", Callsigns: []domain.Callsign{{Number: 25, Code: "52345", Label: "Монако"}}},
+		},
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
+	if len(files) != 1 {
+		t.Fatalf("вместо одного документа созданы: %#v", files)
+	}
+	runs := documentRuns(t, documentXML(t, files[0]))
+	for _, expected := range []string{
+		"1.«", "Торба", "2.«", "Монако",
+		"11:02", "/1/ Первый доклад.", "/2/ Ответ.",
+		"11:09", "/1/ Повтор.", "11:16", "/2/ Подтверждаю.",
+	} {
+		if !slices.Contains(runs, expected) {
+			t.Fatalf("в объединённом Word нет %q: %#v", expected, runs)
+		}
+	}
+}
+
+func TestDestinationMigratesLegacyBlockDocumentsWithoutEditedMarker(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	folder := filepath.Join(root, "out")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(root, "state", "word.json")
+	legacy := state{LastNumber: 8, Blocks: map[string]blockRecord{
+		"legacy-source|10.00": {Number: 7, Filename: "old-7.docx", Render: "old"},
+		"legacy-source|10.05": {Number: 8, Filename: "old-8.docx", Render: "old"},
+	}}
+	if err := saveState(statePath, legacy); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"old-7.docx", "old-8.docx"} {
+		if err := os.WriteFile(filepath.Join(folder, name), []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	destination := Destination{TemplatePath: template, Folder: folder, StatePath: statePath, Network: "313", Prefix: "СТНД"}
+	event := domain.Event{
+		Source: domain.SourceRecord{UUID: "legacy-source"}, Position: domain.Position{UnitName: "позиция"},
+		Content: "10.00\n-Первый\n10.05\n-Второй", SourceAt: time.Now(),
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := filepath.Glob(filepath.Join(folder, "*.docx"))
+	if len(files) != 1 || !strings.HasPrefix(filepath.Base(files[0]), "СТНД7 ") {
+		t.Fatalf("миграция не сохранила первый номер: %#v", files)
+	}
+	if xml := documentXML(t, files[0]); strings.Contains(xml, "(отредактировано") {
+		t.Fatal("техническое объединение ошибочно помечено как редакция оператора")
+	}
+	numbers, err := StateNumbers(statePath)
+	if err != nil || !reflect.DeepEqual(numbers, []int{7}) {
+		t.Fatalf("состояние после миграции: %#v, %v", numbers, err)
 	}
 }
 
@@ -266,8 +354,8 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
-	if len(before) != 2 {
-		t.Fatalf("до правки ожидалось два документа: %#v", before)
+	if len(before) != 1 {
+		t.Fatalf("до правки ожидался один документ: %#v", before)
 	}
 	firstName := filepath.Base(before[0])
 	event.SourceAt = time.Date(2026, 10, 19, 6, 47, 31, 0, time.UTC)
