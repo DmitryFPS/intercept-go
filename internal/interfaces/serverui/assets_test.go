@@ -84,6 +84,7 @@ func TestTelegramGuideStaysAvailableAndComplete(t *testing.T) {
 		"assets/telegram-guide/aero-topics.png",
 		"assets/telegram-guide/aero-general-wide.png",
 		"assets/telegram-guide/sample-message.png",
+		"assets/telegram-guide/botfather-create.png",
 	} {
 		content, err := assets.ReadFile(name)
 		if err != nil {

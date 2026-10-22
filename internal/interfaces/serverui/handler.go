@@ -21,6 +21,7 @@ import (
 //go:embed assets/telegram-guide/aero-topics.png
 //go:embed assets/telegram-guide/aero-general-wide.png
 //go:embed assets/telegram-guide/sample-message.png
+//go:embed assets/telegram-guide/botfather-create.png
 var assets embed.FS
 
 // Handler предоставляет локальному экрану только административные сценарии сервера.
