@@ -16,7 +16,11 @@ import (
 	"intercept/internal/runner"
 )
 
-//go:embed assets/*
+//go:embed assets/*.html assets/*.css assets/*.js
+//go:embed assets/telegram-guide/transport-topics.png
+//go:embed assets/telegram-guide/aero-topics.png
+//go:embed assets/telegram-guide/aero-general-wide.png
+//go:embed assets/telegram-guide/sample-message.png
 var assets embed.FS
 
 // Handler предоставляет локальному экрану только административные сценарии сервера.

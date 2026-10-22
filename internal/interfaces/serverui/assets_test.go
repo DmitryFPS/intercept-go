@@ -79,6 +79,20 @@ func TestTelegramGuideStaysAvailableAndComplete(t *testing.T) {
 	if _, err := assets.ReadFile("assets/telegram-guide.css"); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{
+		"assets/telegram-guide/transport-topics.png",
+		"assets/telegram-guide/aero-topics.png",
+		"assets/telegram-guide/aero-general-wide.png",
+		"assets/telegram-guide/sample-message.png",
+	} {
+		content, err := assets.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read telegram guide image %s: %v", name, err)
+		}
+		if len(content) == 0 {
+			t.Fatalf("telegram guide image %s is empty", name)
+		}
+	}
 	if !strings.Contains(string(index), `href="/telegram-guide.html"`) {
 		t.Error("на странице связи отсутствует ссылка на полную Telegram-инструкцию")
 	}
