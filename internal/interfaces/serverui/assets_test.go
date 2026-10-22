@@ -67,6 +67,32 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	}
 }
 
+func TestHistoryColumnLabelsMatchOperatorScreens(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assets.ReadFile("assets/history.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	javascript := string(application)
+	if strings.Contains(javascript, "clients: ['Рабочая точка', 'Состояние', 'Начало сбоя']") {
+		t.Error("для карточки рабочих точек не нужны заголовки колонок")
+	}
+	if !strings.Contains(javascript, "received: ['Подразделение', 'Рабочая точка', 'Получено центром']") {
+		t.Error("в истории полученных пакетов отсутствуют понятные заголовки колонок")
+	}
+	css := string(styles)
+	grid := "grid-template-columns: minmax(190px, 1.3fr) minmax(220px, 1fr) minmax(165px, .7fr);"
+	if strings.Count(css, grid) != 2 {
+		t.Error("заголовки и строки истории должны использовать одну и ту же сетку колонок")
+	}
+	if !strings.Contains(css, ".history-row time { text-align: right; white-space: nowrap; }") {
+		t.Error("время истории должно быть выровнено по правой границе своей колонки")
+	}
+}
+
 func TestTelegramGuideStaysAvailableAndComplete(t *testing.T) {
 	index, err := assets.ReadFile("assets/index.html")
 	if err != nil {

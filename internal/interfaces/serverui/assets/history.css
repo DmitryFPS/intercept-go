@@ -42,15 +42,16 @@
 .history-filter-actions .muted { margin-left: auto; }
 .history-columns {
   display: grid;
-  grid-template-columns: minmax(190px, 1.3fr) minmax(170px, 1fr) auto;
+  grid-template-columns: minmax(190px, 1.3fr) minmax(220px, 1fr) minmax(165px, .7fr);
   gap: 8px 16px;
-  padding: 0 15px 7px;
+  padding: 0 16px 7px;
   color: #6f7d92;
   font-size: 10px;
   font-weight: 850;
   letter-spacing: .06em;
   text-transform: uppercase;
 }
+.history-columns span:last-child { text-align: right; }
 .health-list,
 .history-list { display: grid; gap: 9px; }
 .health-card,
@@ -77,10 +78,11 @@
 .health-card dd { margin: 0; font-weight: 650; }
 .history-row {
   display: grid;
-  grid-template-columns: minmax(190px, 1.3fr) minmax(170px, 1fr) auto;
+  grid-template-columns: minmax(190px, 1.3fr) minmax(220px, 1fr) minmax(165px, .7fr);
   gap: 8px 16px;
   align-items: center;
 }
+.history-row time { text-align: right; white-space: nowrap; }
 .history-row p {
   grid-column: 1 / -1;
   margin: 0;
