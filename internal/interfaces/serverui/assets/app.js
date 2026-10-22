@@ -134,8 +134,6 @@ document.querySelectorAll('.sidebar nav button').forEach(button => {
   });
 });
 
-$('openHelp').addEventListener('click', () => openDialog('helpDialog'));
-
 async function refreshStatus() {
   status = await request('/api/status');
   const stateClass = ['running', 'error', 'waiting'].includes(status.state) ? status.state : 'waiting';
