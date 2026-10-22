@@ -203,6 +203,8 @@ function prepareHistoryFilters(kind) {
   $('historyClientField').classList.toggle('hidden', kind === 'rejected');
   $('historyDestinationField').classList.toggle('hidden', !['pending', 'delivered', 'expired'].includes(kind));
   $('historyQualityField').classList.toggle('hidden', kind !== 'clients');
+  $('historyFromField').classList.toggle('hidden', kind === 'clients');
+  $('historyToField').classList.toggle('hidden', kind === 'clients');
 }
 
 function historyFilterDate(value, endOfMinute = false) {
