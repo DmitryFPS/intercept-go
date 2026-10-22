@@ -31,7 +31,7 @@ const historyPageSize = 30;
 let historyKind = '';
 let historyOffset = 0;
 let historyData = null;
-let historyFilters = { q: '', client: '', destination: '', quality: '', from: '', to: '' };
+let historyFilters = { q: '', client: '', destination: '', quality: '' };
 
 const historySections = {
   clients: ['Рабочие точки', 'Текущее качество связи, последние сигналы, сбои и восстановления.'],
@@ -184,13 +184,11 @@ document.querySelectorAll('[data-history]').forEach(button => {
 });
 
 function resetHistoryFilters() {
-  historyFilters = { q: '', client: '', destination: '', quality: '', from: '', to: '' };
+  historyFilters = { q: '', client: '', destination: '', quality: '' };
   $('historySearch').value = '';
   $('historyClientFilter').value = '';
   $('historyDestinationFilter').value = '';
   $('historyQualityFilter').value = '';
-  $('historyFromFilter').value = '';
-  $('historyToFilter').value = '';
 }
 
 function prepareHistoryFilters(kind) {
@@ -203,16 +201,6 @@ function prepareHistoryFilters(kind) {
   $('historyClientField').classList.toggle('hidden', kind === 'rejected');
   $('historyDestinationField').classList.toggle('hidden', !['pending', 'delivered', 'expired'].includes(kind));
   $('historyQualityField').classList.toggle('hidden', kind !== 'clients');
-  $('historyFromField').classList.toggle('hidden', kind === 'clients');
-  $('historyToField').classList.toggle('hidden', kind === 'clients');
-}
-
-function historyFilterDate(value, endOfMinute = false) {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  if (endOfMinute && value.length === 16) date.setSeconds(59, 999);
-  return date.toISOString();
 }
 
 function historyRequestURL(kind, offset) {
@@ -221,10 +209,6 @@ function historyRequestURL(kind, offset) {
   if (historyFilters.client) query.set('client', historyFilters.client);
   if (historyFilters.destination) query.set('destination', historyFilters.destination);
   if (historyFilters.quality) query.set('quality', historyFilters.quality);
-  const from = historyFilterDate(historyFilters.from);
-  const to = historyFilterDate(historyFilters.to, true);
-  if (from) query.set('from', from);
-  if (to) query.set('to', to);
   return `/api/history/${encodeURIComponent(kind)}?${query}`;
 }
 
@@ -351,8 +335,7 @@ $('historyNext').addEventListener('click', () => openHistory(historyKind, histor
 $('historyApplyFilters').addEventListener('click', () => {
   historyFilters = {
     q: $('historySearch').value.trim(), client: $('historyClientFilter').value,
-    destination: $('historyDestinationFilter').value, quality: $('historyQualityFilter').value,
-    from: $('historyFromFilter').value, to: $('historyToFilter').value
+    destination: $('historyDestinationFilter').value, quality: $('historyQualityFilter').value
   };
   openHistory(historyKind, 0, true);
 });
