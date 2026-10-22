@@ -42,6 +42,14 @@ const historySections = {
   rejected: ['Отклонено', 'Пакеты, которые центр не принял, с безопасным описанием причины.']
 };
 
+const historyColumnLabels = {
+  clients: ['Рабочая точка', 'Состояние', 'Начало сбоя'],
+  pending: ['Подразделение', 'Рабочая точка → получатель', 'Принято центром'],
+  delivered: ['Подразделение', 'Маршрут доставки', 'Доставлено'],
+  expired: ['Подразделение', 'Маршрут доставки', 'Просрочено'],
+  rejected: ['Отправитель', 'Тема', 'Отклонено']
+};
+
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -290,6 +298,10 @@ function renderHistory() {
   const incidents = data.incidents || [];
   const items = historyKind === 'clients' ? incidents : (data.items || []);
   const healthList = $('clientHealthList');
+  const columnLabels = historyColumnLabels[historyKind];
+  const columns = $('historyColumns');
+  columns.classList.toggle('hidden', !columnLabels);
+  columns.innerHTML = columnLabels ? columnLabels.map(label => `<span>${escapeHTML(label)}</span>`).join('') : '';
   healthList.classList.toggle('hidden', historyKind !== 'clients');
   healthList.innerHTML = clients.map(client => `
     <article class="health-card">
@@ -310,7 +322,9 @@ function renderHistory() {
         <p>${escapeHTML(item.reason)}${item.recovered_at ? ` · восстановлено ${formatDate(item.recovered_at)}` : ''}</p>
       </article>`).join('')
     : items.map(item => {
-      const route = [item.client_name, item.destination].filter(Boolean).join(' → ');
+      const route = historyKind === 'rejected'
+        ? item.destination
+        : [item.client_name, item.destination].filter(Boolean).join(' → ');
       return `<article class="history-row">
 		<strong>${escapeHTML(item.unit_name || item.client_name || 'Пакет без названия')}</strong><span>${escapeHTML(route || historyStateLabel(item.state))}</span><time>${formatDate(item.occurred_at)}</time>
 		<p>${escapeHTML(historyDetails(item))}</p>
