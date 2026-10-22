@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"intercept/internal/application"
 )
@@ -49,6 +50,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			SenderBotID: message.From.ID, SenderBotUsername: message.From.Username,
 			ChatID: message.Chat.ID, ThreadID: message.MessageThreadID,
 			MessageID: message.MessageID,
+			SentAt:    time.Unix(message.Date, 0).UTC(),
 		}
 		if receiver.Authorize != nil {
 			allowed, err := receiver.Authorize(ctx, packet)
@@ -71,13 +73,24 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 		}
 		packet.Payload = payload
 		if strings.HasSuffix(filename, ".icprobe") {
+			decoder := json.NewDecoder(strings.NewReader(string(payload)))
+			decoder.DisallowUnknownFields()
 			var probe probePayload
-			if err := json.Unmarshal(payload, &probe); err != nil || probe.Schema != probeSchema ||
-				strings.TrimSpace(probe.ClientID) == "" || !validProbeID(probe.ProbeID) {
+			if err := decoder.Decode(&probe); err != nil || probe.Schema != probeSchema ||
+				strings.TrimSpace(probe.ClientID) == "" || !validProbeID(probe.ProbeID) ||
+				strings.TrimSpace(probe.MAC) == "" {
+				_ = receiver.API.DeleteMessage(ctx, receiver.ChatID, message.MessageID)
+				continue
+			}
+			probeAt, err := time.Parse(time.RFC3339, probe.SentAt)
+			if err != nil {
 				_ = receiver.API.DeleteMessage(ctx, receiver.ChatID, message.MessageID)
 				continue
 			}
 			packet.ProbeID = probe.ProbeID
+			packet.ProbeClientID = probe.ClientID
+			packet.ProbeSentAt = probeAt.UTC()
+			packet.ProbeMAC = probe.MAC
 		}
 		packets = append(packets, packet)
 	}

@@ -27,6 +27,19 @@ let ruleHistoryExpanded = false;
 let templateDefaults = { telegram: '', telegram_markers: [], word_path: '', word_markers: [] };
 const positionsPerPage = 12;
 const visibleRuleVersions = 5;
+const historyPageSize = 30;
+let historyKind = '';
+let historyOffset = 0;
+let historyData = null;
+
+const historySections = {
+  clients: ['Рабочие точки', 'Текущее качество связи, последние сигналы, сбои и восстановления.'],
+  received: ['Получено', 'События, которые центр надёжно принял от рабочих точек.'],
+  pending: ['Ожидает отправки', 'Живая очередь с попытками, ошибкой и временем следующего повтора.'],
+  delivered: ['Доставлено', 'Успешные доставки по каждому Telegram- и Word-направлению.'],
+  expired: ['Просрочено', 'Задания, которые не удалось доставить в разрешённое время.'],
+  rejected: ['Отклонено', 'Пакеты, которые центр не принял, с безопасным описанием причины.']
+};
 
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -139,7 +152,8 @@ async function refreshStatus() {
   $('controlRefresh').disabled = !status.configured;
 
   const stats = status.stats || {};
-  $('statClients').textContent = stats.clients || 0;
+  const workingClients = (stats.clients_online || 0) + (stats.clients_degraded || 0);
+  $('statClients').textContent = `${workingClients}/${stats.clients || 0}`;
   $('statEvents').textContent = stats.events || 0;
   $('statPending').textContent = stats.pending || 0;
   $('statDelivered').textContent = stats.delivered || 0;
@@ -165,6 +179,108 @@ async function controlProcessing(action, button, busyText) {
 $('controlStart').addEventListener('click', event => controlProcessing('start', event.currentTarget, 'Запускаем…'));
 $('controlStop').addEventListener('click', event => controlProcessing('stop', event.currentTarget, 'Останавливаем…'));
 $('controlRefresh').addEventListener('click', event => controlProcessing('refresh', event.currentTarget, 'Обновляем…'));
+
+document.querySelectorAll('[data-history]').forEach(button => {
+  button.addEventListener('click', () => openHistory(button.dataset.history));
+});
+
+async function openHistory(kind, offset = 0) {
+  historyKind = kind;
+  historyOffset = Math.max(0, offset);
+  const section = historySections[kind];
+  if (!section) return;
+  $('historyTitle').textContent = section[0];
+  $('historyDescription').textContent = section[1];
+  openDialog('historyDialog');
+  $('historyList').innerHTML = '<div class="history-empty">Загружаем данные…</div>';
+  $('clientHealthList').classList.add('hidden');
+  try {
+    historyData = await request(`/api/history/${encodeURIComponent(kind)}?limit=${historyPageSize}&offset=${historyOffset}`);
+    renderHistory();
+  } catch (error) {
+    $('historyList').innerHTML = '';
+    $('historyEmpty').textContent = error.message;
+    $('historyEmpty').classList.remove('hidden');
+  }
+}
+
+function qualityLabel(client) {
+  if (client.quality === 'good') return 'Связь хорошая';
+  if (client.quality === 'degraded') return 'Связь нестабильна';
+  if (client.quality === 'offline') return 'Нет связи';
+  return 'Ожидаем первый сигнал';
+}
+
+function formatDelay(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 1) return 'только что';
+  if (seconds < 60) return `${seconds} сек. назад`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} мин. назад`;
+  return `${Math.floor(seconds / 3600)} ч. назад`;
+}
+
+function renderHistory() {
+  const data = historyData || {};
+  const clients = data.clients || [];
+  const incidents = data.incidents || [];
+  const items = historyKind === 'clients' ? incidents : (data.items || []);
+  const healthList = $('clientHealthList');
+  healthList.classList.toggle('hidden', historyKind !== 'clients');
+  healthList.innerHTML = clients.map(client => `
+    <article class="health-card">
+      <strong>${escapeHTML(client.number)} · ${escapeHTML(client.name)}</strong>
+      <span class="quality ${escapeHTML(client.quality)}">${escapeHTML(qualityLabel(client))}</span>
+      <dl>
+        <dt>Последний сигнал</dt><dd>${client.last_seen_at ? `${formatDate(client.last_seen_at)} · ${formatDelay(client.delay_seconds)}` : 'Ещё не получен'}</dd>
+        <dt>Контрольный пакет</dt><dd>${formatDate(client.last_probe_at)}</dd>
+        <dt>Последние данные</dt><dd>${formatDate(client.last_event_at)}</dd>
+        <dt>Причина</dt><dd>${escapeHTML(client.current_reason || 'Ошибок связи нет')}</dd>
+      </dl>
+    </article>`).join('');
+
+  $('historyList').innerHTML = historyKind === 'clients'
+    ? items.map(item => `
+      <article class="history-row">
+        <strong>${escapeHTML(item.client_name)}</strong><span>${item.recovered_at ? 'Связь восстановлена' : 'Сбой продолжается'}</span><time>${formatDate(item.started_at)}</time>
+        <p>${escapeHTML(item.reason)}${item.recovered_at ? ` · восстановлено ${formatDate(item.recovered_at)}` : ''}</p>
+      </article>`).join('')
+    : items.map(item => {
+      const route = [item.client_name, item.destination].filter(Boolean).join(' → ');
+      const attempts = item.attempts ? `Попыток: ${item.attempts}. ` : '';
+      const retry = item.next_attempt_at && item.state === 'pending' ? `Следующий повтор: ${formatDate(item.next_attempt_at)}. ` : '';
+      return `<article class="history-row">
+        <strong>${escapeHTML(item.unit_name || item.client_name || item.id)}</strong><span>${escapeHTML(route || item.state)}</span><time>${formatDate(item.occurred_at)}</time>
+        <p>${escapeHTML(`${attempts}${retry}${item.reason || ''}` || `ID: ${item.id}`)}</p>
+      </article>`;
+    }).join('');
+
+  const hasRows = clients.length > 0 || items.length > 0;
+  $('historyEmpty').textContent = 'Записей пока нет.';
+  $('historyEmpty').classList.toggle('hidden', hasRows);
+  $('historyRetention').textContent = `Автоочистка: ${data.retention_days || 30} дней.`;
+  const pageNumber = Math.floor(historyOffset / historyPageSize) + 1;
+  const pageCount = Math.max(1, Math.ceil((data.total || 0) / historyPageSize));
+  $('historyPage').textContent = `${pageNumber} из ${pageCount}`;
+  $('historyPrev').disabled = historyOffset === 0;
+  $('historyNext').disabled = historyOffset + historyPageSize >= (data.total || 0);
+  $('historyClear').classList.toggle('hidden', !data.clearable);
+}
+
+$('historyPrev').addEventListener('click', () => openHistory(historyKind, historyOffset - historyPageSize));
+$('historyNext').addEventListener('click', () => openHistory(historyKind, historyOffset + historyPageSize));
+$('historyClear').addEventListener('click', async event => {
+  const label = historySections[historyKind]?.[0] || 'этого раздела';
+  if (!confirm(`Очистить видимую историю «${label}»? Активные очереди и настройки не изменятся.`)) return;
+  setButtonBusy(event.currentTarget, true, 'Очищаем…');
+  try {
+    await request(`/api/history/${encodeURIComponent(historyKind)}`, { method: 'DELETE' });
+    await Promise.all([openHistory(historyKind, 0), refreshStatus()]);
+    notify('История очищена. Активные очереди сохранены.', true);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    setButtonBusy(event.currentTarget, false);
+  }
+});
 
 async function loadOverview() {
   const results = await Promise.all([

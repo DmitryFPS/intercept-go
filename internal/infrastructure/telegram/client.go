@@ -305,7 +305,7 @@ func (client *Client) DeleteMessage(ctx context.Context, chatID, messageID int64
 
 // TestTopic проверяет право записи и по возможности удаляет тестовое сообщение.
 func (client *Client) TestTopic(ctx context.Context, chatID, threadID int64) error {
-	message, err := client.SendText(ctx, chatID, threadID, "Проверка подключения Intercept. Сообщение будет удалено автоматически.")
+	message, err := client.SendText(ctx, chatID, threadID, "Проверка подключения EAVC Connect. Сообщение будет удалено автоматически.")
 	if err != nil {
 		return err
 	}

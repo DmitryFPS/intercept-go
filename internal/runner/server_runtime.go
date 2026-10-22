@@ -159,6 +159,23 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		server.transportRecovered()
 		for _, packet := range packets {
 			if packet.ProbeID != "" {
+				client, clientErr := server.Store.Client(ctx, packet.ProbeClientID)
+				valid := clientErr == nil && client.Active &&
+					client.SenderBotID == packet.SenderBotID &&
+					strings.EqualFold(strings.TrimPrefix(client.SenderBotUsername, "@"), strings.TrimPrefix(packet.SenderBotUsername, "@")) &&
+					client.ChatID == packet.ChatID && client.ThreadID == packet.ThreadID &&
+					telegram.VerifyProbe(packet, client.Key) && recentTransportPacket(packet.SentAt, time.Now().UTC())
+				if !valid {
+					server.Logger.Warn("отклонён недостоверный контрольный пакет",
+						"sender_bot", packet.SenderBotUsername, "error", clientErr)
+					server.deleteTransportPacket(ctx, receiver, packet.MessageID)
+					continue
+				}
+				if err := server.Store.RecordClientSignalByTransport(
+					ctx, packet.SenderBotID, packet.ChatID, packet.ThreadID, true, packet.SentAt,
+				); err != nil {
+					server.Logger.Warn("не удалось обновить состояние связи с точкой", "error", err)
+				}
 				if err := receiver.AcknowledgeProbe(ctx, packet.SenderBotUsername, packet.ProbeID); err != nil {
 					server.Logger.Warn("не удалось подтвердить проверку связи",
 						"sender_bot", packet.SenderBotUsername, "error", err)
@@ -179,6 +196,13 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 				server.deleteTransportPacket(ctx, receiver, packet.MessageID)
 				continue
 			}
+			if result.Accepted && recentTransportPacket(packet.SentAt, time.Now().UTC()) {
+				if err := server.Store.RecordClientSignalByTransport(
+					ctx, packet.SenderBotID, packet.ChatID, packet.ThreadID, false, packet.SentAt,
+				); err != nil {
+					server.Logger.Warn("не удалось обновить состояние связи с точкой", "error", err)
+				}
+			}
 			server.Logger.Info("транспортный пакет обработан",
 				"event_id", result.EventID, "status", result.Status,
 				"new_event", result.Accepted, "sender_bot", result.ClientBotUsername,
@@ -194,7 +218,16 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			offset = next
 			_ = server.Store.SaveValue(ctx, serverOffsetName, strconv.FormatInt(offset, 10))
 		}
+		server.retryTransportDeletions(ctx, receiver)
 	}
+}
+
+func recentTransportPacket(sentAt, now time.Time) bool {
+	if sentAt.IsZero() {
+		return false
+	}
+	delta := now.Sub(sentAt)
+	return delta >= -time.Minute && delta <= 5*time.Minute
 }
 
 func (server *Server) transportRecovered() {
@@ -216,6 +249,27 @@ func (server *Server) deleteTransportPacket(ctx context.Context, receiver *teleg
 	if err := receiver.DeletePacket(ctx, messageID); err != nil && ctx.Err() == nil {
 		server.Logger.Warn("не удалось удалить обработанный пакет из транспортной группы",
 			"telegram_message_id", messageID, "error", err)
+		if queueErr := server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC()); queueErr != nil {
+			server.Logger.Warn("не удалось сохранить повтор удаления транспортного пакета",
+				"telegram_message_id", messageID, "error", queueErr)
+		}
+		return
+	}
+	_ = server.Store.CompleteTransportDeletion(ctx, messageID)
+}
+
+func (server *Server) retryTransportDeletions(ctx context.Context, receiver *telegram.ServerReceiver) {
+	messageIDs, err := server.Store.DueTransportDeletions(ctx, time.Now().UTC(), 25)
+	if err != nil {
+		server.Logger.Warn("не удалось прочитать очередь удаления транспортных пакетов", "error", err)
+		return
+	}
+	for _, messageID := range messageIDs {
+		if err := receiver.DeletePacket(ctx, messageID); err != nil {
+			_ = server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC())
+			continue
+		}
+		_ = server.Store.CompleteTransportDeletion(ctx, messageID)
 	}
 }
 
@@ -282,6 +336,9 @@ func (server *Server) statusLoop(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
+		if err := server.Store.EvaluateClientHealth(ctx, time.Now().UTC(), 5*time.Minute); err != nil && ctx.Err() == nil {
+			server.Logger.Warn("не удалось оценить состояние связи с точками", "error", err)
+		}
 		stats, err := server.Store.Stats(ctx)
 		if err == nil {
 			server.update(func(status *ServerStatus) { status.Stats = stats })
@@ -308,12 +365,13 @@ func (server *Server) serverMaintenanceLoop(ctx context.Context) {
 		)
 		if err != nil && ctx.Err() == nil {
 			server.Logger.Warn("не удалось очистить технические данные сервера", "error", err)
-		} else if result.Events+result.Rejected+result.Rules > 0 {
+		} else if result.Events+result.Rejected+result.Rules+result.Incidents > 0 {
 			if err := server.Store.Compact(ctx); err != nil && ctx.Err() == nil {
 				server.Logger.Warn("не удалось уплотнить базу сервера", "error", err)
 			} else {
 				server.Logger.Info("очищены технические данные сервера",
-					"events", result.Events, "rejected", result.Rejected, "rules", result.Rules)
+					"events", result.Events, "rejected", result.Rejected,
+					"rules", result.Rules, "incidents", result.Incidents)
 			}
 		}
 		select {

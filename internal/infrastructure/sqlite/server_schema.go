@@ -100,3 +100,34 @@ CREATE INDEX delivery_jobs_pending_idx
 const serverStreamRepairMigration = `
 UPDATE delivery_jobs SET stream_key='';
 `
+
+// Наблюдаемость хранится отдельно от очереди доставки. Очистка истории
+// никогда не должна удалить незавершённое задание или запись дедупликации.
+const serverObservabilityMigration = `
+CREATE TABLE client_health (
+	client_id TEXT PRIMARY KEY,
+	status TEXT NOT NULL CHECK(status IN ('online', 'offline')),
+	last_seen_at TEXT NOT NULL,
+	last_probe_at TEXT,
+	last_event_at TEXT,
+	last_reason TEXT NOT NULL DEFAULT '',
+	FOREIGN KEY(client_id) REFERENCES server_clients(client_id) ON DELETE CASCADE
+);
+CREATE TABLE client_connection_incidents (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	client_id TEXT NOT NULL,
+	started_at TEXT NOT NULL,
+	recovered_at TEXT,
+	reason TEXT NOT NULL,
+	FOREIGN KEY(client_id) REFERENCES server_clients(client_id) ON DELETE CASCADE
+);
+CREATE INDEX client_connection_incidents_idx
+	ON client_connection_incidents(client_id, started_at DESC);
+CREATE TABLE transport_cleanup (
+	message_id INTEGER PRIMARY KEY,
+	created_at TEXT NOT NULL,
+	next_attempt_at TEXT NOT NULL,
+	attempts INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX transport_cleanup_due_idx ON transport_cleanup(next_attempt_at, message_id);
+`

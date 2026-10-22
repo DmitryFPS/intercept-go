@@ -33,6 +33,8 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/status", func(writer http.ResponseWriter, _ *http.Request) {
 		localui.WriteJSON(writer, http.StatusOK, handler.Server.Status())
 	})
+	mux.HandleFunc("GET /api/history/{kind}", handler.history)
+	mux.HandleFunc("DELETE /api/history/{kind}", handler.clearHistory)
 	mux.HandleFunc("POST /api/setup", handler.setup)
 	mux.HandleFunc("GET /api/clients", handler.clients)
 	mux.HandleFunc("POST /api/clients", handler.addClient)
@@ -57,6 +59,31 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/diagnostics", handler.diagnostics)
 	mux.HandleFunc("POST /api/control/{action}", handler.control)
 	return localui.SecurityHeaders(mux)
+}
+
+func (handler Handler) history(writer http.ResponseWriter, request *http.Request) {
+	limit, err := strconv.Atoi(request.URL.Query().Get("limit"))
+	if err != nil || limit == 0 {
+		limit = 30
+	}
+	offset, err := strconv.Atoi(request.URL.Query().Get("offset"))
+	if err != nil {
+		offset = 0
+	}
+	page, err := handler.Server.History(request.Context(), request.PathValue("kind"), limit, offset)
+	if err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось загрузить историю.", err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, page)
+}
+
+func (handler Handler) clearHistory(writer http.ResponseWriter, request *http.Request) {
+	if err := handler.Server.ClearHistory(request.Context(), request.PathValue("kind")); err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Этот раздел нельзя очистить.", err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (handler Handler) control(writer http.ResponseWriter, request *http.Request) {

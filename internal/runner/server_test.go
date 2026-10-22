@@ -2,6 +2,7 @@ package runner
 
 import (
 	"testing"
+	"time"
 
 	"intercept/internal/config"
 	"intercept/internal/domain"
@@ -17,6 +18,20 @@ func TestCloneServerConfigDoesNotShareDestinationMap(t *testing.T) {
 	clone.Destinations["b"] = config.DestinationConfig{Kind: domain.DestinationWord}
 	if _, exists := original.Destinations["b"]; exists {
 		t.Fatal("копия конфигурации разделяет map направлений")
+	}
+}
+
+func TestRecentTransportPacketRejectsBacklogAndFutureTime(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	if !recentTransportPacket(now.Add(-time.Minute), now) {
+		t.Fatal("свежий пакет отклонён")
+	}
+	if recentTransportPacket(now.Add(-6*time.Minute), now) {
+		t.Fatal("старый пакет очереди принят за текущую связь")
+	}
+	if recentTransportPacket(now.Add(2*time.Minute), now) {
+		t.Fatal("пакет с будущим временем принят за текущую связь")
 	}
 }
 

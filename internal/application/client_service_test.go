@@ -54,8 +54,8 @@ func TestClientServiceSeparatesUploadFromServerAcknowledgement(t *testing.T) {
 	}
 	sender.acks = []Acknowledgement{{EventID: queue.events[0].ID, AcceptedAt: now}}
 	acknowledged, err := service.ReceiveAcknowledgements(context.Background())
-	if err != nil || acknowledged != 1 {
-		t.Fatalf("ack: %d, %v", acknowledged, err)
+	if err != nil || acknowledged.Events != 1 {
+		t.Fatalf("ack: %+v, %v", acknowledged, err)
 	}
 	if queue.states[queue.events[0].ID] != "acknowledged" {
 		t.Fatalf("событие не подтверждено: %#v", queue.states)
@@ -94,12 +94,30 @@ func TestClientServiceStoresTransportProbeSeparately(t *testing.T) {
 	sender := &memorySender{acks: []Acknowledgement{{EventID: "probe-id", AcceptedAt: now, Status: "probe"}}}
 	service := ClientService{Queue: queue, State: queue, Sender: sender}
 	count, err := service.ReceiveAcknowledgements(context.Background())
-	if err != nil || count != 1 {
-		t.Fatalf("ответ проверки не обработан: count=%d err=%v", count, err)
+	if err != nil || count.Events != 0 || !count.Probes["probe-id"].Equal(now) {
+		t.Fatalf("ответ проверки не обработан: batch=%+v err=%v", count, err)
 	}
 	probeID, probeAt, exists, err := service.LastTransportProbe(context.Background())
 	if err != nil || !exists || probeID != "probe-id" || !probeAt.Equal(now) {
 		t.Fatalf("ответ проверки не сохранён: id=%q at=%s exists=%v err=%v", probeID, probeAt, exists, err)
+	}
+}
+
+func TestClientServiceKeepsEveryProbeAcknowledgementInOneBatch(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC().Truncate(time.Second)
+	queue := newMemoryClientState()
+	sender := &memorySender{acks: []Acknowledgement{
+		{EventID: "manual-probe", AcceptedAt: now, Status: "probe"},
+		{EventID: "heartbeat-probe", AcceptedAt: now.Add(time.Second), Status: "probe"},
+	}}
+	service := ClientService{Queue: queue, State: queue, Sender: sender}
+	batch, err := service.ReceiveAcknowledgements(context.Background())
+	if err != nil || len(batch.Probes) != 2 {
+		t.Fatalf("подтверждения смешались или потерялись: batch=%+v err=%v", batch, err)
+	}
+	if !batch.Probes["manual-probe"].Equal(now) {
+		t.Fatalf("ручное подтверждение потеряно: %+v", batch.Probes)
 	}
 }
 

@@ -150,14 +150,16 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		)
 		return
 	}
+	transport := &telegram.ClientTransport{
+		API: api, ChatID: cfg.Transport.ChatID, ThreadID: cfg.Transport.ThreadID,
+		ServerBotID:       cfg.Transport.ServerBotID,
+		ServerBotUsername: cfg.Transport.ServerBotUsername,
+		Key:               key,
+	}
 	service := &application.ClientService{
 		ClientID: cfg.ClientID, Source: source, Queue: queue, State: queue,
-		Sender: &telegram.ClientTransport{
-			API: api, ChatID: cfg.Transport.ChatID, ThreadID: cfg.Transport.ThreadID,
-			ServerBotID:       cfg.Transport.ServerBotID,
-			ServerBotUsername: cfg.Transport.ServerBotUsername,
-		},
-		KeyID: cfg.Cryptography.KeyID, Key: key, BatchSize: cfg.Polling.BatchSize,
+		Sender: transport,
+		KeyID:  cfg.Cryptography.KeyID, Key: key, BatchSize: cfg.Polling.BatchSize,
 		CatchUpExisting: cfg.Polling.CatchUpExisting,
 		MaxEventAge:     time.Duration(cfg.Polling.MaxEventAgeMinutes) * time.Minute,
 		SourceLocation:  location,
@@ -176,6 +178,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 
 	go client.ackLoop(ctx, service, queue)
 	go client.clientMaintenanceLoop(ctx, queue)
+	go client.heartbeatLoop(ctx, cfg.ClientID, transport)
 	ticker := time.NewTicker(time.Duration(cfg.Polling.EAVCSeconds) * time.Second)
 	defer ticker.Stop()
 	for {
@@ -184,6 +187,28 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+	}
+}
+
+// heartbeatLoop отправляет редкий служебный пакет, чтобы центр различал
+// исправную точку и длительное отсутствие связи даже при отсутствии перехватов.
+// Один пакет раз в две минуты значительно ниже ограничений Telegram.
+func (client *Client) heartbeatLoop(ctx context.Context, clientID string, transport *telegram.ClientTransport) {
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			_, err := transport.SendProbe(probeCtx, clientID)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				client.Logger.Warn("не удалось отправить контрольный пакет связи", "error", err)
+			}
+			timer.Reset(2 * time.Minute)
 		}
 	}
 }
@@ -249,7 +274,7 @@ func (client *Client) collectAndDispatch(ctx context.Context, service *applicati
 
 func (client *Client) ackLoop(ctx context.Context, service *application.ClientService, queue *stateDB.ClientQueue) {
 	for ctx.Err() == nil {
-		count, err := service.ReceiveAcknowledgements(ctx)
+		batch, err := service.ReceiveAcknowledgements(ctx)
 		if err != nil && ctx.Err() == nil {
 			client.transientFailure(
 				"Нет подтверждения центра",
@@ -260,19 +285,18 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 			continue
 		}
 		client.transportRecovered("EAVC подключён.")
-		if count > 0 {
+		if batch.Events > 0 || len(batch.Probes) > 0 {
 			now := time.Now().UTC()
-			probeID, probeAt, probeExists, _ := service.LastTransportProbe(ctx)
 			client.update(func(status *ClientStatus) {
-				if client.pendingProbeID != "" && (!probeExists || probeID != client.pendingProbeID) {
-					// Обычное подтверждение или старый ответ не завершает новую проверку.
-					return
+				if batch.Events > 0 {
+					status.State = "running"
+					status.Title = "Программа работает"
+					status.Detail = "Центр подтвердил получение данных."
+					status.LastAcknowledged = &now
 				}
-				status.State = "running"
-				status.Title = "Программа работает"
-				status.Detail = "Центр подтвердил получение данных."
-				status.LastAcknowledged = &now
-				if probeExists && probeID == client.pendingProbeID {
+				if probeAt, confirmed := batch.Probes[client.pendingProbeID]; client.pendingProbeID != "" && confirmed {
+					status.State = "running"
+					status.Title = "Программа работает"
 					status.LastTransportCheck = &probeAt
 					status.Detail = "Двусторонняя связь с центром проверена."
 					client.pendingProbeID = ""

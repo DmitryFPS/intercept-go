@@ -120,6 +120,11 @@ func (client *Client) CheckTransport(ctx context.Context) error {
 		ServerBotID:       cfg.Transport.ServerBotID,
 		ServerBotUsername: cfg.Transport.ServerBotUsername,
 	}
+	key, err := cfg.Key()
+	if err != nil {
+		return err
+	}
+	transport.Key = key
 	probeID, err := transport.SendProbe(ctx, cfg.ClientID)
 	if err != nil {
 		return fmt.Errorf("отправить проверку связи: %w", err)

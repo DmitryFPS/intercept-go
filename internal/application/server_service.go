@@ -22,8 +22,12 @@ type IncomingPacket struct {
 	ChatID            int64
 	ThreadID          int64
 	MessageID         int64
+	SentAt            time.Time
 	Payload           []byte
 	ProbeID           string
+	ProbeClientID     string
+	ProbeSentAt       time.Time
+	ProbeMAC          string
 }
 
 // PacketResult нужен приёмнику для безопасного подтверждения клиенту.

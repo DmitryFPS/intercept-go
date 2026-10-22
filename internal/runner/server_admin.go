@@ -296,6 +296,23 @@ func (server *Server) Clients(ctx context.Context) ([]application.RegisteredClie
 	return server.Store.Clients(ctx)
 }
 
+// History возвращает безопасную историю выбранного счётчика обзора.
+func (server *Server) History(ctx context.Context, kind string, limit, offset int) (stateDB.ServerHistoryPage, error) {
+	return server.Store.HistoryPage(ctx, kind, limit, offset, time.Now().UTC())
+}
+
+// ClearHistory очищает представление завершённой истории, не затрагивая очередь.
+func (server *Server) ClearHistory(ctx context.Context, kind string) error {
+	if err := server.Store.ClearHistory(ctx, kind, time.Now().UTC()); err != nil {
+		return err
+	}
+	stats, err := server.Store.Stats(ctx)
+	if err == nil {
+		server.update(func(status *ServerStatus) { status.Stats = stats })
+	}
+	return nil
+}
+
 // ClientConfig повторно выдаёт защищённо сохранённую конфигурацию точки.
 func (server *Server) ClientConfig(ctx context.Context, clientID string) ([]byte, application.RegisteredClient, error) {
 	client, err := server.Store.Client(ctx, strings.TrimSpace(clientID))

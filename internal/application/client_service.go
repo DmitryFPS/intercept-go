@@ -169,25 +169,35 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 	return sent, nil
 }
 
+// AcknowledgementBatch разделяет подтверждения данных и контрольных пакетов.
+// Благодаря этому автоматический heartbeat не имитирует доставку перехвата и
+// не может затереть ответ на ручную проверку связи.
+type AcknowledgementBatch struct {
+	Events int
+	Probes map[string]time.Time
+}
+
 // ReceiveAcknowledgements подтверждает только ответы серверного бота.
-func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int, error) {
+func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (AcknowledgementBatch, error) {
+	result := AcknowledgementBatch{Probes: make(map[string]time.Time)}
 	offset := int64(0)
 	if raw, exists, err := service.State.Value(ctx, transportOffsetName); err != nil {
-		return 0, err
+		return result, err
 	} else if exists {
 		offset, _ = strconv.ParseInt(raw, 10, 64)
 	}
 	acknowledgements, next, err := service.Sender.Acknowledgements(ctx, offset)
 	if err != nil {
-		return 0, err
+		return result, err
 	}
 	for _, acknowledgement := range acknowledgements {
 		if acknowledgement.Status == "probe" {
+			result.Probes[acknowledgement.EventID] = acknowledgement.AcceptedAt
 			if err := service.State.SaveValue(ctx, lastTransportProbeName, acknowledgement.AcceptedAt.Format(time.RFC3339Nano)); err != nil {
-				return 0, err
+				return result, err
 			}
 			if err := service.State.SaveValue(ctx, lastTransportProbeID, acknowledgement.EventID); err != nil {
-				return 0, err
+				return result, err
 			}
 			continue
 		}
@@ -198,8 +208,9 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int,
 			err = service.Queue.MarkAcknowledged(ctx, acknowledgement.EventID, acknowledgement.AcceptedAt)
 		}
 		if err != nil {
-			return 0, err
+			return result, err
 		}
+		result.Events++
 		if service.Logger != nil {
 			service.Logger.Info("получено подтверждение сервера",
 				"event_id", acknowledgement.EventID, "status", acknowledgement.Status,
@@ -209,10 +220,10 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (int,
 	}
 	if next > offset {
 		if err := service.State.SaveValue(ctx, transportOffsetName, strconv.FormatInt(next, 10)); err != nil {
-			return 0, err
+			return result, err
 		}
 	}
-	return len(acknowledgements), nil
+	return result, nil
 }
 
 // LastTransportProbe возвращает идентификатор и время последней полной

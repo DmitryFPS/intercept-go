@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Настройка Telegram — EAVC Connect</title>
+  <link rel="stylesheet" href="/telegram-guide.css">
+</head>
+<body>
+<header class="guide-hero">
+  <div><span class="eyebrow">EAVC CONNECT · ПОЛНАЯ ИНСТРУКЦИЯ</span><h1>Настройка Telegram без пропущенных шагов</h1><p>От пустого аккаунта до проверенной связи трёх рабочих точек с центром и получателями.</p></div>
+  <nav><a href="#scheme">Схема</a><a href="#bots">Боты</a><a href="#transport">Группа обмена</a><a href="#ids">ID</a><a href="#program">Программа</a><a href="#check">Проверка</a></nav>
+</header>
+<main>
+  <section class="important"><strong>Перед началом</strong><p>Токен бота равен паролю от бота. Не отправляйте его в обычный чат, не вставляйте в снимки экрана и не храните в Word. В EAVC Connect токен вводится только в поле настройки соответствующего бота.</p></section>
+
+  <section id="scheme">
+    <span class="step">0 · ЧТО ПОЛУЧИТСЯ</span><h2>Сначала разберитесь в ролях</h2>
+    <div class="architecture">
+      <div class="node center"><b>Бот центра</b><small>принимает пакеты и подтверждает точки</small></div>
+      <div class="arrow">⇄</div>
+      <div class="node group"><b>Закрытая группа обмена</b><small>темы: Текстиль · Селидово · Весёлое</small></div>
+      <div class="arrow">⇄</div>
+      <div class="point-stack"><div class="node">Бот точки 01</div><div class="node">Бот точки 02</div><div class="node">Бот точки 03</div></div>
+    </div>
+    <div class="architecture outputs"><div class="node center"><b>Центр EAVC Connect</b><small>выполняет опубликованные маршруты</small></div><div class="arrow">→</div><div class="point-stack"><div class="node">Telegram-получатель</div><div class="node">Telegram-получатель</div><div class="node">Word-папка 39-й точки</div></div></div>
+    <p class="note">Группа обмена — техническая. Группы получателей — рабочие. Не используйте одну и ту же группу для обеих ролей.</p>
+  </section>
+
+  <section id="bots">
+    <span class="step">1 · BOTFATHER</span><h2>Создайте отдельного бота для каждой роли</h2>
+    <div class="visual-grid">
+      <figure class="phone"><figcaption>1. Найдите только проверенного <b>@BotFather</b></figcaption><div class="tg-head">BotFather ✓</div><div class="chat"><div class="bubble out">/newbot</div><div class="bubble">Выберите имя, затем уникальный username, оканчивающийся на <b>bot</b>.</div></div></figure>
+      <figure class="phone"><figcaption>2. Скопируйте токен целиком</figcaption><div class="tg-head">BotFather ✓</div><div class="chat"><div class="bubble">Done! Use this token:<span class="secret">123456789:••••••••••••••••••••</span></div><div class="callout">Нажмите на токен → Копировать</div></div></figure>
+      <figure class="phone"><figcaption>3. Включите обмен между ботами</figcaption><div class="tg-head">Bot Settings</div><div class="menu"><b>Bot-to-Bot Communication</b><span class="switch on">Включено</span><small>Обязательно для бота центра и всех ботов рабочих точек.</small></div></figure>
+      <figure class="phone"><figcaption>4. Отключите Group Privacy у центра</figcaption><div class="tg-head">Group Privacy</div><div class="menu"><b>Privacy mode</b><span class="switch off">Отключено</span><small>Нужно боту центра для получения технических сообщений без упоминания.</small></div></figure>
+    </div>
+    <ol class="checklist">
+      <li>В @BotFather отправьте <code>/newbot</code>.</li>
+      <li>Задайте понятное имя. Username должен состоять из латинских букв/цифр/подчёркивания и оканчиваться на <code>bot</code>.</li>
+      <li>Скопируйте выданный токен. Для каждого бота токен уникален.</li>
+      <li>Через <code>/mybots → нужный бот → Bot Settings</code> включите <b>Bot-to-Bot Communication</b> у бота центра и каждого бота точки.</li>
+      <li>У бота центра откройте <b>Group Privacy</b> и отключите privacy mode. После изменения удалите бота центра из группы и добавьте заново, если BotFather попросит это сделать.</li>
+    </ol>
+    <div class="role-table"><div><b>Роль</b><b>Количество</b><b>Особая настройка</b></div><div><span>Центр</span><span>1</span><span>Bot-to-Bot включён, Group Privacy выключен</span></div><div><span>Рабочие точки</span><span>по одному на точку</span><span>Bot-to-Bot включён</span></div><div><span>Telegram-получатели</span><span>по выбранной схеме</span><span>достаточно права отправлять и редактировать свои сообщения</span></div></div>
+  </section>
+
+  <section id="transport">
+    <span class="step">2 · ГРУППА ОБМЕНА</span><h2>Создайте закрытую группу с темами</h2>
+    <div class="visual-grid">
+      <figure class="phone"><figcaption>1. Меню → Новая группа</figcaption><div class="tg-head">Telegram</div><div class="menu rows"><span>Новая группа</span><span>Новый канал</span><span>Контакты</span></div><div class="callout">Выберите именно группу, не канал</div></figure>
+      <figure class="phone"><figcaption>2. Управление группой → Темы</figcaption><div class="tg-head">Группа обмена</div><div class="menu rows"><span>Тип группы: <b>Частная</b></span><span>Темы <i class="switch on">Включены</i></span><span>Администраторы</span></div></figure>
+      <figure class="phone"><figcaption>3. Создайте тему для каждой точки</figcaption><div class="tg-head">Темы</div><div class="topics"><span>01 · Текстиль</span><span>02 · Селидово</span><span>03 · Весёлое</span><span class="muted">General — только служебная тема</span></div></figure>
+      <figure class="phone"><figcaption>4. Добавьте ботов и права</figcaption><div class="tg-head">Администраторы</div><div class="menu rows"><span>Бот центра <b>администратор</b></span><span>Удаление сообщений ✓</span><span>Управление темами ✓</span><span>Боты точек: отправка сообщений и файлов ✓</span></div></figure>
+    </div>
+    <ol class="checklist"><li>Создайте <b>частную группу</b>. Публичная ссылка не нужна.</li><li>В настройках группы включите <b>Темы</b>.</li><li>Создайте отдельную тему для каждой рабочей точки. Не направляйте две точки в одну тему.</li><li>Добавьте бота центра и всех ботов рабочих точек.</li><li>Боту центра выдайте права отправлять и удалять сообщения, а также управлять темами. Ботам точек разрешите отправлять сообщения и файлы.</li><li>Не включайте медленный режим в технической группе — он задерживает очередь.</li></ol>
+  </section>
+
+  <section id="ids">
+    <span class="step">3 · ID ГРУППЫ И ТЕМ</span><h2>Получите числа без сторонних ботов</h2>
+    <div class="visual-grid two">
+      <figure class="phone wide"><figcaption>Скопируйте ссылку на тестовое сообщение внутри нужной темы</figcaption><div class="tg-head">01 · Текстиль</div><div class="chat"><div class="bubble out">Тест определения ID</div><div class="context">⋮ → Копировать ссылку на сообщение</div><div class="link">https://t.me/c/<mark>1234567890</mark>/<mark>321</mark>/450</div></div></figure>
+      <figure class="formula"><figcaption>Как разобрать ссылку</figcaption><p><b>ID группы</b></p><code>-100 + 1234567890 = <mark>-1001234567890</mark></code><p><b>ID темы</b></p><code>второе число = <mark>321</mark></code><p class="note">Последнее число 450 — ID отдельного сообщения, его в программу не вводят.</p></figure>
+    </div>
+    <ol class="checklist"><li>Откройте нужную тему и отправьте обычное тестовое сообщение от своего аккаунта.</li><li>Нажмите правой кнопкой по сообщению → <b>Копировать ссылку</b>.</li><li>Для ссылки вида <code>t.me/c/1234567890/321/450</code> ID группы равен <code>-1001234567890</code>, а ID темы — <code>321</code>.</li><li>Повторите для каждой темы и запишите соответствие «точка → ID темы».</li><li>Если ссылка имеет другой вид или тема General не содержит отдельного номера, создайте отдельную техническую тему и используйте её — не угадывайте ID.</li></ol>
+  </section>
+
+  <section id="program">
+    <span class="step">4 · EAVC CONNECT</span><h2>Перенесите значения в правильные поля</h2>
+    <div class="field-map"><article><span>Центр → Связь</span><b>Токен бота центра</b><p>Токен единственного центрального бота из @BotFather.</p><b>ID группы для обмена</b><p>Число с префиксом <code>-100</code>.</p><b>Ссылка-приглашение</b><p>Необязательна; нужна только оператору для быстрого входа.</p></article><article><span>Центр → Точки</span><b>Токен бота рабочего места</b><p>Для каждой точки свой бот.</p><b>ID темы</b><p>Число темы именно этой точки.</p><b>Номер и название</b><p>Внутренние обозначения; они попадут в готовый файл настроек.</p></article><article><span>Центр → Получатели</span><b>Telegram</b><p>Токен бота получателя и ID его рабочей группы/канала.</p><b>Обозначение радиосети</b><p>Например 313; это поле печатается в сообщении и Word.</p><b>Шаблон</b><p>Не удаляйте обязательные метки в двойных фигурных скобках.</p></article></div>
+    <p class="note">Сначала нажмите «Проверить и сохранить» у связи, затем создавайте точки и получателей. Готовый JSON/комплект каждой точки переносится только на соответствующий компьютер.</p>
+  </section>
+
+  <section id="check">
+    <span class="step">5 · ПРОВЕРКА</span><h2>Контрольный список перед работой</h2>
+    <div class="final-check"><label><input type="checkbox"> У всех транспортных ботов включён Bot-to-Bot Communication</label><label><input type="checkbox"> У бота центра выключен Group Privacy</label><label><input type="checkbox"> Центр — администратор технической группы</label><label><input type="checkbox"> Для каждой точки отдельные бот и тема</label><label><input type="checkbox"> ID группы начинается с -100</label><label><input type="checkbox"> В центре опубликованы маршруты</label><label><input type="checkbox"> На каждой точке нажато «Проверить связь с центром»</label><label><input type="checkbox"> На обзоре центра все точки имеют хорошую связь</label></div>
+    <h3>Если что-то не работает</h3>
+    <div class="troubles"><div><b>Центр не видит пакеты</b><span>Проверьте Bot-to-Bot, Group Privacy, права центра, ID группы и тему конкретной точки.</span></div><div><b>Точка не получает подтверждение</b><span>Bot-to-Bot должен быть включён и у бота центра, и у бота точки. Проверьте username серверного бота в конфигурации.</span></div><div><b>Сообщение попало не в ту тему</b><span>Скопируйте ссылку на сообщение именно из нужной темы и перепроверьте ID темы.</span></div><div><b>Ошибка 429</b><span>Не перезапускайте отправку многократно. Программа сама выдерживает паузу Telegram и повторяет попытку.</span></div><div><b>После изменения BotFather ничего не изменилось</b><span>Удалите бота из группы, добавьте заново и нажмите «Обновить» в EAVC Connect.</span></div></div>
+    <div class="limits"><b>Ограничения Telegram, уже учтённые программой</b><span>не более 1 сообщения/с в один чат</span><span>не более 20 сообщений/мин в группу</span><span>общая рассылка около 30 сообщений/с</span><p>При ответе 429 программа использует рекомендованную Telegram паузу, сохраняет очередь и не создаёт дубли.</p></div>
+  </section>
+
+  <section class="sources"><h2>Официальная справка Telegram</h2><p>Инструкция сверена с официальной документацией Telegram. Интерфейс Telegram может немного менять внешний вид, но названия настроек и требуемый результат остаются теми же.</p><a href="https://core.telegram.org/bots/tutorial" target="_blank" rel="noopener">Создание бота и токена</a><a href="https://core.telegram.org/bots/features" target="_blank" rel="noopener">Возможности и настройки ботов</a><a href="https://core.telegram.org/api/bots/bot-to-bot" target="_blank" rel="noopener">Bot-to-Bot Communication</a><a href="https://telegram.org/faq" target="_blank" rel="noopener">Группы, администраторы и ссылки</a></section>
+</main>
+<footer>Локальная инструкция EAVC Connect · токены и реальные ID в страницу не записываются</footer>
+</body>
+</html>

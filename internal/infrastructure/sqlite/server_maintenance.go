@@ -9,19 +9,23 @@ import (
 
 // ServerStats содержит сводные счётчики без содержимого перехватов.
 type ServerStats struct {
-	Clients   int `json:"clients"`
-	Events    int `json:"events"`
-	Pending   int `json:"pending"`
-	Delivered int `json:"delivered"`
-	Expired   int `json:"expired"`
-	Rejected  int `json:"rejected"`
+	Clients         int `json:"clients"`
+	ClientsOnline   int `json:"clients_online"`
+	ClientsDegraded int `json:"clients_degraded"`
+	ClientsOffline  int `json:"clients_offline"`
+	Events          int `json:"events"`
+	Pending         int `json:"pending"`
+	Delivered       int `json:"delivered"`
+	Expired         int `json:"expired"`
+	Rejected        int `json:"rejected"`
 }
 
 // MaintenanceResult описывает только удалённые технические записи.
 type MaintenanceResult struct {
-	Events   int
-	Rejected int
-	Rules    int
+	Events    int
+	Rejected  int
+	Rules     int
+	Incidents int
 }
 
 const serverTerminalEventLimit = 200000
@@ -86,6 +90,16 @@ func (store *ServerStore) PurgeOld(
 	if count, countErr := rules.RowsAffected(); countErr == nil {
 		result.Rules = int(count)
 	}
+	incidents, err := tx.ExecContext(ctx, `
+		DELETE FROM client_connection_incidents
+		WHERE recovered_at < ? AND recovered_at IS NOT NULL`,
+		rejectedBefore.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return MaintenanceResult{}, fmt.Errorf("очистить историю связи: %w", err)
+	}
+	if count, countErr := incidents.RowsAffected(); countErr == nil {
+		result.Incidents = int(count)
+	}
 	if err := tx.Commit(); err != nil {
 		return MaintenanceResult{}, fmt.Errorf("завершить обслуживание сервера: %w", err)
 	}
@@ -100,19 +114,29 @@ func (store *ServerStore) Compact(ctx context.Context) error {
 // Stats считает состояния сервера без чтения содержимого перехватов.
 func (store *ServerStore) Stats(ctx context.Context) (ServerStats, error) {
 	var stats ServerStats
+	cutoffs := map[string]string{
+		"received":  store.historyCutoff(ctx, "received"),
+		"delivered": store.historyCutoff(ctx, "delivered"),
+		"expired":   store.historyCutoff(ctx, "expired"),
+		"rejected":  store.historyCutoff(ctx, "rejected"),
+	}
 	queries := []struct {
 		query  string
+		args   []any
 		target *int
 	}{
-		{"SELECT COUNT(*) FROM server_clients WHERE active=1", &stats.Clients},
-		{"SELECT COUNT(*) FROM received_events", &stats.Events},
-		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='pending'", &stats.Pending},
-		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='delivered'", &stats.Delivered},
-		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='expired'", &stats.Expired},
-		{"SELECT COUNT(*) FROM rejected_packets", &stats.Rejected},
+		{"SELECT COUNT(*) FROM server_clients WHERE active=1", nil, &stats.Clients},
+		{"SELECT COUNT(*) FROM client_health h JOIN server_clients c ON c.client_id=h.client_id WHERE c.active=1 AND h.status='online' AND h.last_seen_at>=?", []any{time.Now().UTC().Add(-150 * time.Second).Format(time.RFC3339Nano)}, &stats.ClientsOnline},
+		{"SELECT COUNT(*) FROM client_health h JOIN server_clients c ON c.client_id=h.client_id WHERE c.active=1 AND h.status='online' AND h.last_seen_at<?", []any{time.Now().UTC().Add(-150 * time.Second).Format(time.RFC3339Nano)}, &stats.ClientsDegraded},
+		{"SELECT COUNT(*) FROM client_health h JOIN server_clients c ON c.client_id=h.client_id WHERE c.active=1 AND h.status='offline'", nil, &stats.ClientsOffline},
+		{"SELECT COUNT(*) FROM received_events WHERE received_at>?", []any{cutoffs["received"]}, &stats.Events},
+		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='pending'", nil, &stats.Pending},
+		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='delivered' AND delivered_at>?", []any{cutoffs["delivered"]}, &stats.Delivered},
+		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='expired' AND expired_at>?", []any{cutoffs["expired"]}, &stats.Expired},
+		{"SELECT COUNT(*) FROM rejected_packets WHERE received_at>?", []any{cutoffs["rejected"]}, &stats.Rejected},
 	}
 	for _, item := range queries {
-		if err := store.db.QueryRowContext(ctx, item.query).Scan(item.target); err != nil {
+		if err := store.db.QueryRowContext(ctx, item.query, item.args...).Scan(item.target); err != nil {
 			return ServerStats{}, err
 		}
 	}

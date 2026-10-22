@@ -2,7 +2,10 @@ package telegram
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -26,32 +29,63 @@ type ClientTransport struct {
 	ThreadID          int64
 	ServerBotID       int64
 	ServerBotUsername string
+	Key               []byte
 }
 
 type probePayload struct {
 	Schema   string `json:"schema"`
 	ClientID string `json:"client_id"`
 	ProbeID  string `json:"probe_id"`
+	SentAt   string `json:"sent_at"`
+	MAC      string `json:"mac"`
 }
 
 // SendProbe отправляет безопасный служебный файл, который сервер подтверждает
 // напрямую клиентскому боту. Конечные группы такой файл никогда не получают.
 func (transport *ClientTransport) SendProbe(ctx context.Context, clientID string) (string, error) {
+	if len(transport.Key) != 32 {
+		return "", fmt.Errorf("для проверки связи не задан ключ рабочей точки")
+	}
 	probeID, err := protocol.UUIDv7(time.Now().UTC(), rand.Reader)
 	if err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(probePayload{Schema: probeSchema, ClientID: clientID, ProbeID: probeID})
+	sentAt := time.Now().UTC().Truncate(time.Second)
+	probe := probePayload{Schema: probeSchema, ClientID: clientID, ProbeID: probeID, SentAt: sentAt.Format(time.RFC3339)}
+	probe.MAC = probeMAC(transport.Key, probe.ClientID, probe.ProbeID, probe.SentAt)
+	payload, err := json.Marshal(probe)
 	if err != nil {
 		return "", err
 	}
 	_, err = transport.API.SendDocument(
-		ctx, transport.ChatID, transport.ThreadID, probeID+".icprobe", payload, "Проверка связи Intercept",
+		ctx, transport.ChatID, transport.ThreadID, probeID+".icprobe", payload, "Проверка связи EAVC Connect",
 	)
 	if err != nil {
 		return "", err
 	}
 	return probeID, nil
+}
+
+func probeMAC(key []byte, clientID, probeID, sentAt string) string {
+	digest := hmac.New(sha256.New, key)
+	_, _ = digest.Write([]byte(probeSchema + "\x00" + clientID + "\x00" + probeID + "\x00" + sentAt))
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
+// VerifyProbe требует одновременно действующий Telegram-транспорт и ключ точки.
+// Ограничение времени не позволяет повторно использовать старый подписанный файл.
+func VerifyProbe(packet application.IncomingPacket, key []byte) bool {
+	if len(key) != 32 || packet.ProbeClientID == "" || packet.ProbeID == "" ||
+		packet.ProbeMAC == "" || packet.ProbeSentAt.IsZero() || packet.SentAt.IsZero() {
+		return false
+	}
+	expected := probeMAC(key, packet.ProbeClientID, packet.ProbeID, packet.ProbeSentAt.Format(time.RFC3339))
+	actual, err := hex.DecodeString(packet.ProbeMAC)
+	if err != nil || !hmac.Equal([]byte(expected), []byte(hex.EncodeToString(actual))) {
+		return false
+	}
+	delta := packet.SentAt.Sub(packet.ProbeSentAt)
+	return delta >= -time.Minute && delta <= 2*time.Minute
 }
 
 // Send загружает один зашифрованный пакет в тему зарегистрированной точки.
