@@ -44,6 +44,10 @@ func TestServerObservabilityTracksOutageAndRecovery(t *testing.T) {
 	if err != nil || len(page.Clients) != 1 || page.Clients[0].Quality != "good" {
 		t.Fatalf("неожиданное состояние связи: %+v err=%v", page, err)
 	}
+	filtered, err := store.HistoryPage(ctx, "clients", 30, 0, started.Add(time.Minute), HistoryFilter{Quality: "offline"})
+	if err != nil || len(filtered.Clients) != 0 {
+		t.Fatalf("фильтр качества связи не применён: %+v err=%v", filtered, err)
+	}
 	if err := store.EvaluateClientHealth(ctx, started.Add(6*time.Minute), 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +109,17 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 	delivered, err := store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC())
 	if err != nil || delivered.Total != 1 {
 		t.Fatalf("история доставки: %+v err=%v", delivered, err)
+	}
+	filtered, err := store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC(), HistoryFilter{
+		ClientID: "textile", DestinationID: plan.Deliveries[0].Destination.ID, Query: "Текстиль",
+	})
+	if err != nil || filtered.Total != 1 {
+		t.Fatalf("комбинированный фильтр доставки: %+v err=%v", filtered, err)
+	}
+	future := time.Now().UTC().Add(24 * time.Hour)
+	filtered, err = store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC(), HistoryFilter{From: &future})
+	if err != nil || filtered.Total != 0 {
+		t.Fatalf("фильтр периода доставки: %+v err=%v", filtered, err)
 	}
 	pending, err := store.HistoryPage(ctx, "pending", 30, 0, time.Now().UTC())
 	if err != nil || pending.Total != 1 || pending.Clearable {

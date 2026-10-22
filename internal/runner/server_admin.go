@@ -297,8 +297,10 @@ func (server *Server) Clients(ctx context.Context) ([]application.RegisteredClie
 }
 
 // History возвращает безопасную историю выбранного счётчика обзора.
-func (server *Server) History(ctx context.Context, kind string, limit, offset int) (stateDB.ServerHistoryPage, error) {
-	return server.Store.HistoryPage(ctx, kind, limit, offset, time.Now().UTC())
+type HistoryFilter = stateDB.HistoryFilter
+
+func (server *Server) History(ctx context.Context, kind string, limit, offset int, filter HistoryFilter) (stateDB.ServerHistoryPage, error) {
+	return server.Store.HistoryPage(ctx, kind, limit, offset, time.Now().UTC(), filter)
 }
 
 // ClearHistory очищает представление завершённой истории, не затрагивая очередь.

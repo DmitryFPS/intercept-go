@@ -75,7 +75,27 @@ func (handler Handler) history(writer http.ResponseWriter, request *http.Request
 	if err != nil {
 		offset = 0
 	}
-	page, err := handler.Server.History(request.Context(), request.PathValue("kind"), limit, offset)
+	filter := runner.HistoryFilter{
+		Query: strings.TrimSpace(request.URL.Query().Get("q")), ClientID: strings.TrimSpace(request.URL.Query().Get("client")),
+		DestinationID: strings.TrimSpace(request.URL.Query().Get("destination")), Quality: strings.TrimSpace(request.URL.Query().Get("quality")),
+	}
+	if value := request.URL.Query().Get("from"); value != "" {
+		parsed, parseErr := time.Parse(time.RFC3339, value)
+		if parseErr != nil {
+			handler.publicError(writer, http.StatusBadRequest, "Неверно задано начало периода.", parseErr)
+			return
+		}
+		filter.From = &parsed
+	}
+	if value := request.URL.Query().Get("to"); value != "" {
+		parsed, parseErr := time.Parse(time.RFC3339, value)
+		if parseErr != nil {
+			handler.publicError(writer, http.StatusBadRequest, "Неверно задан конец периода.", parseErr)
+			return
+		}
+		filter.To = &parsed
+	}
+	page, err := handler.Server.History(request.Context(), request.PathValue("kind"), limit, offset, filter)
 	if err != nil {
 		handler.publicError(writer, http.StatusBadRequest, "Не удалось загрузить историю.", err)
 		return

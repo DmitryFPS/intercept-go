@@ -31,6 +31,7 @@ const historyPageSize = 30;
 let historyKind = '';
 let historyOffset = 0;
 let historyData = null;
+let historyFilters = { q: '', client: '', destination: '', quality: '', from: '', to: '' };
 
 const historySections = {
   clients: ['Рабочие точки', 'Текущее качество связи, последние сигналы, сбои и восстановления.'],
@@ -182,18 +183,63 @@ document.querySelectorAll('[data-history]').forEach(button => {
   button.addEventListener('click', () => openHistory(button.dataset.history));
 });
 
-async function openHistory(kind, offset = 0) {
+function resetHistoryFilters() {
+  historyFilters = { q: '', client: '', destination: '', quality: '', from: '', to: '' };
+  $('historySearch').value = '';
+  $('historyClientFilter').value = '';
+  $('historyDestinationFilter').value = '';
+  $('historyQualityFilter').value = '';
+  $('historyFromFilter').value = '';
+  $('historyToFilter').value = '';
+}
+
+function prepareHistoryFilters(kind) {
+  $('historyClientFilter').innerHTML = '<option value="">Все точки</option>' + clients.map(client =>
+    `<option value="${escapeHTML(client.id)}">${escapeHTML(client.number)} · ${escapeHTML(client.name)}</option>`
+  ).join('');
+  $('historyDestinationFilter').innerHTML = '<option value="">Все получатели</option>' + Object.values(destinations).map(destination =>
+    `<option value="${escapeHTML(destination.id)}">${escapeHTML(destination.name)}</option>`
+  ).join('');
+  $('historyClientField').classList.toggle('hidden', kind === 'rejected');
+  $('historyDestinationField').classList.toggle('hidden', !['pending', 'delivered', 'expired'].includes(kind));
+  $('historyQualityField').classList.toggle('hidden', kind !== 'clients');
+}
+
+function historyFilterDate(value, endOfMinute = false) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  if (endOfMinute && value.length === 16) date.setSeconds(59, 999);
+  return date.toISOString();
+}
+
+function historyRequestURL(kind, offset) {
+  const query = new URLSearchParams({ limit: String(historyPageSize), offset: String(offset) });
+  if (historyFilters.q) query.set('q', historyFilters.q);
+  if (historyFilters.client) query.set('client', historyFilters.client);
+  if (historyFilters.destination) query.set('destination', historyFilters.destination);
+  if (historyFilters.quality) query.set('quality', historyFilters.quality);
+  const from = historyFilterDate(historyFilters.from);
+  const to = historyFilterDate(historyFilters.to, true);
+  if (from) query.set('from', from);
+  if (to) query.set('to', to);
+  return `/api/history/${encodeURIComponent(kind)}?${query}`;
+}
+
+async function openHistory(kind, offset = 0, keepFilters = false) {
+  if (!keepFilters || kind !== historyKind) resetHistoryFilters();
   historyKind = kind;
   historyOffset = Math.max(0, offset);
   const section = historySections[kind];
   if (!section) return;
   $('historyTitle').textContent = section[0];
   $('historyDescription').textContent = section[1];
+  prepareHistoryFilters(kind);
   openDialog('historyDialog');
   $('historyList').innerHTML = '<div class="history-empty">Загружаем данные…</div>';
   $('clientHealthList').classList.add('hidden');
   try {
-    historyData = await request(`/api/history/${encodeURIComponent(kind)}?limit=${historyPageSize}&offset=${historyOffset}`);
+    historyData = await request(historyRequestURL(kind, historyOffset));
     renderHistory();
   } catch (error) {
     $('historyList').innerHTML = '';
@@ -289,6 +335,7 @@ function renderHistory() {
   $('historyEmpty').textContent = 'Записей пока нет.';
   $('historyEmpty').classList.toggle('hidden', hasRows);
   $('historyRetention').textContent = `Автоочистка: ${data.retention_days || 30} дней.`;
+  $('historyFilteredCount').textContent = `Найдено: ${data.total || 0}`;
   const pageNumber = Math.floor(historyOffset / historyPageSize) + 1;
   const pageCount = Math.max(1, Math.ceil((data.total || 0) / historyPageSize));
   $('historyPage').textContent = `${pageNumber} из ${pageCount}`;
@@ -297,15 +344,33 @@ function renderHistory() {
   $('historyClear').classList.toggle('hidden', !data.clearable);
 }
 
-$('historyPrev').addEventListener('click', () => openHistory(historyKind, historyOffset - historyPageSize));
-$('historyNext').addEventListener('click', () => openHistory(historyKind, historyOffset + historyPageSize));
+$('historyPrev').addEventListener('click', () => openHistory(historyKind, historyOffset - historyPageSize, true));
+$('historyNext').addEventListener('click', () => openHistory(historyKind, historyOffset + historyPageSize, true));
+$('historyApplyFilters').addEventListener('click', () => {
+  historyFilters = {
+    q: $('historySearch').value.trim(), client: $('historyClientFilter').value,
+    destination: $('historyDestinationFilter').value, quality: $('historyQualityFilter').value,
+    from: $('historyFromFilter').value, to: $('historyToFilter').value
+  };
+  openHistory(historyKind, 0, true);
+});
+$('historyResetFilters').addEventListener('click', () => {
+  resetHistoryFilters();
+  openHistory(historyKind, 0, true);
+});
+$('historySearch').addEventListener('keydown', event => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    $('historyApplyFilters').click();
+  }
+});
 $('historyClear').addEventListener('click', async event => {
   const label = historySections[historyKind]?.[0] || 'этого раздела';
   if (!confirm(`Очистить видимую историю «${label}»? Активные очереди и настройки не изменятся.`)) return;
   setButtonBusy(event.currentTarget, true, 'Очищаем…');
   try {
     await request(`/api/history/${encodeURIComponent(historyKind)}`, { method: 'DELETE' });
-    await Promise.all([openHistory(historyKind, 0), refreshStatus()]);
+    await Promise.all([openHistory(historyKind, 0, true), refreshStatus()]);
     notify('История очищена. Активные очереди сохранены.', true);
   } catch (error) {
     notify(error.message);

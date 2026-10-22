@@ -99,6 +99,15 @@
 
 <dialog id="historyDialog" class="modal history-modal">
   <div class="modal-head"><div><span class="eyebrow">СОСТОЯНИЕ И ИСТОРИЯ</span><h2 id="historyTitle">Подробности</h2><p id="historyDescription" class="muted"></p></div><button type="button" class="icon-button" data-close="historyDialog" aria-label="Закрыть">×</button></div>
+  <div id="historyFilters" class="history-filters">
+    <label class="history-filter-search">Поиск<input id="historySearch" placeholder="Точка, получатель, причина или идентификатор"></label>
+    <label id="historyClientField">Рабочая точка<select id="historyClientFilter"><option value="">Все точки</option></select></label>
+    <label id="historyDestinationField">Получатель<select id="historyDestinationFilter"><option value="">Все получатели</option></select></label>
+    <label id="historyQualityField">Качество связи<select id="historyQualityFilter"><option value="">Любое</option><option value="good">Хорошая</option><option value="degraded">Нестабильная</option><option value="offline">Нет связи</option><option value="unknown">Первый сигнал не получен</option></select></label>
+    <label>С даты<input id="historyFromFilter" type="datetime-local"></label>
+    <label>По дату<input id="historyToFilter" type="datetime-local"></label>
+    <div class="history-filter-actions"><button id="historyApplyFilters" class="button primary" type="button">Применить</button><button id="historyResetFilters" class="button ghost" type="button">Сбросить</button><span id="historyFilteredCount" class="muted"></span></div>
+  </div>
   <div id="clientHealthList" class="health-list hidden"></div>
   <div id="historyList" class="history-list"></div>
   <div id="historyEmpty" class="history-empty hidden">Записей пока нет.</div>

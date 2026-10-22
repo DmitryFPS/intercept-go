@@ -72,6 +72,17 @@ type ServerHistoryPage struct {
 	RetentionDays int                  `json:"retention_days"`
 }
 
+// HistoryFilter ограничивает историю только операторскими признаками. Текст
+// самого перехвата по-прежнему не раскрывается и в фильтрации не участвует.
+type HistoryFilter struct {
+	Query         string
+	ClientID      string
+	DestinationID string
+	Quality       string
+	From          *time.Time
+	To            *time.Time
+}
+
 // RecordClientSignalByTransport отмечает только пакет уже авторизованного бота.
 func (store *ServerStore) RecordClientSignalByTransport(
 	ctx context.Context, senderBotID int64, chatID, threadID int64, probe bool, at time.Time,
@@ -206,17 +217,22 @@ func (store *ServerStore) EvaluateClientHealth(ctx context.Context, now time.Tim
 }
 
 // HistoryPage возвращает только служебные признаки и никогда не раскрывает текст перехвата.
-func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, offset int, now time.Time) (ServerHistoryPage, error) {
+func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, offset int, now time.Time, filters ...HistoryFilter) (ServerHistoryPage, error) {
 	if limit <= 0 || limit > 100 || offset < 0 {
 		return ServerHistoryPage{}, errors.New("некорректные параметры страницы")
 	}
 	page := ServerHistoryPage{Kind: kind, Limit: limit, Offset: offset, RetentionDays: 30, Clearable: kind != "pending"}
+	filter := HistoryFilter{}
+	if len(filters) > 0 {
+		filter = filters[0]
+	}
 	if kind == "clients" {
 		clients, err := store.clientHealth(ctx, now.UTC())
 		if err != nil {
 			return ServerHistoryPage{}, err
 		}
-		incidents, total, err := store.connectionIncidents(ctx, limit, offset)
+		clients = filterClientHealth(clients, filter)
+		incidents, total, err := store.connectionIncidents(ctx, limit, offset, filter)
 		if err != nil {
 			return ServerHistoryPage{}, err
 		}
@@ -226,14 +242,14 @@ func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, o
 	}
 	if kind == "rejected" {
 		page.RetentionDays = 90
-		items, total, err := store.rejectedHistory(ctx, limit, offset)
+		items, total, err := store.rejectedHistory(ctx, limit, offset, filter)
 		page.Items, page.Total = items, total
 		return page, err
 	}
 	if kind != "received" && kind != "pending" && kind != "delivered" && kind != "expired" {
 		return ServerHistoryPage{}, errors.New("неизвестный раздел истории")
 	}
-	items, total, err := store.eventHistory(ctx, kind, limit, offset)
+	items, total, err := store.eventHistory(ctx, kind, limit, offset, filter)
 	page.Items, page.Total = items, total
 	return page, err
 }
@@ -278,18 +294,49 @@ func (store *ServerStore) clientHealth(ctx context.Context, now time.Time) ([]Cl
 	return result, rows.Err()
 }
 
-func (store *ServerStore) connectionIncidents(ctx context.Context, limit, offset int) ([]ConnectionIncident, int, error) {
+func filterClientHealth(clients []ClientHealth, filter HistoryFilter) []ClientHealth {
+	query := strings.ToLower(strings.TrimSpace(filter.Query))
+	result := make([]ClientHealth, 0, len(clients))
+	for _, client := range clients {
+		if filter.ClientID != "" && client.ClientID != filter.ClientID {
+			continue
+		}
+		if filter.Quality != "" && client.Quality != filter.Quality {
+			continue
+		}
+		searchable := strings.ToLower(strings.Join([]string{client.Number, client.Name, client.CurrentReason}, " "))
+		if query != "" && !strings.Contains(searchable, query) {
+			continue
+		}
+		result = append(result, client)
+	}
+	return result
+}
+
+func (store *ServerStore) connectionIncidents(ctx context.Context, limit, offset int, filter HistoryFilter) ([]ConnectionIncident, int, error) {
 	cutoff := store.historyCutoff(ctx, "clients")
+	where := []string{"i.started_at>?"}
+	args := []any{cutoff}
+	appendHistoryTimeFilter(&where, &args, "i.started_at", filter)
+	if filter.ClientID != "" {
+		where = append(where, "i.client_id=?")
+		args = append(args, filter.ClientID)
+	}
+	if query := strings.TrimSpace(filter.Query); query != "" {
+		where = append(where, "(c.name LIKE ? OR i.reason LIKE ?)")
+		pattern := "%" + query + "%"
+		args = append(args, pattern, pattern)
+	}
+	clause := " WHERE " + strings.Join(where, " AND ")
 	var total int
-	if err := store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM client_connection_incidents WHERE started_at>?", cutoff,
-	).Scan(&total); err != nil {
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_connection_incidents i JOIN server_clients c ON c.client_id=i.client_id"+clause, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := store.db.QueryContext(ctx, `
+	query := `
 		SELECT i.id,i.client_id,c.name,i.started_at,i.recovered_at,i.reason
 		FROM client_connection_incidents i JOIN server_clients c ON c.client_id=i.client_id
-		WHERE i.started_at>? ORDER BY i.started_at DESC LIMIT ? OFFSET ?`, cutoff, limit, offset)
+		` + clause + ` ORDER BY i.started_at DESC LIMIT ? OFFSET ?`
+	rows, err := store.db.QueryContext(ctx, query, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -309,7 +356,7 @@ func (store *ServerStore) connectionIncidents(ctx context.Context, limit, offset
 	return result, total, rows.Err()
 }
 
-func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, offset int) ([]ServerHistoryItem, int, error) {
+func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, offset int, filter HistoryFilter) ([]ServerHistoryItem, int, error) {
 	cutoff := store.historyCutoff(ctx, kind)
 	stateClause, timeColumn := "", "e.received_at"
 	if kind != "received" {
@@ -327,9 +374,34 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 	if kind != "received" {
 		join = " JOIN delivery_jobs j ON j.event_id=e.event_id"
 	}
-	where := " WHERE " + timeColumn + ">?" + stateClause
+	conditions := []string{timeColumn + ">?"}
+	args := []any{cutoff}
+	if stateClause != "" {
+		conditions = append(conditions, strings.TrimPrefix(stateClause, " AND "))
+	}
+	appendHistoryTimeFilter(&conditions, &args, timeColumn, filter)
+	if filter.ClientID != "" {
+		conditions = append(conditions, "e.client_id=?")
+		args = append(args, filter.ClientID)
+	}
+	if filter.DestinationID != "" && kind != "received" {
+		conditions = append(conditions, "j.destination_id=?")
+		args = append(args, filter.DestinationID)
+	}
+	if query := strings.TrimSpace(filter.Query); query != "" {
+		pattern := "%" + query + "%"
+		search := "(c.name LIKE ? OR e.event_id LIKE ?)"
+		args = append(args, pattern, pattern)
+		if kind != "received" {
+			search = "(c.name LIKE ? OR e.event_id LIKE ? OR j.destination_id LIKE ? OR j.last_error LIKE ?)"
+			args = append(args, pattern, pattern)
+		}
+		conditions = append(conditions, search)
+	}
+	where := " WHERE " + strings.Join(conditions, " AND ")
 	var total int
-	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM received_events e"+join+where, cutoff).Scan(&total); err != nil {
+	countQuery := "SELECT COUNT(*) FROM received_events e JOIN server_clients c ON c.client_id=e.client_id" + join + where
+	if err := store.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	columns := "e.event_id,e.client_id,c.name,e.payload_json,'' AS destination_id,NULL AS delivery_json,'received' AS state,e.received_at,0 AS attempts,NULL AS next_attempt_at,'' AS last_error"
@@ -337,7 +409,7 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 		columns = "e.event_id,e.client_id,c.name,e.payload_json,j.destination_id,j.delivery_json,j.state," + timeColumn + ",j.attempts,j.next_attempt_at,j.last_error"
 	}
 	query := "SELECT " + columns + " FROM received_events e JOIN server_clients c ON c.client_id=e.client_id" + join + where + " ORDER BY " + timeColumn + " DESC LIMIT ? OFFSET ?"
-	rows, err := store.db.QueryContext(ctx, query, cutoff, limit, offset)
+	rows, err := store.db.QueryContext(ctx, query, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -384,15 +456,25 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 	return result, total, rows.Err()
 }
 
-func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int) ([]ServerHistoryItem, int, error) {
+func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int, filter HistoryFilter) ([]ServerHistoryItem, int, error) {
 	cutoff := store.historyCutoff(ctx, "rejected")
+	where := []string{"received_at>?"}
+	args := []any{cutoff}
+	appendHistoryTimeFilter(&where, &args, "received_at", filter)
+	if query := strings.TrimSpace(filter.Query); query != "" {
+		where = append(where, "(sender_bot_username LIKE ? OR reason LIKE ? OR CAST(thread_id AS TEXT) LIKE ?)")
+		pattern := "%" + query + "%"
+		args = append(args, pattern, pattern, pattern)
+	}
+	clause := " WHERE " + strings.Join(where, " AND ")
 	var total int
-	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets WHERE received_at>?", cutoff).Scan(&total); err != nil {
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets"+clause, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := store.db.QueryContext(ctx, `
+	query := `
 		SELECT id,sender_bot_username,thread_id,reason,received_at FROM rejected_packets
-		WHERE received_at>? ORDER BY received_at DESC LIMIT ? OFFSET ?`, cutoff, limit, offset)
+		` + clause + ` ORDER BY received_at DESC LIMIT ? OFFSET ?`
+	rows, err := store.db.QueryContext(ctx, query, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -415,6 +497,17 @@ func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int
 		result = append(result, item)
 	}
 	return result, total, rows.Err()
+}
+
+func appendHistoryTimeFilter(where *[]string, args *[]any, column string, filter HistoryFilter) {
+	if filter.From != nil {
+		*where = append(*where, column+">=?")
+		*args = append(*args, stamp(filter.From.UTC()))
+	}
+	if filter.To != nil {
+		*where = append(*where, column+"<=?")
+		*args = append(*args, stamp(filter.To.UTC()))
+	}
 }
 
 // ClearHistory скрывает завершённую историю с экрана, не трогая очередь и дедупликацию.
