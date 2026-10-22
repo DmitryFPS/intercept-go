@@ -98,6 +98,10 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 	if err != nil || received.Total != 1 {
 		t.Fatalf("история приёма: %+v err=%v", received, err)
 	}
+	if len(received.Items) != 1 || received.Items[0].SourceRecord != event.Source.ID ||
+		received.Items[0].SourceAt == nil || received.Items[0].SourceMode != string(event.Mode) {
+		t.Fatalf("история не содержит полезные сведения EAVC: %+v", received.Items)
+	}
 	delivered, err := store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC())
 	if err != nil || delivered.Total != 1 {
 		t.Fatalf("история доставки: %+v err=%v", delivered, err)

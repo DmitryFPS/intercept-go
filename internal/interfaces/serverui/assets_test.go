@@ -57,6 +57,14 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	if !strings.Contains(javascript, "Активные очереди и настройки не изменятся") {
 		t.Error("интерфейс не объясняет безопасные границы очистки")
 	}
+	if strings.Contains(javascript, "`ID: ${item.id}`") {
+		t.Error("операторский экран не должен подставлять технический UUID вместо полезных сведений")
+	}
+	for _, fragment := range []string{"Запись EAVC №", "время перехвата", "Данные старше разрешённого срока доставки"} {
+		if !strings.Contains(javascript, fragment) {
+			t.Errorf("в истории отсутствует понятное оператору поле %q", fragment)
+		}
+	}
 }
 
 func TestTelegramGuideStaysAvailableAndComplete(t *testing.T) {

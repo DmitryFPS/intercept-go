@@ -218,6 +218,42 @@ function formatDelay(seconds) {
   return `${Math.floor(seconds / 3600)} ч. назад`;
 }
 
+function historyStateLabel(state) {
+  return ({
+    received: 'Принято центром',
+    pending: 'Ожидает отправки',
+    delivered: 'Доставлено',
+    expired: 'Срок доставки истёк',
+    rejected: 'Отклонено центром'
+  })[state] || 'Состояние обновлено';
+}
+
+function historyReasonLabel(reason) {
+  const value = String(reason || '').trim();
+  if (!value) return '';
+  const known = {
+    older_than_delivery_window: 'Данные старше разрешённого срока доставки (30 минут)',
+    invalid_signature: 'Не удалось подтвердить подлинность пакета',
+    unknown_client: 'Рабочая точка не зарегистрирована в центре',
+    invalid_payload: 'Получены повреждённые или неполные данные',
+    duplicate_conflict: 'Повторный пакет отличается от уже принятого'
+  };
+  return known[value] || value.replaceAll('_', ' ');
+}
+
+function historyDetails(item) {
+  const details = [];
+  if (item.source_record) details.push(`Запись EAVC № ${item.source_record}`);
+  if (item.source_at) details.push(`время перехвата: ${formatDate(item.source_at)}`);
+  if (item.source_mode === 'deferred') details.push('отложенный режим');
+  if (item.attempts) details.push(`попыток отправки: ${item.attempts}`);
+  if (item.next_attempt_at && item.state === 'pending') details.push(`следующая попытка: ${formatDate(item.next_attempt_at)}`);
+  const reason = historyReasonLabel(item.reason);
+  if (reason) details.push(`причина: ${reason}`);
+  if (!details.length) details.push(historyStateLabel(item.state));
+  return details.join(' · ');
+}
+
 function renderHistory() {
   const data = historyData || {};
   const clients = data.clients || [];
@@ -245,11 +281,9 @@ function renderHistory() {
       </article>`).join('')
     : items.map(item => {
       const route = [item.client_name, item.destination].filter(Boolean).join(' → ');
-      const attempts = item.attempts ? `Попыток: ${item.attempts}. ` : '';
-      const retry = item.next_attempt_at && item.state === 'pending' ? `Следующий повтор: ${formatDate(item.next_attempt_at)}. ` : '';
       return `<article class="history-row">
-        <strong>${escapeHTML(item.unit_name || item.client_name || item.id)}</strong><span>${escapeHTML(route || item.state)}</span><time>${formatDate(item.occurred_at)}</time>
-        <p>${escapeHTML(`${attempts}${retry}${item.reason || ''}` || `ID: ${item.id}`)}</p>
+		<strong>${escapeHTML(item.unit_name || item.client_name || 'Пакет без названия')}</strong><span>${escapeHTML(route || historyStateLabel(item.state))}</span><time>${formatDate(item.occurred_at)}</time>
+		<p>${escapeHTML(historyDetails(item))}</p>
       </article>`;
     }).join('');
 

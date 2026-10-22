@@ -51,6 +51,9 @@ type ServerHistoryItem struct {
 	Destination   string     `json:"destination,omitempty"`
 	State         string     `json:"state"`
 	OccurredAt    time.Time  `json:"occurred_at"`
+	SourceAt      *time.Time `json:"source_at,omitempty"`
+	SourceRecord  int64      `json:"source_record,omitempty"`
+	SourceMode    string     `json:"source_mode,omitempty"`
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
 	Attempts      int        `json:"attempts,omitempty"`
 	Reason        string     `json:"reason,omitempty"`
@@ -356,6 +359,15 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 			var event domain.Event
 			if json.Unmarshal(plain, &event) == nil {
 				item.UnitName = event.Position.UnitName
+				item.SourceRecord = event.Source.ID
+				item.SourceMode = string(event.Mode)
+				sourceAt := event.SourceAt
+				if sourceAt.IsZero() {
+					sourceAt = event.ObservedAt
+				}
+				if !sourceAt.IsZero() {
+					item.SourceAt = &sourceAt
+				}
 			}
 		}
 		if len(deliveryPayload) > 0 {
