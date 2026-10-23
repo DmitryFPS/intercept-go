@@ -254,8 +254,8 @@ function prepareHistoryFilters(kind) {
   $('historyClientFilter').innerHTML = '<option value="">Все точки</option>' + clients.map(client =>
     `<option value="${escapeHTML(client.id)}" ${client.id === historyFilters.client ? 'selected' : ''}>${escapeHTML(client.number)} · ${escapeHTML(client.name)}</option>`
   ).join('');
-  $('historyDestinationFilter').innerHTML = '<option value="">Все получатели</option>' + Object.values(destinations).map(destination =>
-    `<option value="${escapeHTML(destination.id)}" ${destination.id === historyFilters.destination ? 'selected' : ''}>${escapeHTML(destination.name)}</option>`
+  $('historyDestinationFilter').innerHTML = '<option value="">Все получатели</option>' + Object.entries(destinations).map(([id, destination]) =>
+    `<option value="${escapeHTML(id)}" ${id === historyFilters.destination ? 'selected' : ''}>${escapeHTML(destination.name)}</option>`
   ).join('');
   $('historySearch').value = historyFilters.q;
   $('historyQualityFilter').value = historyFilters.quality;

@@ -341,21 +341,23 @@ func (store *ServerStore) connectionIncidents(ctx context.Context, limit, offset
 		where = append(where, "i.client_id=?")
 		args = append(args, filter.ClientID)
 	}
-	if query := strings.TrimSpace(filter.Query); query != "" {
-		where = append(where, "(c.name LIKE ? OR i.reason LIKE ?)")
-		pattern := "%" + query + "%"
-		args = append(args, pattern, pattern)
-	}
 	clause := " WHERE " + strings.Join(where, " AND ")
-	var total int
-	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_connection_incidents i JOIN server_clients c ON c.client_id=i.client_id"+clause, args...).Scan(&total); err != nil {
-		return nil, 0, err
+	searchQuery := strings.ToLower(strings.TrimSpace(filter.Query))
+	total := 0
+	if searchQuery == "" {
+		if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_connection_incidents i JOIN server_clients c ON c.client_id=i.client_id"+clause, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
 	query := `
 		SELECT i.id,i.client_id,c.name,i.started_at,i.recovered_at,i.reason
-		FROM client_connection_incidents i JOIN server_clients c ON c.client_id=i.client_id
-		` + clause + ` ORDER BY i.started_at DESC LIMIT ? OFFSET ?`
-	rows, err := store.db.QueryContext(ctx, query, append(args, limit, offset)...)
+		FROM client_connection_incidents i JOIN server_clients c ON c.client_id=i.client_id ` + clause + ` ORDER BY i.started_at DESC`
+	queryArgs := args
+	if searchQuery == "" {
+		query += " LIMIT ? OFFSET ?"
+		queryArgs = append(queryArgs, limit, offset)
+	}
+	rows, err := store.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -370,6 +372,16 @@ func (store *ServerStore) connectionIncidents(ctx context.Context, limit, offset
 		}
 		item.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 		item.RecoveredAt = parseNullableTime(recovered)
+		if searchQuery != "" {
+			searchable := strings.ToLower(strings.Join([]string{item.ClientID, item.ClientName, item.Reason}, " "))
+			if !strings.Contains(searchable, searchQuery) {
+				continue
+			}
+			total++
+			if total <= offset || len(result) >= limit {
+				continue
+			}
+		}
 		result = append(result, item)
 	}
 	return result, total, rows.Err()
@@ -504,20 +516,22 @@ func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int
 	where := []string{"received_at>?"}
 	args := []any{cutoff}
 	appendHistoryTimeFilter(&where, &args, "received_at", filter)
-	if query := strings.TrimSpace(filter.Query); query != "" {
-		where = append(where, "(sender_bot_username LIKE ? OR reason LIKE ? OR CAST(thread_id AS TEXT) LIKE ?)")
-		pattern := "%" + query + "%"
-		args = append(args, pattern, pattern, pattern)
-	}
 	clause := " WHERE " + strings.Join(where, " AND ")
-	var total int
-	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets"+clause, args...).Scan(&total); err != nil {
-		return nil, 0, err
+	searchQuery := strings.ToLower(strings.TrimSpace(filter.Query))
+	total := 0
+	if searchQuery == "" {
+		if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets"+clause, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
 	query := `
-		SELECT id,sender_bot_username,thread_id,reason,received_at FROM rejected_packets
-		` + clause + ` ORDER BY received_at DESC LIMIT ? OFFSET ?`
-	rows, err := store.db.QueryContext(ctx, query, append(args, limit, offset)...)
+		SELECT id,sender_bot_username,thread_id,reason,received_at FROM rejected_packets ` + clause + ` ORDER BY received_at DESC`
+	queryArgs := args
+	if searchQuery == "" {
+		query += " LIMIT ? OFFSET ?"
+		queryArgs = append(queryArgs, limit, offset)
+	}
+	rows, err := store.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -537,6 +551,16 @@ func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int
 		item.Destination = fmt.Sprintf("Тема %d", thread)
 		item.State = "rejected"
 		item.OccurredAt, _ = time.Parse(time.RFC3339Nano, occurred)
+		if searchQuery != "" {
+			searchable := strings.ToLower(strings.Join([]string{item.ID, item.ClientName, item.Destination, item.Reason}, " "))
+			if !strings.Contains(searchable, searchQuery) {
+				continue
+			}
+			total++
+			if total <= offset || len(result) >= limit {
+				continue
+			}
+		}
 		result = append(result, item)
 	}
 	return result, total, rows.Err()

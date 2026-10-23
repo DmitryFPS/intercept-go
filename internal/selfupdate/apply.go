@@ -21,6 +21,7 @@ import (
 type ApplyOptions struct {
 	BaseDir, Package, Product, FromVersion, ToVersion string
 	Application, Address, TokenFile, WorkRoot         string
+	ReadyFile                                         string
 	OldPID                                            int
 	PublicKey                                         string
 }
@@ -28,7 +29,7 @@ type ApplyOptions struct {
 // Apply performs a transactional switch: stop, backup, replace, health-check,
 // and either commit or restore both executable files and persistent data.
 func Apply(options ApplyOptions) error {
-	if options.OldPID <= 0 || options.BaseDir == "" || options.Package == "" || options.WorkRoot == "" {
+	if options.OldPID <= 0 || options.BaseDir == "" || options.Package == "" || options.WorkRoot == "" || options.ReadyFile == "" {
 		return errors.New("неполные параметры обновления")
 	}
 	// Помощник запускается из WorkRoot, поэтому Windows не позволит удалить сам
@@ -44,7 +45,13 @@ func Apply(options ApplyOptions) error {
 		return finishApply(options, Result{State: "failed", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: "Повторная проверка пакета не пройдена: " + err.Error(), UpdatedAt: time.Now()}, err)
 	}
 	if plan.Manifest.Version != options.ToVersion {
-		return errors.New("версия пакета изменилась после подготовки")
+		err := errors.New("версия пакета изменилась после подготовки")
+		return finishApply(options, Result{State: "failed", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: "Версия пакета изменилась после подготовки; приложение продолжает работать.", UpdatedAt: time.Now()}, err)
+	}
+	// Старое приложение завершает работу только после этого сигнала. Так ошибка
+	// повторной проверки не может оставить рабочее место без запущенной версии.
+	if err := os.WriteFile(options.ReadyFile, []byte("ready\n"), 0o600); err != nil {
+		return finishApply(options, Result{State: "failed", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: "Помощник обновления не смог подтвердить готовность; приложение продолжает работать.", UpdatedAt: time.Now()}, err)
 	}
 	if err := waitForProcessExit(options.OldPID, 30*time.Second); err != nil {
 		return finishApply(options, Result{State: "failed", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: "Старая версия не завершилась вовремя; файлы не изменялись.", UpdatedAt: time.Now()}, err)
@@ -68,8 +75,8 @@ func Apply(options ApplyOptions) error {
 	// запускает приём и внешние доставки. Поэтому неудачная проверка допускает
 	// полный откат снимка без риска повторной отправки уже доставленных данных.
 	validator, validationErr := startAndCheck(options, options.ToVersion, true)
-	stopCheckedProcess(validator)
 	if validationErr != nil {
+		stopCheckedProcess(validator)
 		rollbackErr := rollbackInstallation(options.BaseDir, backupRoot, plan.Manifest.Files, true)
 		_, restartErr := startAndCheck(options, options.FromVersion, false)
 		message := "Новая версия не прошла изолированную проверку. Предыдущая версия автоматически восстановлена и запущена."
@@ -84,16 +91,17 @@ func Apply(options ApplyOptions) error {
 		}
 		return finishApply(options, Result{State: state, FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: message, UpdatedAt: time.Now()}, errors.Join(validationErr, rollbackErr, restartErr))
 	}
-	process, healthErr := startAndCheck(options, options.ToVersion, false)
-	if healthErr == nil {
+	// Проверенная копия уже работает в изолированном режиме. Включаем обработку
+	// в этом же процессе, чтобы между миграцией и рабочим запуском не появлялось
+	// второго окна отказа. До подтверждения команды внешние доставки не идут,
+	// поэтому при ошибке безопасно восстанавливаются и программы, и данные.
+	activationErr := activateApplication(options, options.ToVersion)
+	if activationErr == nil {
 		cleanupOldFiles(options.BaseDir, plan.Manifest.Files)
 		return finishApply(options, Result{State: "success", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: "Обновление успешно установлено и проверено.", UpdatedAt: time.Now()}, nil)
 	}
-	stopCheckedProcess(process)
-	// После штатного запуска новая версия могла уже подтвердить приём или
-	// доставку. Возврат старого снимка данных создал бы дубли. Поэтому здесь
-	// откатываются только программы; текущая очередь и журнал сохраняются.
-	rollbackErr := rollbackInstallation(options.BaseDir, backupRoot, plan.Manifest.Files, false)
+	stopCheckedProcess(validator)
+	rollbackErr := rollbackInstallation(options.BaseDir, backupRoot, plan.Manifest.Files, true)
 	_, restartErr := startAndCheck(options, options.FromVersion, false)
 	message := "Новая версия не прошла проверку. Предыдущая версия автоматически восстановлена и запущена."
 	state := "rolled_back"
@@ -105,7 +113,7 @@ func Apply(options ApplyOptions) error {
 			message += " Резервная копия сохранена в " + backupRoot + "."
 		}
 	}
-	return finishApply(options, Result{State: state, FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: message, UpdatedAt: time.Now()}, errors.Join(healthErr, rollbackErr, restartErr))
+	return finishApply(options, Result{State: state, FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: message, UpdatedAt: time.Now()}, errors.Join(activationErr, rollbackErr, restartErr))
 }
 
 func stopCheckedProcess(process *os.Process) {
@@ -289,6 +297,45 @@ func healthVersion(options ApplyOptions) (string, error) {
 		return "", errors.New("настроенное приложение не запустило обработку")
 	}
 	return status.Version, nil
+}
+
+func activateApplication(options ApplyOptions, expectedVersion string) error {
+	token, err := secrets.Load(filepath.Join(options.BaseDir, filepath.FromSlash(options.TokenFile)))
+	if err != nil {
+		return err
+	}
+	url := "http://" + options.Address + "/api/control/start"
+	request, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("X-EAVC-Access", strings.TrimSpace(string(token)))
+	request.Header.Set("Origin", "http://"+options.Address)
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("включение обработки вернуло код %d", response.StatusCode)
+	}
+	var status struct {
+		Version    string `json:"version"`
+		State      string `json:"state"`
+		Configured bool   `json:"configured"`
+		Processing bool   `json:"processing"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(&status); err != nil {
+		return err
+	}
+	if status.Version != expectedVersion {
+		return fmt.Errorf("после обновления запущена версия %q вместо %q", status.Version, expectedVersion)
+	}
+	state := strings.ToLower(strings.TrimSpace(status.State))
+	if state == "" || state == "starting" || state == "error" || (status.Configured && !status.Processing) {
+		return fmt.Errorf("обработка не запущена: состояние %q", status.State)
+	}
+	return nil
 }
 
 func finishApply(options ApplyOptions, result Result, applyErr error) error {

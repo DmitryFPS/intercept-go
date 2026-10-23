@@ -177,12 +177,19 @@ func (manager *Manager) Prepare(packageReader io.Reader, size int64, currentPID 
 		"--address=" + manager.config.HealthAddress, "--token-file=" + manager.config.TokenFile,
 		"--old-pid=" + strconv.Itoa(currentPID), "--work-root=" + workRoot,
 	}
+	readyFile := filepath.Join(workRoot, "helper-ready")
+	arguments = append(arguments, "--ready-file="+readyFile)
 	command := exec.Command(helperTarget, arguments...)
 	command.Dir = workRoot
 	setHiddenProcess(command)
 	if err := command.Start(); err != nil {
 		_ = os.RemoveAll(workRoot)
 		return Result{}, fmt.Errorf("запустить помощник обновления: %w", err)
+	}
+	if err := waitForHelperReady(command, readyFile, 20*time.Second); err != nil {
+		_ = command.Process.Kill()
+		_ = os.RemoveAll(workRoot)
+		return Result{}, fmt.Errorf("помощник обновления не готов: %w", err)
 	}
 	result := Result{State: "switching", FromVersion: manager.config.Version, ToVersion: plan.Manifest.Version, Message: "Пакет проверен. Выполняется безопасное переключение версии.", UpdatedAt: time.Now()}
 	_ = writeResult(manager.resultPath(), result)
@@ -191,6 +198,32 @@ func (manager *Manager) Prepare(packageReader io.Reader, size int64, currentPID 
 	}
 	prepared = true
 	return result, nil
+}
+
+func waitForHelperReady(command *exec.Cmd, readyFile string, timeout time.Duration) error {
+	exited := make(chan error, 1)
+	go func() { exited <- command.Wait() }()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-exited:
+			if err == nil {
+				err = errors.New("помощник завершился до переключения")
+			}
+			return err
+		case <-deadline.C:
+			return errors.New("истекло время ожидания готовности помощника")
+		case <-ticker.C:
+			if _, err := os.Stat(readyFile); err == nil {
+				return nil
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
 }
 
 func directorySize(root string) (int64, error) {

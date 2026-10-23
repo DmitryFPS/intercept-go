@@ -3,6 +3,7 @@ package eavc
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -354,5 +355,55 @@ func TestSourceReadsSecondEditWithSameTimestamp(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Content != "10.00\n-Вторая редакция" {
 		t.Fatalf("быстрая редакция потеряна: %#v", items)
+	}
+}
+
+// Вся граничная секунда перечитывается целиком: EAVC хранит updated_at с
+// секундной точностью, поэтому ограничение этой части запроса могло навсегда
+// пропустить середину большой одновременной пачки.
+func TestSourceDoesNotSkipLargeSameTimestampBatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE intercept_items (
+		id INTEGER PRIMARY KEY, session_id INTEGER, session_uuid TEXT,
+		unit_name TEXT, frequency TEXT, group_code TEXT, uuid TEXT,
+		content TEXT, updated_by TEXT, updated_at TEXT
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	for id := 1; id <= 300; id++ {
+		if _, err = db.Exec(`INSERT INTO intercept_items VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			id, id, fmt.Sprintf("session-%d", id), "Позиция", "100.0", "A",
+			fmt.Sprintf("source-%d", id), "10.00\n-Текст", "Оператор", "2026-10-23 10:00:00"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	first, cursor, err := source.Scan(context.Background(), application.Cursor{}, 100)
+	if err != nil || len(first) != 100 {
+		t.Fatalf("первая пачка: len=%d cursor=%+v err=%v", len(first), cursor, err)
+	}
+	second, _, err := source.Scan(context.Background(), cursor, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[int64]bool, len(second))
+	for _, item := range second {
+		seen[item.Record.ID] = true
+	}
+	for id := int64(101); id <= 300; id++ {
+		if !seen[id] {
+			t.Fatalf("запись %d из граничной секунды пропущена", id)
+		}
 	}
 }

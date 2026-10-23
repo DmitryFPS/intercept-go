@@ -26,6 +26,7 @@ func main() {
 	flags.StringVar(&options.Address, "address", "", "")
 	flags.StringVar(&options.TokenFile, "token-file", "", "")
 	flags.StringVar(&options.WorkRoot, "work-root", "", "")
+	flags.StringVar(&options.ReadyFile, "ready-file", "", "")
 	flags.IntVar(&options.OldPID, "old-pid", 0, "")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)

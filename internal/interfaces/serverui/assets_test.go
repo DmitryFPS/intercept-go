@@ -70,7 +70,8 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		"client.id === historyFilters.client ? 'selected' : ''",
-		"destination.id === historyFilters.destination ? 'selected' : ''",
+		"Object.entries(destinations).map(([id, destination])",
+		"id === historyFilters.destination ? 'selected' : ''",
 		"$('historySearch').value = historyFilters.q",
 		"$('historyQualityFilter').value = historyFilters.quality",
 	} {

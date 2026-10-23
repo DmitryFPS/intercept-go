@@ -322,6 +322,34 @@ func TestProtectedHistorySearchKeepsExactPagination(t *testing.T) {
 	}
 }
 
+func TestUnicodeHistorySearchIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	rules := serverTestRules()
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO client_connection_incidents(client_id,started_at,recovered_at,reason)
+		VALUES('textile',?,?,?)`, stamp(now.Add(-time.Minute)), stamp(now), "Потеря связи"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Quarantine(ctx, application.IncomingPacket{
+		SenderBotID: 999, SenderBotUsername: "ТекстильBot", ChatID: -1001, ThreadID: 77, Payload: []byte("rejected"),
+	}, "Неизвестная точка"); err != nil {
+		t.Fatal(err)
+	}
+	clients, err := store.HistoryPage(ctx, "clients", 30, 0, now.Add(time.Second), HistoryFilter{Query: "текстиль"})
+	if err != nil || clients.Total != 1 || len(clients.Incidents) != 1 {
+		t.Fatalf("кириллический поиск сбоев: %+v err=%v", clients, err)
+	}
+	rejected, err := store.HistoryPage(ctx, "rejected", 30, 0, now.Add(time.Second), HistoryFilter{Query: "текстиль"})
+	if err != nil || rejected.Total != 1 || len(rejected.Items) != 1 {
+		t.Fatalf("кириллический поиск отклонений: %+v err=%v", rejected, err)
+	}
+}
+
 func TestTransportDeletionQueueSurvivesUntilCompletion(t *testing.T) {
 	t.Parallel()
 	store, ctx := openObservabilityStore(t)
