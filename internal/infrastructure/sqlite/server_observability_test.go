@@ -201,7 +201,7 @@ func TestTransportDeletionQueueSurvivesUntilCompletion(t *testing.T) {
 	t.Parallel()
 	store, ctx := openObservabilityStore(t)
 	now := time.Now().UTC()
-	if err := store.QueueTransportDeletion(ctx, 77, now); err != nil {
+	if dropped, err := store.QueueTransportDeletion(ctx, 77, now); err != nil || dropped {
 		t.Fatal(err)
 	}
 	items, err := store.DueTransportDeletions(ctx, now.Add(2*time.Minute), 10)
@@ -214,6 +214,27 @@ func TestTransportDeletionQueueSurvivesUntilCompletion(t *testing.T) {
 	items, err = store.DueTransportDeletions(ctx, now.Add(3*time.Minute), 10)
 	if err != nil || len(items) != 0 {
 		t.Fatalf("завершённое удаление осталось в очереди: items=%v err=%v", items, err)
+	}
+}
+
+func TestTransportDeletionQueueStopsAfterAttemptLimit(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	now := time.Now().UTC()
+	dropped := false
+	for attempt := 0; attempt < transportDeletionMaxAttempts; attempt++ {
+		var err error
+		dropped, err = store.QueueTransportDeletion(ctx, 88, now.Add(time.Duration(attempt)*time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !dropped {
+		t.Fatal("техническая очередь не завершилась после лимита попыток")
+	}
+	items, err := store.DueTransportDeletions(ctx, now.Add(48*time.Hour), 10)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("исчерпанное удаление осталось в очереди: %v, %v", items, err)
 	}
 }
 

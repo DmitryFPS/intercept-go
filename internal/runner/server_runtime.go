@@ -281,9 +281,13 @@ func (server *Server) deleteTransportPacket(ctx context.Context, receiver *teleg
 	if err := receiver.DeletePacket(ctx, messageID); err != nil && ctx.Err() == nil {
 		server.Logger.Warn("не удалось удалить обработанный пакет из транспортной группы",
 			"telegram_message_id", messageID, "error", err)
-		if queueErr := server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC()); queueErr != nil {
+		dropped, queueErr := server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC())
+		if queueErr != nil {
 			server.Logger.Warn("не удалось сохранить повтор удаления транспортного пакета",
 				"telegram_message_id", messageID, "error", queueErr)
+		} else if dropped {
+			server.Logger.Error("исчерпан лимит удаления транспортного пакета",
+				"telegram_message_id", messageID, "attempts", 120)
 		}
 		return
 	}
@@ -298,7 +302,14 @@ func (server *Server) retryTransportDeletions(ctx context.Context, receiver *tel
 	}
 	for _, messageID := range messageIDs {
 		if err := receiver.DeletePacket(ctx, messageID); err != nil {
-			_ = server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC())
+			dropped, queueErr := server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC())
+			if queueErr != nil {
+				server.Logger.Warn("не удалось обновить повтор удаления транспортного пакета",
+					"telegram_message_id", messageID, "error", queueErr)
+			} else if dropped {
+				server.Logger.Error("исчерпан лимит удаления транспортного пакета",
+					"telegram_message_id", messageID, "attempts", 120)
+			}
 			continue
 		}
 		_ = server.Store.CompleteTransportDeletion(ctx, messageID)

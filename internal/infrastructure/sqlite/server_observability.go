@@ -547,20 +547,47 @@ func (store *ServerStore) historyCutoff(ctx context.Context, kind string) string
 	return "0001-01-01T00:00:00Z"
 }
 
+const (
+	transportDeletionMaxAttempts = 120
+	transportDeletionMaxAge      = 24 * time.Hour
+)
+
 // QueueTransportDeletion сохраняет неудавшееся удаление служебного сообщения.
-// Запись переживает перезапуск центра и исчезает только после успешного удаления.
-func (store *ServerStore) QueueTransportDeletion(ctx context.Context, messageID int64, now time.Time) error {
+// Повтор ограничен числом попыток и временем, чтобы недоступный навсегда ID не
+// создавал бесконечную техническую очередь. dropped сообщает об исчерпании лимита.
+func (store *ServerStore) QueueTransportDeletion(ctx context.Context, messageID int64, now time.Time) (dropped bool, err error) {
 	if messageID <= 0 {
-		return errors.New("не задано транспортное сообщение")
+		return false, errors.New("не задано транспортное сообщение")
 	}
-	_, err := store.db.ExecContext(ctx, `
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO transport_cleanup(message_id,created_at,next_attempt_at,attempts)
 		VALUES(?,?,?,1)
 		ON CONFLICT(message_id) DO UPDATE SET
 			next_attempt_at=excluded.next_attempt_at,
 			attempts=transport_cleanup.attempts+1`,
-		messageID, stamp(now), stamp(now.Add(time.Minute)))
-	return err
+		messageID, stamp(now), stamp(now.Add(time.Minute))); err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM transport_cleanup
+		WHERE message_id=? AND (attempts>=? OR created_at<?)`,
+		messageID, transportDeletionMaxAttempts, stamp(now.Add(-transportDeletionMaxAge)))
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // DueTransportDeletions возвращает ограниченную очередь повторного удаления.
