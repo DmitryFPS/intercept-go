@@ -17,6 +17,7 @@ import (
 var badFilename = regexp.MustCompile(`[<>:"/\\|?*]`)
 
 type state struct {
+	Scope      string                 `json:"scope,omitempty"`
 	LastNumber int                    `json:"last_number"`
 	Blocks     map[string]blockRecord `json:"blocks"`
 }

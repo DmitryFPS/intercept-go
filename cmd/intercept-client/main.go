@@ -51,9 +51,6 @@ func main() {
 		return
 	}
 	address := "127.0.0.1:17631"
-	if err := autostart.Ensure("EAVC Connect Station", executable); err != nil {
-		logger.Warn("не удалось включить автозапуск", "error", err)
-	}
 	openBrowser := len(os.Args) < 2 || os.Args[1] != "--no-browser"
 	releaseInstance, alreadyRunning, err := singleinstance.Acquire("EAVC-Connect-Station")
 	if err != nil {
@@ -70,13 +67,24 @@ func main() {
 		}
 		return
 	}
+	// Только экземпляр-владелец обновляет автозапуск. Иначе запущенная из
+	// временной папки копия могла заменить рабочий путь в реестре.
+	if err := autostart.Ensure("EAVC Connect Station", executable); err != nil {
+		logger.Warn("не удалось включить автозапуск", "error", err)
+	}
 	signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, shutdown := context.WithCancel(signalContext)
 	defer shutdown()
 	application := runner.NewClient(baseDir, buildVersion(), logger)
 	defer application.Close()
-	application.Start(ctx)
+	if hasArgument("--update-validation") {
+		if err := application.ValidateForUpdate(ctx); err != nil {
+			logger.Error("изолированная проверка обновления не пройдена", "error", err)
+		}
+	} else {
+		application.Start(ctx)
+	}
 	observability.StartOperationalRecorder(ctx, baseDir, "station", buildVersion(), func() any { return application.OperationalStatus() })
 	updater := selfupdate.NewManager(selfupdate.Configuration{
 		BaseDir: baseDir, Product: "eavc-connect-station", Version: buildVersion(),
@@ -97,6 +105,15 @@ func argumentValue(prefix string) string {
 		}
 	}
 	return ""
+}
+
+func hasArgument(expected string) bool {
+	for _, argument := range os.Args[1:] {
+		if argument == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func executableDir() (string, error) {

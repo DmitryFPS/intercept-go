@@ -16,14 +16,15 @@ import (
 // Destination синхронизирует одну запись EAVC с одним сообщением Telegram либо
 // с несколькими частями, только если запись превышает ограничение Telegram.
 type Destination struct {
-	API             *Client
-	ChatID          int64
-	Network         string
-	Protection      string
-	MessageTemplate string
-	StatePath       string
-	StateScope      string
-	Logger          *slog.Logger
+	API              *Client
+	ChatID           int64
+	Network          string
+	Protection       string
+	MessageTemplate  string
+	StatePath        string
+	StateScope       string
+	LegacyStateScope string
+	Logger           *slog.Logger
 
 	mu    sync.Mutex
 	locks map[string]*itemLockEntry
@@ -212,6 +213,12 @@ func (destination *Destination) loadState() (destinationState, error) {
 		return current, nil
 	}
 	if current.Scope != "" && current.Scope != scope {
+		if current.Scope == strings.TrimSpace(destination.LegacyStateScope) {
+			// Однократная миграция с области token+chat на bot-id+chat. Ротация
+			// токена того же бота не должна повторно отправить старые сообщения.
+			current.Scope = scope
+			return current, nil
+		}
 		// Идентификаторы сообщений имеют смысл только для конкретной пары
 		// бот+группа. После смены назначения не редактируем сообщения старой пары.
 		return destinationState{Scope: scope, Items: make(map[string]destinationItem)}, nil

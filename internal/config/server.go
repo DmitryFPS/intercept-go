@@ -39,6 +39,7 @@ type ServerTransport struct {
 type DestinationConfig struct {
 	Kind            domain.DestinationKind `json:"kind"`
 	BotToken        string                 `json:"bot_token,omitempty"`
+	BotID           int64                  `json:"bot_id,omitempty"`
 	ChatID          int64                  `json:"chat_id,omitempty"`
 	MessageTemplate string                 `json:"message_template,omitempty"`
 	Template        string                 `json:"template,omitempty"`

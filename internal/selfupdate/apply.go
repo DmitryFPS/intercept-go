@@ -55,7 +55,7 @@ func Apply(options ApplyOptions) error {
 		return finishApply(options, Result{State: "failed", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: "Не удалось создать резервную копию. Старая версия запущена снова.", UpdatedAt: time.Now()}, err)
 	}
 	if err := installFiles(options.BaseDir, plan.Root, plan.Manifest.Files); err != nil {
-		rollbackErr := rollbackInstallation(options.BaseDir, backupRoot, plan.Manifest.Files)
+		rollbackErr := rollbackInstallation(options.BaseDir, backupRoot, plan.Manifest.Files, true)
 		_ = restartApplication(options, options.FromVersion)
 		message := "Установка не завершена; предыдущая версия восстановлена."
 		if rollbackErr != nil {
@@ -64,17 +64,37 @@ func Apply(options ApplyOptions) error {
 		}
 		return finishApply(options, Result{State: "rolled_back", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: message, UpdatedAt: time.Now()}, errors.Join(err, rollbackErr))
 	}
-	process, healthErr := startAndCheck(options, options.ToVersion)
+	// Сначала новая версия открывает и мигрирует локальные данные, но не
+	// запускает приём и внешние доставки. Поэтому неудачная проверка допускает
+	// полный откат снимка без риска повторной отправки уже доставленных данных.
+	validator, validationErr := startAndCheck(options, options.ToVersion, true)
+	stopCheckedProcess(validator)
+	if validationErr != nil {
+		rollbackErr := rollbackInstallation(options.BaseDir, backupRoot, plan.Manifest.Files, true)
+		_, restartErr := startAndCheck(options, options.FromVersion, false)
+		message := "Новая версия не прошла изолированную проверку. Предыдущая версия автоматически восстановлена и запущена."
+		state := "rolled_back"
+		if rollbackErr != nil || restartErr != nil {
+			state = "failed"
+			message = "Новая версия не прошла проверку, а автоматический откат требует вмешательства администратора."
+			if rollbackErr != nil {
+				preserveBackup = true
+				message += " Резервная копия сохранена в " + backupRoot + "."
+			}
+		}
+		return finishApply(options, Result{State: state, FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: message, UpdatedAt: time.Now()}, errors.Join(validationErr, rollbackErr, restartErr))
+	}
+	process, healthErr := startAndCheck(options, options.ToVersion, false)
 	if healthErr == nil {
 		cleanupOldFiles(options.BaseDir, plan.Manifest.Files)
 		return finishApply(options, Result{State: "success", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: "Обновление успешно установлено и проверено.", UpdatedAt: time.Now()}, nil)
 	}
-	if process != nil {
-		_ = process.Kill()
-		_, _ = process.Wait()
-	}
-	rollbackErr := rollbackInstallation(options.BaseDir, backupRoot, plan.Manifest.Files)
-	_, restartErr := startAndCheck(options, options.FromVersion)
+	stopCheckedProcess(process)
+	// После штатного запуска новая версия могла уже подтвердить приём или
+	// доставку. Возврат старого снимка данных создал бы дубли. Поэтому здесь
+	// откатываются только программы; текущая очередь и журнал сохраняются.
+	rollbackErr := rollbackInstallation(options.BaseDir, backupRoot, plan.Manifest.Files, false)
+	_, restartErr := startAndCheck(options, options.FromVersion, false)
 	message := "Новая версия не прошла проверку. Предыдущая версия автоматически восстановлена и запущена."
 	state := "rolled_back"
 	if rollbackErr != nil || restartErr != nil {
@@ -86,6 +106,14 @@ func Apply(options ApplyOptions) error {
 		}
 	}
 	return finishApply(options, Result{State: state, FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: message, UpdatedAt: time.Now()}, errors.Join(healthErr, rollbackErr, restartErr))
+}
+
+func stopCheckedProcess(process *os.Process) {
+	if process == nil {
+		return
+	}
+	_ = process.Kill()
+	_, _ = process.Wait()
 }
 
 func cleanupUpdateArtifacts(options ApplyOptions, preserveBackup bool) {
@@ -115,6 +143,8 @@ func backupInstallation(baseDir, backupRoot string, files []File) error {
 	data := filepath.Join(baseDir, "data")
 	if _, err := os.Stat(data); err == nil {
 		return copyTree(data, filepath.Join(backupRoot, "data"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("проверить рабочие данные перед обновлением: %w", err)
 	}
 	return nil
 }
@@ -123,25 +153,18 @@ func installFiles(baseDir, staging string, files []File) error {
 	for _, item := range files {
 		target := filepath.Join(baseDir, filepath.FromSlash(item.Path))
 		fresh := target + ".update-new"
-		old := target + ".update-old"
 		_ = os.Remove(fresh)
-		_ = os.Remove(old)
 		if err := copyFile(filepath.Join(staging, filepath.FromSlash(item.Path)), fresh); err != nil {
 			return err
 		}
-		if _, err := os.Stat(target); err == nil {
-			if err := os.Rename(target, old); err != nil {
-				return err
-			}
-		}
-		if err := os.Rename(fresh, target); err != nil {
+		if err := atomicReplace(fresh, target); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func rollbackInstallation(baseDir, backupRoot string, files []File) error {
+func rollbackInstallation(baseDir, backupRoot string, files []File, restoreData bool) error {
 	var result error
 	for _, item := range files {
 		target := filepath.Join(baseDir, filepath.FromSlash(item.Path))
@@ -154,12 +177,16 @@ func rollbackInstallation(baseDir, backupRoot string, files []File) error {
 		_ = os.Remove(target + ".update-old")
 	}
 	backupData := filepath.Join(backupRoot, "data")
-	if _, err := os.Stat(backupData); err == nil {
-		data := filepath.Join(baseDir, "data")
-		if removeErr := os.RemoveAll(data); removeErr != nil {
-			result = errors.Join(result, removeErr)
-		} else {
-			result = errors.Join(result, copyTree(backupData, data))
+	if restoreData {
+		if _, err := os.Stat(backupData); err == nil {
+			data := filepath.Join(baseDir, "data")
+			if removeErr := os.RemoveAll(data); removeErr != nil {
+				result = errors.Join(result, removeErr)
+			} else {
+				result = errors.Join(result, copyTree(backupData, data))
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, err)
 		}
 	}
 	return result
@@ -192,12 +219,16 @@ func copyTree(source, target string) error {
 }
 
 func restartApplication(options ApplyOptions, expectedVersion string) error {
-	_, err := startAndCheck(options, expectedVersion)
+	_, err := startAndCheck(options, expectedVersion, false)
 	return err
 }
 
-func startAndCheck(options ApplyOptions, expectedVersion string) (*os.Process, error) {
-	command := exec.Command(filepath.Join(options.BaseDir, options.Application), "--no-browser")
+func startAndCheck(options ApplyOptions, expectedVersion string, validation bool) (*os.Process, error) {
+	arguments := []string{"--no-browser"}
+	if validation {
+		arguments = append(arguments, "--update-validation")
+	}
+	command := exec.Command(filepath.Join(options.BaseDir, options.Application), arguments...)
 	command.Dir = options.BaseDir
 	setHiddenProcess(command)
 	if err := command.Start(); err != nil {
@@ -206,11 +237,16 @@ func startAndCheck(options ApplyOptions, expectedVersion string) (*os.Process, e
 	process := command.Process
 	deadline := time.Now().Add(45 * time.Second)
 	var lastErr error
+	stableChecks := 0
 	for time.Now().Before(deadline) {
 		if version, err := healthVersion(options); err == nil && version == expectedVersion {
-			return process, nil
+			stableChecks++
+			if stableChecks >= 3 {
+				return process, nil
+			}
 		} else {
 			lastErr = err
+			stableChecks = 0
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -237,10 +273,20 @@ func healthVersion(options ApplyOptions) (string, error) {
 		return "", errors.New("локальный интерфейс вернул " + strconv.Itoa(response.StatusCode))
 	}
 	var status struct {
-		Version string `json:"version"`
+		Version    string `json:"version"`
+		State      string `json:"state"`
+		Configured bool   `json:"configured"`
+		Processing bool   `json:"processing"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(&status); err != nil {
 		return "", err
+	}
+	state := strings.ToLower(strings.TrimSpace(status.State))
+	if state == "" || state == "starting" || state == "error" {
+		return "", fmt.Errorf("приложение не готово: состояние %q", status.State)
+	}
+	if status.Configured && !status.Processing && state != "paused" {
+		return "", errors.New("настроенное приложение не запустило обработку")
 	}
 	return status.Version, nil
 }

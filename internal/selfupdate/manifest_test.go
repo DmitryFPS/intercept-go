@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,7 +90,7 @@ func TestInstallAndRollbackRestoreFilesAndData(t *testing.T) {
 		t.Fatalf("install: %v", err)
 	}
 	mustWriteTestFile(t, filepath.Join(base, "data", "queue.db"), "changed data")
-	if err := rollbackInstallation(base, backup, files); err != nil {
+	if err := rollbackInstallation(base, backup, files, true); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
 	assertTestFile(t, filepath.Join(base, "app.exe"), "old app")
@@ -97,6 +98,21 @@ func TestInstallAndRollbackRestoreFilesAndData(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(base, "new.dll")); !os.IsNotExist(err) {
 		t.Fatalf("new file remains after rollback: %v", err)
 	}
+}
+
+func TestRollbackAfterNormalStartPreservesCurrentQueue(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "application")
+	backup := filepath.Join(t.TempDir(), "backup")
+	mustWriteTestFile(t, filepath.Join(base, "app.exe"), "new app")
+	mustWriteTestFile(t, filepath.Join(base, "data", "queue.db"), "new queue state")
+	mustWriteTestFile(t, filepath.Join(backup, "files", "app.exe"), "old app")
+	mustWriteTestFile(t, filepath.Join(backup, "data", "queue.db"), "old queue state")
+
+	if err := rollbackInstallation(base, backup, []File{{Path: "app.exe"}}, false); err != nil {
+		t.Fatal(err)
+	}
+	assertTestFile(t, filepath.Join(base, "app.exe"), "old app")
+	assertTestFile(t, filepath.Join(base, "data", "queue.db"), "new queue state")
 }
 
 func TestCleanupUpdateArtifactsRemovesBackupButKeepsHelper(t *testing.T) {
@@ -155,6 +171,25 @@ func TestCleanupOrphanedWorkRootsKeepsRecoveryBackup(t *testing.T) {
 	}
 	assertTestFile(t, filepath.Join(recovery, "backup", "data", "queue.db"), "recovery")
 	assertTestFile(t, filepath.Join(unrelated, "helper.exe"), "helper")
+}
+
+func TestManagerRejectsConcurrentPrepare(t *testing.T) {
+	manager := &Manager{updating: true}
+	_, err := manager.Prepare(strings.NewReader("x"), 1, 1)
+	if !errors.Is(err, ErrUpdateInProgress) {
+		t.Fatalf("parallel update must be rejected: %v", err)
+	}
+}
+
+func TestManifestRejectsExcessiveCumulativeExpandedSize(t *testing.T) {
+	_, err := manifestExpandedSize([]File{
+		{Path: "one", Size: MaxPackageSize},
+		{Path: "two", Size: MaxPackageSize},
+		{Path: "three", Size: 1},
+	})
+	if err == nil || !strings.Contains(err.Error(), "слишком велик") {
+		t.Fatalf("чрезмерный распакованный размер должен быть отклонён: %v", err)
+	}
 }
 
 func writeSignedTestPackage(t *testing.T, product, version string, signedFiles, archiveFiles map[string][]byte) (string, string) {

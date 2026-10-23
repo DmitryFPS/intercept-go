@@ -20,6 +20,21 @@ import (
 	"intercept/internal/provisioning"
 )
 
+func TestServerUpdateValidationDoesNotStartProcessing(t *testing.T) {
+	server, err := NewServer(context.Background(), t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	if err := server.ValidateForUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	status := server.Status()
+	if status.State != "paused" || status.Processing || status.Configured {
+		t.Fatalf("неожиданное состояние изолированной проверки: %+v", status)
+	}
+}
+
 // Готовый комплект точки должен содержать исполняемый файл, подписанные
 // настройки и памятку. Этот тест защищает сценарий скачивания из интерфейса
 // центра от неполной сборки или установки station-template.

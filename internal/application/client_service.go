@@ -76,6 +76,22 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if !service.CatchUpExisting {
+		baseline, exists, baselineErr := service.savedInitialBaseline(ctx)
+		if baselineErr != nil {
+			return 0, baselineErr
+		}
+		if exists {
+			filtered := items[:0]
+			for _, item := range items {
+				if item.Record.UpdatedAt == baseline.UpdatedAt && item.Record.ID <= baseline.ID {
+					continue
+				}
+				filtered = append(filtered, item)
+			}
+			items = filtered
+		}
+	}
 	if !initialized && !service.CatchUpExisting {
 		if err := service.State.SaveCursor(ctx, eavcCursorName, next); err != nil {
 			return 0, err
@@ -124,15 +140,21 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 	return queued, nil
 }
 
+func (service *ClientService) savedInitialBaseline(ctx context.Context) (Cursor, bool, error) {
+	raw, exists, err := service.State.Value(ctx, eavcBaselineName)
+	if err != nil || !exists {
+		return Cursor{}, exists, err
+	}
+	var baseline Cursor
+	if err := json.Unmarshal([]byte(raw), &baseline); err != nil {
+		return Cursor{}, false, fmt.Errorf("прочитать сохранённую базовую линию EAVC: %w", err)
+	}
+	return baseline, true, nil
+}
+
 func (service *ClientService) initialBaseline(ctx context.Context, source EventSourceHead) (Cursor, error) {
-	if raw, exists, err := service.State.Value(ctx, eavcBaselineName); err != nil {
-		return Cursor{}, err
-	} else if exists {
-		var baseline Cursor
-		if err := json.Unmarshal([]byte(raw), &baseline); err != nil {
-			return Cursor{}, fmt.Errorf("прочитать сохранённую базовую линию EAVC: %w", err)
-		}
-		return baseline, nil
+	if baseline, exists, err := service.savedInitialBaseline(ctx); err != nil || exists {
+		return baseline, err
 	}
 	baseline, err := source.Head(ctx)
 	if err != nil {
@@ -166,7 +188,7 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 	sent := 0
 	for _, queued := range events {
 		event := queued.Event
-		if event.Expired(now) {
+		if event.Expired(now) && queued.State != "uploaded" {
 			if err := service.Queue.MarkExpired(ctx, event.ID, now, domain.FreshnessExpired); err != nil {
 				return sent, err
 			}

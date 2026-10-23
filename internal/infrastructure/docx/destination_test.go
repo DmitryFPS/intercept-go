@@ -183,6 +183,40 @@ func TestDestinationBuildsOneDocumentForAllTimeBlocksWithoutDuplicates(t *testin
 	}
 }
 
+// Смена общей папки не должна использовать журнал прежней папки и ошибочно
+// считать документ уже доставленным.
+func TestDestinationResetsStateWhenFolderScopeChanges(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	statePath := filepath.Join(root, "state", "word.json")
+	event := domain.Event{
+		ClientID: "textile", Source: domain.SourceRecord{UUID: "source-folder-change"},
+		Position: domain.Position{UnitName: "1 мб 155 омбр"}, Content: "10.00\n-Проверка",
+		ObservedAt: time.Now(),
+	}
+	first := Destination{
+		TemplatePath: template, Folder: filepath.Join(root, "first"), StatePath: statePath,
+		StateScope: "folder:first", Network: "39", Prefix: "СТНД",
+	}
+	if err := first.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Folder = filepath.Join(root, "second")
+	second.StateScope = "folder:second"
+	if err := second.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, folder := range []string{first.Folder, second.Folder} {
+		files, _ := filepath.Glob(filepath.Join(folder, "*.docx"))
+		if len(files) != 1 {
+			t.Fatalf("в папке %q ожидался документ: %#v", folder, files)
+		}
+	}
+}
+
 func TestDestinationKeepsSharedLocalNumbersAcrossTimeBlocks(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

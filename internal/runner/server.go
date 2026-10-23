@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"intercept/internal/config"
 	"intercept/internal/defaults"
 	"intercept/internal/domain"
+	"intercept/internal/infrastructure/secrets"
 	stateDB "intercept/internal/infrastructure/sqlite"
 )
 
@@ -108,6 +110,7 @@ type Server struct {
 	Store   *stateDB.ServerStore
 
 	mu          sync.RWMutex
+	adminMu     sync.Mutex
 	lifecycleMu sync.Mutex
 	status      ServerStatus
 	config      config.Server
@@ -199,6 +202,45 @@ func (server *Server) Start(ctx context.Context) {
 		defer server.background.Done()
 		server.serverMaintenanceLoop(rootContext)
 	}()
+}
+
+// ValidateForUpdate открывает и мигрирует внутреннее хранилище (это уже
+// выполнено NewServer), затем проверяет защищённую конфигурацию без запуска
+// Telegram, Word-доставок и фонового обслуживания.
+func (server *Server) ValidateForUpdate() (resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			server.fail("Проверка обновления не пройдена", "Предыдущая версия будет восстановлена автоматически.", resultErr)
+		}
+	}()
+	protected, err := secrets.Load(server.configPath())
+	if errors.Is(err, os.ErrNotExist) {
+		server.update(func(status *ServerStatus) {
+			status.State = "paused"
+			status.Title = "Обновление проверено"
+			status.Detail = "Центр ещё не настроен; новая версия запускается."
+			status.Processing = false
+		})
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	cfg, err := config.DecodeServer(bytes.NewReader(protected))
+	if err != nil {
+		return err
+	}
+	server.mu.Lock()
+	server.config = cloneServerConfig(cfg)
+	server.status.State = "paused"
+	server.status.Title = "Обновление проверено"
+	server.status.Detail = "Настройки и рабочие данные совместимы. Рабочие циклы ещё не запускались."
+	server.status.Configured = true
+	server.status.InviteLink = cfg.Transport.InviteLink
+	server.status.Destinations = destinationIDs(cfg.Destinations)
+	server.status.Processing = false
+	server.mu.Unlock()
+	return nil
 }
 
 // Close штатно останавливает фоновые процессы и закрывает хранилище.

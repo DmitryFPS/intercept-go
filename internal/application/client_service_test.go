@@ -90,6 +90,10 @@ func TestClientServiceUsesStableInitialBaseline(t *testing.T) {
 	queue := newMemoryClientState()
 	source := &baselineSource{
 		head: Cursor{UpdatedAt: "2026-10-23 10:00:00", ID: 1},
+		oldItem: SourceItem{
+			Record:   domain.SourceRecord{ID: 1, UUID: "old", UpdatedAt: "2026-10-23 10:00:00"},
+			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal, Content: "старая запись",
+		},
 		newItem: SourceItem{
 			Record:   domain.SourceRecord{ID: 2, UUID: "new", UpdatedAt: "2026-10-23 10:00:01"},
 			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal, Content: "новая запись",
@@ -152,6 +156,7 @@ type memorySource struct {
 
 type baselineSource struct {
 	head    Cursor
+	oldItem SourceItem
 	newItem SourceItem
 }
 
@@ -164,7 +169,7 @@ func (source *baselineSource) Scan(_ context.Context, after Cursor, _ int) ([]So
 		return nil, after, nil
 	}
 	next := Cursor{UpdatedAt: source.newItem.Record.UpdatedAt, ID: source.newItem.Record.ID}
-	return []SourceItem{source.newItem}, next, nil
+	return []SourceItem{source.oldItem, source.newItem}, next, nil
 }
 
 func (source *memorySource) Scan(_ context.Context, _ Cursor, limit int) ([]SourceItem, Cursor, error) {

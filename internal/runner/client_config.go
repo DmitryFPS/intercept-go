@@ -99,6 +99,9 @@ func (client *Client) installProvisionedActivation(code string) error {
 	if err != nil {
 		return fmt.Errorf("проверить подготовленные настройки: %w", err)
 	}
+	if err := client.validateInstalledClientIdentity(cfg); err != nil {
+		return err
+	}
 	issuer, firstImport, err := client.verifyTrustedIssuer(cfg)
 	if err != nil {
 		return err
@@ -111,6 +114,24 @@ func (client *Client) installProvisionedActivation(code string) error {
 		client.Logger.Warn("не удалось удалить использованный файл активации", "error", err)
 	}
 	client.Logger.Info("точка безопасно активирована", "client_id", cfg.ClientID, "client_number", cfg.ClientNumber)
+	return nil
+}
+
+func (client *Client) validateInstalledClientIdentity(next config.Client) error {
+	current, err := secrets.Load(client.configPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	existing, err := config.DecodeClient(bytes.NewReader(current))
+	if err != nil {
+		return fmt.Errorf("прочитать установленные настройки: %w", err)
+	}
+	if existing.ClientID != next.ClientID {
+		return errors.New("комплект относится к другой рабочей точке; для смены точки нужна чистая переустановка")
+	}
 	return nil
 }
 

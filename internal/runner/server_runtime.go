@@ -357,18 +357,20 @@ func (server *Server) gateways(cfg config.Server) map[string]application.Deliver
 			if err == nil {
 				result[id] = &telegram.Destination{
 					API: api, ChatID: destination.ChatID, Network: destination.Network,
-					Protection:      destination.Protection,
-					MessageTemplate: destination.MessageTemplate,
-					StatePath:       filepath.Join(server.BaseDir, "data", "telegram-"+safeID(id)+".json"),
-					StateScope:      telegramStateScope(destination.BotToken, destination.ChatID),
-					Logger:          server.Logger,
+					Protection:       destination.Protection,
+					MessageTemplate:  destination.MessageTemplate,
+					StatePath:        filepath.Join(server.BaseDir, "data", "telegram-"+safeID(id)+".json"),
+					StateScope:       telegramStateScope(destination.BotID, destination.BotToken, destination.ChatID),
+					LegacyStateScope: telegramStateScope(0, destination.BotToken, destination.ChatID),
+					Logger:           server.Logger,
 				}
 			}
 		case domain.DestinationWord:
 			result[id] = &docx.Destination{
 				TemplatePath: destination.Template, Folder: destination.Folder,
-				StatePath: filepath.Join(server.BaseDir, "data", "word-"+safeID(id)+".json"),
-				Network:   destination.Network, Protection: destination.Protection, Prefix: destination.Prefix,
+				StatePath:  filepath.Join(server.BaseDir, "data", "word-"+safeID(id)+".json"),
+				StateScope: wordStateScope(destination.Folder),
+				Network:    destination.Network, Protection: destination.Protection, Prefix: destination.Prefix,
 				Username: destination.Username, Password: destination.Password,
 			}
 		}
@@ -376,8 +378,18 @@ func (server *Server) gateways(cfg config.Server) map[string]application.Deliver
 	return result
 }
 
-func telegramStateScope(botToken string, chatID int64) string {
-	digest := sha256.Sum256([]byte(strings.TrimSpace(botToken) + "\x00" + strconv.FormatInt(chatID, 10)))
+func telegramStateScope(botID int64, botToken string, chatID int64) string {
+	identity := strings.TrimSpace(botToken)
+	if botID > 0 {
+		identity = "bot:" + strconv.FormatInt(botID, 10)
+	}
+	digest := sha256.Sum256([]byte(identity + "\x00" + strconv.FormatInt(chatID, 10)))
+	return hex.EncodeToString(digest[:16])
+}
+
+func wordStateScope(folder string) string {
+	normalized := strings.ToLower(filepath.Clean(strings.TrimSpace(folder)))
+	digest := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(digest[:16])
 }
 

@@ -225,10 +225,10 @@ func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time)
 		return nil, errors.New("лимит очереди должен быть от 1 до 1000")
 	}
 	rows, err := queue.db.QueryContext(ctx, `
-		SELECT payload_json, attempts
+		SELECT payload_json, attempts, state
 		FROM client_events
 		WHERE state IN ('pending', 'uploaded')
-			AND next_attempt_at <= ? AND expires_at >= ?
+			AND next_attempt_at <= ? AND (state='uploaded' OR expires_at >= ?)
 			AND NOT EXISTS (
 				SELECT 1 FROM client_events earlier
 				WHERE earlier.state IN ('pending', 'uploaded')
@@ -246,7 +246,7 @@ func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time)
 	for rows.Next() {
 		var payload []byte
 		var queued application.QueuedEvent
-		if err := rows.Scan(&payload, &queued.Attempts); err != nil {
+		if err := rows.Scan(&payload, &queued.Attempts, &queued.State); err != nil {
 			return nil, fmt.Errorf("прочитать событие очереди: %w", err)
 		}
 		plain, err := unprotectDatabaseValue(payload)
@@ -292,7 +292,7 @@ func (queue *ClientQueue) ExpireDue(ctx context.Context, now time.Time) (int, er
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
 		SET state='expired', expired_at=?, last_error=?
-		WHERE state IN ('pending', 'uploaded') AND expires_at < ?`,
+		WHERE state = 'pending' AND expires_at < ?`,
 		now.UTC().Format(time.RFC3339Nano), domain.FreshnessExpired,
 		now.UTC().Format(time.RFC3339Nano))
 	if err != nil {

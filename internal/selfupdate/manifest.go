@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	ManifestName   = "update-manifest.json"
-	SignatureName  = "update-manifest.sig"
-	MaxPackageSize = 256 * 1024 * 1024
+	ManifestName    = "update-manifest.json"
+	SignatureName   = "update-manifest.sig"
+	MaxPackageSize  = 256 * 1024 * 1024
+	MaxExpandedSize = 512 * 1024 * 1024
 )
 
 // File describes one immutable payload file covered by the manifest signature.
@@ -119,6 +120,9 @@ func VerifyAndExtract(packagePath, stagingRoot, product, currentVersion, publicK
 	if len(manifest.Files) == 0 || len(manifest.Files) > 64 {
 		return Plan{}, errors.New("манифест содержит недопустимое число файлов")
 	}
+	if _, err := manifestExpandedSize(manifest.Files); err != nil {
+		return Plan{}, err
+	}
 	if err := os.MkdirAll(stagingRoot, 0o700); err != nil {
 		return Plan{}, fmt.Errorf("создать временную папку обновления: %w", err)
 	}
@@ -145,6 +149,20 @@ func VerifyAndExtract(packagePath, stagingRoot, product, currentVersion, publicK
 		}
 	}
 	return Plan{Manifest: manifest, Root: stagingRoot}, nil
+}
+
+func manifestExpandedSize(files []File) (int64, error) {
+	var total int64
+	for _, file := range files {
+		if file.Size < 0 || file.Size > MaxPackageSize || total > MaxExpandedSize-file.Size {
+			return 0, errors.New("распакованный пакет обновления слишком велик")
+		}
+		total += file.Size
+	}
+	if total <= 0 || total > MaxExpandedSize {
+		return 0, errors.New("распакованный пакет обновления имеет недопустимый размер")
+	}
+	return total, nil
 }
 
 func extractAndHash(entry *zip.File, target string, expected File) error {

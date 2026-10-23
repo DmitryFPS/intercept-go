@@ -68,6 +68,17 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	if err != nil || len(jobs) != 2 {
 		t.Fatalf("jobs: %#v %v", jobs, err)
 	}
+	pending, err := store.PendingDestinationCount(ctx, "a")
+	if err != nil || pending != 1 {
+		t.Fatalf("очередь получателя a: %d, %v", pending, err)
+	}
+	if err := store.MarkDelivered(ctx, event.ID, "a", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = store.PendingDestinationCount(ctx, "a")
+	if err != nil || pending != 0 {
+		t.Fatalf("завершённая доставка осталась в очереди: %d, %v", pending, err)
+	}
 	event.ContentDigest = "changed"
 	if _, err := store.KnownEvent(ctx, event.ID, event.ContentDigest); err == nil {
 		t.Fatal("проверка известного UUID должна обнаруживать другое содержимое")

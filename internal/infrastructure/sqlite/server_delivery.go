@@ -256,6 +256,20 @@ func (store *ServerStore) MarkDeliveryRetry(ctx context.Context, eventID, destin
 	return changedExactlyOnce(result, err, "запланировать внешнюю доставку")
 }
 
+// PendingDestinationCount сообщает, есть ли у получателя задания, созданные
+// ещё для его текущих реквизитов. Пока они не завершены, менять адрес
+// получателя или удалять его нельзя: иначе пакет уйдёт не по тому маршруту.
+func (store *ServerStore) PendingDestinationCount(ctx context.Context, destinationID string) (int, error) {
+	var count int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM delivery_jobs WHERE destination_id=? AND state='pending'",
+		destinationID,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("посчитать очередь получателя: %w", err)
+	}
+	return count, nil
+}
+
 func deliveryStreamKey(event domain.Event, delivery domain.PlannedDelivery) string {
 	if delivery.Destination.Kind == domain.DestinationTelegram {
 		return fmt.Sprintf("%s:topic:%d", delivery.Destination.ID, delivery.Decision.ThreadID)

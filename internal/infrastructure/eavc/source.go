@@ -165,6 +165,8 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		boundary AS (
 			SELECT * FROM all_items
 			WHERE ? <> '' AND julianday(updated_at) = julianday(?)
+			ORDER BY id DESC
+			LIMIT ?
 		)
 		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
 			uuid, content, updated_by, updated_at, catalog_uuid, source_mode
@@ -172,7 +174,7 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		ORDER BY julianday(updated_at), id
 		`, allItemsQuery)
 	rows, err := source.db.QueryContext(
-		ctx, query, after.UpdatedAt, after.UpdatedAt, limit, after.UpdatedAt, after.UpdatedAt,
+		ctx, query, after.UpdatedAt, after.UpdatedAt, limit, after.UpdatedAt, after.UpdatedAt, limit,
 	)
 	if err != nil {
 		return nil, after, fmt.Errorf("прочитать изменения EAVC: %w", err)

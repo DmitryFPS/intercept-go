@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -17,6 +18,35 @@ import (
 	"intercept/internal/infrastructure/secrets"
 	"intercept/internal/provisioning"
 )
+
+func TestClientUpdateValidationDoesNotStartProcessing(t *testing.T) {
+	client := NewClient(t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer client.Close()
+	if err := client.ValidateForUpdate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status := client.Status()
+	if status.State != "paused" || status.Processing || status.Configured {
+		t.Fatalf("неожиданное состояние изолированной проверки: %+v", status)
+	}
+}
+
+func TestClientUpdateValidationExposesFailureToHealthCheck(t *testing.T) {
+	client := NewClient(t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer client.Close()
+	if err := os.MkdirAll(filepath.Dir(client.configPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := secrets.Save(client.configPath(), []byte("not-json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ValidateForUpdate(context.Background()); err == nil {
+		t.Fatal("повреждённые настройки прошли проверку обновления")
+	}
+	if status := client.Status(); status.State != "error" || status.Processing {
+		t.Fatalf("ошибка проверки скрыта от health-check: %+v", status)
+	}
+}
 
 func TestFirstClientConfigTrustsProvisionedCenterAndRejectsAnother(t *testing.T) {
 	t.Parallel()
@@ -102,5 +132,40 @@ func TestProvisionedConfigRequiresSeparateActivationCode(t *testing.T) {
 	}
 	if _, err := config.DecodeClient(bytes.NewReader(stored)); err != nil {
 		t.Fatalf("защищённые настройки повреждены: %v", err)
+	}
+
+	other := cfg
+	other.ClientID = "another-point"
+	other, err = config.SignClient(other, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPayload, _ := json.Marshal(other)
+	otherSealed, otherCode, err := provisioning.Seal(otherPayload, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(provisionedPath, otherSealed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.installProvisionedActivation(otherCode); err == nil {
+		t.Fatal("активация другого клиента поверх рабочей очереди должна отклоняться")
+	}
+	stored, err = secrets.Load(client.configPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err := config.DecodeClient(bytes.NewReader(stored))
+	if err != nil || installed.ClientID != cfg.ClientID {
+		t.Fatalf("идентичность точки изменилась после отклонённой активации: %q, %v", installed.ClientID, err)
+	}
+}
+
+func TestPointCannotReuseCenterTransportBot(t *testing.T) {
+	if err := validateSeparateTransportBot(100, 100); err == nil {
+		t.Fatal("бот центра принят как бот точки")
+	}
+	if err := validateSeparateTransportBot(100, 101); err != nil {
+		t.Fatalf("отдельный бот точки отклонён: %v", err)
 	}
 }

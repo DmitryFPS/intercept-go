@@ -22,6 +22,7 @@ type Destination struct {
 	TemplatePath string
 	Folder       string
 	StatePath    string
+	StateScope   string
 	Network      string
 	Protection   string
 	Prefix       string
@@ -78,6 +79,17 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 	current, err := loadState(destination.StatePath)
 	if err != nil {
 		return err
+	}
+	scope := strings.TrimSpace(destination.StateScope)
+	if scope != "" {
+		// Старое состояние без области принадлежит текущему назначению. Если же
+		// папку назначения сменили, прежние записи нельзя считать доставленными:
+		// для новой папки создаётся независимая нумерация и документ.
+		if current.Scope != "" && current.Scope != scope {
+			current = state{Scope: scope, Blocks: make(map[string]blockRecord)}
+		} else {
+			current.Scope = scope
+		}
 	}
 	blocks := event.Blocks
 	if blocks == nil {

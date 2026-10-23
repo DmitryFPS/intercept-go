@@ -31,6 +31,8 @@ var destinationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`
 
 // ConfigureTransport проверяет серверного бота и сохраняет транспортную группу.
 func (server *Server) ConfigureTransport(ctx context.Context, setup TransportSetup) error {
+	server.adminMu.Lock()
+	defer server.adminMu.Unlock()
 	api, err := telegram.New(setup.BotToken, nil)
 	if err != nil {
 		return err
@@ -79,6 +81,8 @@ func (server *Server) ConfigureTransport(ctx context.Context, setup TransportSet
 
 // AddDestination проверяет получателя до публикации новой конфигурации.
 func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup) error {
+	server.adminMu.Lock()
+	defer server.adminMu.Unlock()
 	server.mu.RLock()
 	cfg := cloneServerConfig(server.config)
 	server.mu.RUnlock()
@@ -134,9 +138,11 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 		if err != nil {
 			return err
 		}
-		if _, err := api.GetMe(ctx); err != nil {
+		me, err := api.GetMe(ctx)
+		if err != nil {
 			return fmt.Errorf("проверка бота направления: %w", err)
 		}
+		destination.BotID = me.ID
 		if err := api.TestTopic(ctx, destination.ChatID, 0); err != nil {
 			return fmt.Errorf("проверка Telegram-направления: %w", err)
 		}
@@ -154,6 +160,15 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 		}
 	default:
 		return errors.New("неподдерживаемый тип направления")
+	}
+	if destinationExists && destinationTargetChanged(existingDestination, destination) {
+		pending, err := server.Store.PendingDestinationCount(ctx, id)
+		if err != nil {
+			return err
+		}
+		if pending > 0 {
+			return fmt.Errorf("нельзя изменить адрес получателя: сначала дождитесь завершения %d заданий в его очереди", pending)
+		}
 	}
 	if cfg.Destinations == nil {
 		cfg.Destinations = make(map[string]config.DestinationConfig)
@@ -190,6 +205,8 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 
 // DeleteDestination удаляет получателя из конфигурации и всех маршрутов.
 func (server *Server) DeleteDestination(ctx context.Context, id string) error {
+	server.adminMu.Lock()
+	defer server.adminMu.Unlock()
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return errors.New("не задан ID направления")
@@ -200,6 +217,13 @@ func (server *Server) DeleteDestination(ctx context.Context, id string) error {
 	previousConfig := cloneServerConfig(cfg)
 	if _, exists := cfg.Destinations[id]; !exists {
 		return errors.New("направление не найдено")
+	}
+	pending, err := server.Store.PendingDestinationCount(ctx, id)
+	if err != nil {
+		return err
+	}
+	if pending > 0 {
+		return fmt.Errorf("нельзя удалить получателя: сначала дождитесь завершения %d заданий в его очереди", pending)
 	}
 	rules, err := server.Store.ActiveRules(ctx)
 	if err != nil {
@@ -264,6 +288,9 @@ func (server *Server) AddClient(ctx context.Context, request config.ClientReques
 	if request.BotUsername != "" && !strings.EqualFold(strings.TrimPrefix(request.BotUsername, "@"), me.Username) {
 		return nil, errors.New("токен принадлежит другому боту")
 	}
+	if err := validateSeparateTransportBot(cfg.Transport.BotID, me.ID); err != nil {
+		return nil, err
+	}
 	request.BotUsername = me.Username
 	request.ServerBotID = cfg.Transport.BotID
 	request.ServerBotUsername = cfg.Transport.BotUsername
@@ -307,6 +334,13 @@ func (server *Server) AddClient(ctx context.Context, request config.ClientReques
 	}
 	server.Logger.Info("точка добавлена", "client_id", clientConfig.ClientID, "client_number", clientConfig.ClientNumber)
 	return payload, nil
+}
+
+func validateSeparateTransportBot(centerBotID, pointBotID int64) error {
+	if centerBotID == pointBotID {
+		return errors.New("для рабочей точки нужен отдельный бот; бот центра использовать нельзя")
+	}
+	return nil
 }
 
 // Clients возвращает зарегистрированные точки без их ключей шифрования.
@@ -459,6 +493,8 @@ func (server *Server) SaveRuleDraft(ctx context.Context, rules domain.RuleSet) e
 
 // PublishRules проверяет и публикует матрицу как новую целостную версию.
 func (server *Server) PublishRules(ctx context.Context, rules domain.RuleSet, author string) error {
+	server.adminMu.Lock()
+	defer server.adminMu.Unlock()
 	canonical, err := canonicalRules(rules)
 	if err != nil {
 		return err
@@ -467,14 +503,26 @@ func (server *Server) PublishRules(ctx context.Context, rules domain.RuleSet, au
 	if err := server.validateRuleDestinations(rules); err != nil {
 		return err
 	}
+	active, err := server.Store.ActiveRules(ctx)
+	if err != nil {
+		return err
+	}
+	if err := requireCurrentRuleVersion(rules.Version, active.Version); err != nil {
+		return err
+	}
 	next, err := server.Store.NextRuleVersion(ctx)
 	if err != nil {
 		return err
 	}
-	if rules.Version < next {
-		rules.Version = next
-	}
+	rules.Version = next
 	return server.Store.PublishRules(ctx, rules, author)
+}
+
+func requireCurrentRuleVersion(submitted, active int64) error {
+	if submitted != active {
+		return fmt.Errorf("маршруты уже изменены другим действием: на экране версия %d, действует версия %d; обновите страницу и повторите", submitted, active)
+	}
+	return nil
 }
 
 // RuleHistory показывает версии маршрутов без раскрытия секретных настроек.
@@ -484,6 +532,8 @@ func (server *Server) RuleHistory(ctx context.Context) ([]stateDB.RuleVersion, e
 
 // RestoreRules публикует выбранную старую матрицу как новую версию.
 func (server *Server) RestoreRules(ctx context.Context, version int64, author string) error {
+	server.adminMu.Lock()
+	defer server.adminMu.Unlock()
 	rules, err := server.Store.RulesByVersion(ctx, version)
 	if err != nil {
 		return err
@@ -497,6 +547,24 @@ func (server *Server) RestoreRules(ctx context.Context, version int64, author st
 	}
 	rules.Version = next
 	return server.Store.PublishRules(ctx, rules, author+" · восстановление версии "+strconv.FormatInt(version, 10))
+}
+
+func destinationTargetChanged(previous, next config.DestinationConfig) bool {
+	if previous.Kind != next.Kind {
+		return true
+	}
+	switch next.Kind {
+	case domain.DestinationTelegram:
+		sameBot := previous.BotToken == next.BotToken
+		if previous.BotID > 0 && next.BotID > 0 {
+			sameBot = previous.BotID == next.BotID
+		}
+		return !sameBot || previous.ChatID != next.ChatID
+	case domain.DestinationWord:
+		return !strings.EqualFold(filepath.Clean(strings.TrimSpace(previous.Folder)), filepath.Clean(strings.TrimSpace(next.Folder)))
+	default:
+		return true
+	}
 }
 
 func (server *Server) validateRuleDestinations(rules domain.RuleSet) error {

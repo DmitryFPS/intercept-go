@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -100,6 +101,10 @@ func (handler Handler) installUpdate(writer http.ResponseWriter, request *http.R
 	defer file.Close()
 	result, err := handler.Updater.Prepare(file, header.Size, os.Getpid())
 	if err != nil {
+		if errors.Is(err, selfupdate.ErrUpdateInProgress) {
+			handler.publicError(writer, http.StatusConflict, "Обновление уже выполняется. Дождитесь результата.", err)
+			return
+		}
 		handler.publicError(writer, http.StatusBadRequest, "Пакет обновления не принят. Проверьте, что он предназначен для центра и получен из доверенного выпуска.", err)
 		return
 	}

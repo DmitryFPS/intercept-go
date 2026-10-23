@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -10,7 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"intercept/internal/config"
 	"intercept/internal/domain"
+	"intercept/internal/infrastructure/eavc"
+	"intercept/internal/infrastructure/secrets"
 	stateDB "intercept/internal/infrastructure/sqlite"
 )
 
@@ -196,6 +200,63 @@ func (client *Client) Start(ctx context.Context) {
 		<-rootContext.Done()
 		client.stopWorker()
 	}()
+}
+
+// ValidateForUpdate проверяет защищённые настройки, доверие, базу EAVC и
+// локальную очередь, не запуская Telegram и циклы отправки.
+func (client *Client) ValidateForUpdate(ctx context.Context) (resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			client.fail("Проверка обновления не пройдена", "Предыдущая версия будет восстановлена автоматически.", resultErr)
+		}
+	}()
+	protected, err := secrets.Load(client.configPath())
+	if errors.Is(err, os.ErrNotExist) {
+		client.update(func(status *ClientStatus) {
+			status.State = "paused"
+			status.Title = "Обновление проверено"
+			status.Detail = "Рабочая точка ещё не настроена; новая версия запускается."
+			status.Processing = false
+		})
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	cfg, err := config.DecodeClient(bytes.NewReader(protected))
+	if err != nil {
+		return err
+	}
+	if _, _, err := client.verifyTrustedIssuer(cfg); err != nil {
+		return err
+	}
+	eavcPath, err := client.resolveEAVCPath(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	source, err := eavc.Open(ctx, eavcPath)
+	if err != nil {
+		return err
+	}
+	_ = source.Close()
+	db, err := stateDB.OpenState(filepath.Join(client.BaseDir, "data", "client.db"))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if _, err := stateDB.NewClientQueue(ctx, db); err != nil {
+		return err
+	}
+	client.update(func(status *ClientStatus) {
+		*status = ClientStatus{
+			State: "paused", Title: "Обновление проверено",
+			Detail:     "Настройки и рабочие данные совместимы. Рабочие циклы ещё не запускались.",
+			Configured: true, ClientID: cfg.ClientID, ClientName: cfg.ClientName,
+			ClientNumber: cfg.ClientNumber, DatabaseOK: true, EAVCPath: eavcPath,
+			Version: client.Version, Processing: false,
+		}
+	})
+	return nil
 }
 
 // Close дожидается завершения всех циклов клиента перед обновлением или выходом.

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,7 +40,13 @@ type Result struct {
 
 // Manager verifies the complete package while the old application is still
 // serving work, then delegates only the short switch-over to a temporary helper.
-type Manager struct{ config Configuration }
+var ErrUpdateInProgress = errors.New("обновление уже выполняется")
+
+type Manager struct {
+	config   Configuration
+	mu       sync.Mutex
+	updating bool
+}
 
 func NewManager(configuration Configuration) *Manager {
 	cleanupOrphanedWorkRoots(os.TempDir(), time.Now())
@@ -91,6 +98,21 @@ func (manager *Manager) LatestResult() Result {
 // Prepare starts a trusted helper and returns only after the package is fully
 // verified and extracted. The caller may then answer HTTP and stop gracefully.
 func (manager *Manager) Prepare(packageReader io.Reader, size int64, currentPID int) (Result, error) {
+	manager.mu.Lock()
+	if manager.updating {
+		manager.mu.Unlock()
+		return Result{}, ErrUpdateInProgress
+	}
+	manager.updating = true
+	manager.mu.Unlock()
+	prepared := false
+	defer func() {
+		if !prepared {
+			manager.mu.Lock()
+			manager.updating = false
+			manager.mu.Unlock()
+		}
+	}()
 	if size <= 0 || size > MaxPackageSize {
 		return Result{}, errors.New("пакет обновления имеет недопустимый размер")
 	}
@@ -123,6 +145,25 @@ func (manager *Manager) Prepare(packageReader io.Reader, size int64, currentPID 
 		_ = os.RemoveAll(workRoot)
 		return Result{}, errors.New("в пакете отсутствует исполняемый файл приложения")
 	}
+	expandedSize, err := manifestExpandedSize(plan.Manifest.Files)
+	if err != nil {
+		_ = os.RemoveAll(workRoot)
+		return Result{}, err
+	}
+	dataSize, err := directorySize(filepath.Join(manager.config.BaseDir, "data"))
+	if err != nil {
+		_ = os.RemoveAll(workRoot)
+		return Result{}, fmt.Errorf("проверить размер рабочих данных: %w", err)
+	}
+	const reserve = int64(64 * 1024 * 1024)
+	if err := ensureFreeSpace(workRoot, expandedSize+dataSize+reserve); err != nil {
+		_ = os.RemoveAll(workRoot)
+		return Result{}, err
+	}
+	if err := ensureFreeSpace(manager.config.BaseDir, expandedSize+reserve); err != nil {
+		_ = os.RemoveAll(workRoot)
+		return Result{}, err
+	}
 	helperSource := filepath.Join(manager.config.BaseDir, manager.config.Helper)
 	helperTarget := filepath.Join(workRoot, "EAVC-Update-Runner.exe")
 	if err := copyFile(helperSource, helperTarget); err != nil {
@@ -148,7 +189,35 @@ func (manager *Manager) Prepare(packageReader io.Reader, size int64, currentPID 
 	if manager.config.Logger != nil {
 		manager.config.Logger.Info("обновление проверено и подготовлено", "from", manager.config.Version, "to", plan.Manifest.Version)
 	}
+	prepared = true
 	return result, nil
+}
+
+func directorySize(root string) (int64, error) {
+	var total int64
+	err := filepath.Walk(root, func(_ string, info os.FileInfo, walkErr error) error {
+		if errors.Is(walkErr, os.ErrNotExist) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("в рабочих данных найден неподдерживаемый файл")
+		}
+		if info.Size() > MaxExpandedSize || total > MaxExpandedSize-info.Size() {
+			return errors.New("рабочие данные слишком велики для безопасного обновления")
+		}
+		total += info.Size()
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	return total, err
 }
 
 func writeResult(path string, result Result) error {

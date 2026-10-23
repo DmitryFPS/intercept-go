@@ -448,3 +448,24 @@ func TestDestinationDoesNotReuseMessageIDsAfterTargetChange(t *testing.T) {
 		t.Fatalf("новая область состояния не сохранена: %#v err=%v", current, err)
 	}
 }
+
+func TestDestinationMigratesLegacyTokenScopeWithoutLosingMessageIDs(t *testing.T) {
+	t.Parallel()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{
+		Scope: "legacy-token-scope",
+		Items: map[string]destinationItem{"event": {ThreadID: 2}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{
+		StatePath: statePath, StateScope: "stable-bot-scope", LegacyStateScope: "legacy-token-scope",
+	}
+	current, err := destination.loadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Scope != "stable-bot-scope" || len(current.Items) != 1 {
+		t.Fatalf("миграция области потеряла историю сообщений: %#v", current)
+	}
+}

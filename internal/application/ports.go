@@ -52,6 +52,7 @@ type ClientQueue interface {
 type QueuedEvent struct {
 	Event    domain.Event
 	Attempts int
+	State    string
 }
 
 // ClientState хранит курсор источника, признаки и смещения транспорта.

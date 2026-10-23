@@ -3,6 +3,7 @@ package clientui
 import (
 	"context"
 	"embed"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -89,6 +90,10 @@ func (handler Handler) installUpdate(writer http.ResponseWriter, request *http.R
 	defer file.Close()
 	result, err := handler.Updater.Prepare(file, header.Size, os.Getpid())
 	if err != nil {
+		if errors.Is(err, selfupdate.ErrUpdateInProgress) {
+			handler.publicError(writer, http.StatusConflict, "Обновление уже выполняется. Дождитесь результата.", err)
+			return
+		}
 		handler.publicError(writer, http.StatusBadRequest, "Пакет обновления не принят. Проверьте, что он предназначен для этой программы и получен от администратора.", err)
 		return
 	}

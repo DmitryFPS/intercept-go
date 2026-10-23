@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+func atomicReplace(source, target string) error { return os.Rename(source, target) }
+
 func setHiddenProcess(command *exec.Cmd) {}
 
 func waitForProcessExit(pid int, timeout time.Duration) error {

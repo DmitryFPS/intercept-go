@@ -85,3 +85,49 @@ func TestLegacyBuiltInRulesDetection(t *testing.T) {
 		t.Fatal("пользовательские правила ошибочно распознаны как старая заготовка")
 	}
 }
+
+func TestDestinationStateScopesFollowExternalIdentity(t *testing.T) {
+	t.Parallel()
+	if telegramStateScope(101, "old-token", -1001) != telegramStateScope(101, "rotated-token", -1001) {
+		t.Fatal("ротация токена того же бота сбросила историю Telegram и создаст дубль")
+	}
+	if telegramStateScope(101, "token", -1001) == telegramStateScope(102, "token", -1001) {
+		t.Fatal("другой Telegram-бот получил прежнюю область состояния")
+	}
+	if telegramStateScope(101, "token", -1001) == telegramStateScope(101, "token", -1002) {
+		t.Fatal("другая Telegram-группа получила прежнюю область состояния")
+	}
+	if wordStateScope(`C:\\Shared\\39`) == wordStateScope(`C:\\Shared\\40`) {
+		t.Fatal("разные Word-папки получили одинаковую область состояния")
+	}
+}
+
+func TestDestinationTargetChangedUsesStableBotIdentity(t *testing.T) {
+	t.Parallel()
+	before := config.DestinationConfig{Kind: domain.DestinationTelegram, BotID: 101, BotToken: "old", ChatID: -1001}
+	after := before
+	after.BotToken = "rotated"
+	if destinationTargetChanged(before, after) {
+		t.Fatal("ротация токена того же Telegram-бота принята за смену получателя")
+	}
+	after.ChatID = -1002
+	if !destinationTargetChanged(before, after) {
+		t.Fatal("смена Telegram-группы не распознана")
+	}
+	wordBefore := config.DestinationConfig{Kind: domain.DestinationWord, Folder: `C:\\Shared\\39`}
+	wordAfter := wordBefore
+	wordAfter.Folder = `C:\\Shared\\40`
+	if !destinationTargetChanged(wordBefore, wordAfter) {
+		t.Fatal("смена Word-папки не распознана")
+	}
+}
+
+func TestPublishingStaleRuleVersionIsRejected(t *testing.T) {
+	t.Parallel()
+	if err := requireCurrentRuleVersion(4, 5); err == nil {
+		t.Fatal("устаревшая копия маршрутов может затереть новую")
+	}
+	if err := requireCurrentRuleVersion(5, 5); err != nil {
+		t.Fatalf("текущая версия ошибочно отклонена: %v", err)
+	}
+}
