@@ -39,7 +39,10 @@ type SourceItem struct {
 
 // ClientQueue гарантирует сохранение события до обращения к сети.
 type ClientQueue interface {
-	Enqueue(ctx context.Context, event domain.Event) error
+	// Enqueue возвращает true только когда новая версия события действительно
+	// сохранена. Повторное чтение одной и той же версии из EAVC не считается
+	// новой постановкой в очередь.
+	Enqueue(ctx context.Context, event domain.Event) (bool, error)
 	Pending(ctx context.Context, limit int, now time.Time) ([]QueuedEvent, error)
 	MarkUploaded(ctx context.Context, eventID string, telegramMessageID int64) error
 	MarkAcknowledged(ctx context.Context, eventID string, at time.Time) error

@@ -32,7 +32,7 @@ func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("queue: %v", err)
 	}
-	if err := queue.Enqueue(context.Background(), event); err != nil {
+	if inserted, err := queue.Enqueue(context.Background(), event); err != nil || !inserted {
 		t.Fatalf("enqueue: %v", err)
 	}
 	var storedPayload []byte
@@ -46,7 +46,7 @@ func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	}
 	duplicate := event
 	duplicate.ID = "event-2"
-	if err := queue.Enqueue(context.Background(), duplicate); err != nil {
+	if inserted, err := queue.Enqueue(context.Background(), duplicate); err != nil || inserted {
 		t.Fatalf("enqueue duplicate: %v", err)
 	}
 	if err := queue.SaveCursor(context.Background(), "eavc", application.Cursor{UpdatedAt: "2026", ID: 5}); err != nil {
@@ -113,10 +113,10 @@ func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {
 	second.ContentDigest = "digest-2"
 	second.CreatedAt = now.Add(time.Second)
 	second.ExpiresAt = now.Add(30 * time.Minute)
-	if err := queue.Enqueue(ctx, first); err != nil {
+	if _, err := queue.Enqueue(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := queue.Enqueue(ctx, second); err != nil {
+	if _, err := queue.Enqueue(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 	if err := queue.MarkRetry(ctx, first.ID, now.Add(time.Minute), "временная ошибка"); err != nil {
@@ -165,10 +165,10 @@ func TestClientQueueDoesNotBlockAnotherPosition(t *testing.T) {
 	second.Position.UnitName = "другое подразделение"
 	second.ContentDigest = "digest-2"
 	second.CreatedAt = now.Add(time.Second)
-	if err := queue.Enqueue(ctx, first); err != nil {
+	if _, err := queue.Enqueue(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := queue.Enqueue(ctx, second); err != nil {
+	if _, err := queue.Enqueue(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 	if err := queue.MarkRetry(ctx, first.ID, now.Add(time.Minute), "нет связи"); err != nil {
@@ -212,10 +212,10 @@ func TestClientQueuePrioritizesPendingOverUploadedRetry(t *testing.T) {
 	pending.Content = "ожидает"
 	pending.ContentDigest = "digest-pending"
 	pending.CreatedAt = now.Add(time.Second)
-	if err := queue.Enqueue(ctx, uploaded); err != nil {
+	if _, err := queue.Enqueue(ctx, uploaded); err != nil {
 		t.Fatal(err)
 	}
-	if err := queue.Enqueue(ctx, pending); err != nil {
+	if _, err := queue.Enqueue(ctx, pending); err != nil {
 		t.Fatal(err)
 	}
 	if err := queue.MarkUploaded(ctx, uploaded.ID, 77); err != nil {
@@ -248,7 +248,7 @@ func TestClientQueueDoesNotRetryUploadedTooFrequently(t *testing.T) {
 		Source: domain.SourceRecord{UUID: "source-uploaded"}, Position: domain.Position{UnitName: "позиция"},
 		Mode: domain.SourceModeNormal, Content: "данные", ContentDigest: "digest-uploaded",
 	}
-	if err := queue.Enqueue(ctx, event); err != nil {
+	if _, err := queue.Enqueue(ctx, event); err != nil {
 		t.Fatal(err)
 	}
 	if err := queue.MarkUploaded(ctx, event.ID, 77); err != nil {
@@ -290,10 +290,10 @@ func TestClientQueueRepairsLegacyStreamKeys(t *testing.T) {
 	second := first
 	second.ID, second.Source.UUID, second.ContentDigest = "legacy-2", "source-2", "digest-2"
 	second.CreatedAt = now.Add(time.Second)
-	if err := queue.Enqueue(ctx, first); err != nil {
+	if _, err := queue.Enqueue(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := queue.Enqueue(ctx, second); err != nil {
+	if _, err := queue.Enqueue(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, "UPDATE client_events SET stream_key=source_uuid"); err != nil {
@@ -341,14 +341,14 @@ func TestClientQueueAllowsContentToReturnToEarlierValueInNewSourceVersion(t *tes
 		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
 		Content: "значение А", ContentDigest: "digest-a",
 	}
-	if err := queue.Enqueue(ctx, event); err != nil {
+	if _, err := queue.Enqueue(ctx, event); err != nil {
 		t.Fatal(err)
 	}
 	returned := event
 	returned.ID = "event-2"
 	returned.CreatedAt = now.Add(2 * time.Minute)
 	returned.Source.UpdatedAt = now.Add(2 * time.Minute).Format(time.RFC3339Nano)
-	if err := queue.Enqueue(ctx, returned); err != nil {
+	if _, err := queue.Enqueue(ctx, returned); err != nil {
 		t.Fatal(err)
 	}
 	stats, err := queue.Stats(ctx)
@@ -380,7 +380,7 @@ func TestClientQueuePurgesOnlyOldTerminalEvents(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"old", "recent", "pending"} {
-		if err := queue.Enqueue(ctx, makeEvent(id)); err != nil {
+		if _, err := queue.Enqueue(ctx, makeEvent(id)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -420,7 +420,7 @@ func TestClientQueueConsumesLateAndDuplicateAcknowledgements(t *testing.T) {
 		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
 		Content: "данные", ContentDigest: "digest-late",
 	}
-	if err := queue.Enqueue(ctx, event); err != nil {
+	if _, err := queue.Enqueue(ctx, event); err != nil {
 		t.Fatal(err)
 	}
 	if err := queue.MarkExpired(ctx, event.ID, now, domain.FreshnessExpired); err != nil {
@@ -460,7 +460,7 @@ func TestClientQueuePagesAndProtectsActiveMessagesFromDeletion(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"pending", "uploaded", "acknowledged", "expired"} {
-		if err := queue.Enqueue(ctx, makeEvent(id)); err != nil {
+		if _, err := queue.Enqueue(ctx, makeEvent(id)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -521,7 +521,7 @@ func TestLateUploadDoesNotUndoAcknowledgement(t *testing.T) {
 		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
 		Content: "текст", ContentDigest: "digest-fast-ack",
 	}
-	if err := queue.Enqueue(ctx, event); err != nil {
+	if _, err := queue.Enqueue(ctx, event); err != nil {
 		t.Fatal(err)
 	}
 	if err := queue.MarkAcknowledged(ctx, event.ID, now); err != nil {

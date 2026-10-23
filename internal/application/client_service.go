@@ -119,8 +119,12 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 			}
 			continue
 		}
-		if err := service.Queue.Enqueue(ctx, event); err != nil {
+		inserted, err := service.Queue.Enqueue(ctx, event)
+		if err != nil {
 			return queued, err
+		}
+		if !inserted {
+			continue
 		}
 		if service.Logger != nil {
 			level := slog.LevelInfo

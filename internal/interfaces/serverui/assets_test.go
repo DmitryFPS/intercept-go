@@ -99,6 +99,33 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	}
 }
 
+func TestDashboardUsesOperationalSummaryWithoutTrainingCopy(t *testing.T) {
+	index, err := assets.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(index)
+	javascript := string(application)
+	for _, obsolete := range []string{
+		"Что нужно сделать до первого теста",
+		"Диагностика содержит безопасные журналы",
+		"Остановка сохраняет настройки и очереди",
+	} {
+		if strings.Contains(html, obsolete) {
+			t.Errorf("на обзор вернулся лишний обучающий текст %q", obsolete)
+		}
+	}
+	for _, id := range []string{"readinessTitle", "readinessMeta", "serviceControlState"} {
+		if !strings.Contains(html, `id="`+id+`"`) || !strings.Contains(javascript, `$('`+id+`')`) {
+			t.Errorf("операционная сводка не подключает элемент %q", id)
+		}
+	}
+}
+
 func TestHistoryColumnLabelsMatchOperatorScreens(t *testing.T) {
 	application, err := assets.ReadFile("assets/app.js")
 	if err != nil {

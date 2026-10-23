@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -59,6 +60,37 @@ func TestClientServiceSeparatesUploadFromServerAcknowledgement(t *testing.T) {
 	}
 	if queue.states[queue.events[0].ID] != "acknowledged" {
 		t.Fatalf("событие не подтверждено: %#v", queue.states)
+	}
+}
+
+// Источник намеренно перечитывает граничную секунду, чтобы не потерять быструю
+// правку. Точный повтор уже сохранённой версии не должен считаться новой
+// постановкой и засорять журнал ложными событиями.
+func TestClientServiceDoesNotCountBoundaryReplayAsNewEvent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 23, 20, 0, 0, 0, time.UTC)
+	item := SourceItem{
+		Record: domain.SourceRecord{
+			ID: 42, UUID: "source-42", UpdatedAt: "2026-10-23 20:00:00",
+		},
+		Position: domain.Position{UnitName: "1 мб 155 омбр"},
+		Mode:     domain.SourceModeNormal, Content: "20.00\n-Проверка", ObservedAt: now,
+	}
+	queue := newMemoryClientState()
+	service := ClientService{
+		ClientID: "textile", Source: &replaySource{item: item}, Queue: queue, State: queue,
+		Sender: &memorySender{}, KeyID: "key", Key: make([]byte, 32), BatchSize: 10,
+		CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("первая версия не поставлена в очередь: queued=%d err=%v", queued, err)
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+		t.Fatalf("точный повтор ошибочно посчитан новым: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 1 {
+		t.Fatalf("точный повтор продублирован в очереди: %d", len(queue.events))
 	}
 }
 
@@ -178,6 +210,14 @@ type memorySource struct {
 	items []SourceItem
 }
 
+type replaySource struct {
+	item SourceItem
+}
+
+func (source *replaySource) Scan(_ context.Context, _ Cursor, _ int) ([]SourceItem, Cursor, error) {
+	return []SourceItem{source.item}, Cursor{UpdatedAt: source.item.Record.UpdatedAt, ID: source.item.Record.ID}, nil
+}
+
 type baselineSource struct {
 	head    Cursor
 	oldItem SourceItem
@@ -234,10 +274,23 @@ func newMemoryClientState() *memoryClientState {
 	}
 }
 
-func (state *memoryClientState) Enqueue(_ context.Context, event domain.Event) error {
+func (state *memoryClientState) Enqueue(_ context.Context, event domain.Event) (bool, error) {
+	for _, existing := range state.events {
+		if sourceVersionKey(existing) == sourceVersionKey(event) {
+			return false, nil
+		}
+	}
 	state.events = append(state.events, event)
 	state.states[event.ID] = "pending"
-	return nil
+	return true, nil
+}
+
+func sourceVersionKey(event domain.Event) string {
+	sourceKey := event.Source.UUID
+	if sourceKey == "" {
+		sourceKey = fmt.Sprintf("id:%d", event.Source.ID)
+	}
+	return sourceKey + "\x00" + event.Source.UpdatedAt + "\x00" + event.ContentDigest
 }
 
 func (state *memoryClientState) Pending(_ context.Context, limit int, _ time.Time) ([]QueuedEvent, error) {

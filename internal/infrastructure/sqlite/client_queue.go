@@ -163,17 +163,17 @@ func (queue *ClientQueue) Compact(ctx context.Context) error {
 }
 
 // Enqueue сохраняет событие до любых сетевых действий и подавляет точный повтор.
-func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error {
+func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) (bool, error) {
 	if err := event.Validate(); err != nil {
-		return err
+		return false, err
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {
-		return fmt.Errorf("кодировать событие: %w", err)
+		return false, fmt.Errorf("кодировать событие: %w", err)
 	}
 	payload, err = protectDatabaseValue(payload)
 	if err != nil {
-		return fmt.Errorf("защитить событие: %w", err)
+		return false, fmt.Errorf("защитить событие: %w", err)
 	}
 	sourceKey := strings.TrimSpace(event.Source.UUID)
 	if sourceKey == "" {
@@ -201,7 +201,7 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 			lastError = domain.FreshnessExpired
 		}
 	}
-	_, err = queue.db.ExecContext(ctx, `
+	result, err := queue.db.ExecContext(ctx, `
 		INSERT INTO client_events(
 			event_id, source_uuid, source_version, stream_key, content_digest, payload_json, state,
 			next_attempt_at, expires_at, created_at, expired_at, last_error
@@ -214,9 +214,13 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) error
 		expiredAt, lastError,
 	)
 	if err != nil {
-		return fmt.Errorf("поставить событие в очередь: %w", err)
+		return false, fmt.Errorf("поставить событие в очередь: %w", err)
 	}
-	return nil
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("определить результат постановки события в очередь: %w", err)
+	}
+	return inserted > 0, nil
 }
 
 // Pending выбирает только головы независимых очередей подразделений.

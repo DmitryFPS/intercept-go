@@ -23,7 +23,10 @@
 
   <section id="dashboard" class="page active">
     <div class="hero" id="hero"><div class="hero-icon"><span class="status-dot"></span></div><div><span class="eyebrow">СОСТОЯНИЕ</span><h2 id="stateTitle">Запуск</h2><p id="stateDetail">Проверяем систему.</p></div></div>
-    <div class="setup-card card"><div><span class="eyebrow">ПОРЯДОК НАСТРОЙКИ</span><h2>Что нужно сделать до первого теста</h2><p>Программа ничего не подставляет за вас. Получатели, рабочие точки и маршруты появляются только после вашего сохранения.</p></div><div id="readiness" class="checklist"></div></div>
+    <section class="card readiness-panel" aria-labelledby="readinessTitle">
+      <div class="readiness-head"><div><span class="eyebrow">ГОТОВНОСТЬ СИСТЕМЫ</span><h2 id="readinessTitle">Настройка системы</h2></div><span id="readinessMeta" class="readiness-meta">Проверяем</span></div>
+      <div id="readiness" class="checklist readiness-grid"></div>
+    </section>
     <div class="stats">
       <button type="button" class="stat-card" data-history="clients"><small>РАБОЧИХ ТОЧЕК</small><strong id="statClients">0/0</strong><span>Состояние связи</span></button>
       <button type="button" class="stat-card" data-history="received"><small>ПОЛУЧЕНО</small><strong id="statEvents">0</strong><span>История приёма</span></button>
@@ -32,8 +35,13 @@
       <button type="button" class="stat-card" data-history="expired"><small>ПРОСРОЧЕНО</small><strong id="statExpired">0</strong><span>Причины и время</span></button>
       <button type="button" class="stat-card" data-history="rejected"><small>ОТКЛОНЕНО</small><strong id="statRejected">0</strong><span>Причины отклонения</span></button>
     </div>
-    <div class="two-columns"><article class="card"><div class="card-head"><h3>Последняя активность</h3></div><dl><dt>Принят пакет</dt><dd id="lastReceived">Ещё не было</dd><dt>Выполнен маршрут</dt><dd id="lastDelivery">Ещё не было</dd></dl></article><article class="card"><div class="card-head"><h3>Обслуживание</h3></div><p>Диагностика содержит безопасные журналы. Обновление проверяется цифровой подписью и автоматически откатывается при неудаче.</p><div class="control-actions"><button id="downloadDiagnostics" class="button secondary" type="button">Скачать диагностику</button><label class="button primary">Установить обновление<input id="updateFile" hidden type="file" accept=".zip,application/zip"></label></div><small id="updateResult" class="muted"></small></article></div>
-    <div class="card control-panel"><div><h3>Ручное управление</h3><p>Остановка сохраняет настройки и очереди. Обновление перечитывает настройки и переподключает транспорт.</p></div><div class="control-actions"><button id="controlStart" class="button primary" type="button">Старт</button><button id="controlStop" class="button ghost" type="button">Стоп</button><button id="controlRefresh" class="button secondary" type="button">Обновить</button></div></div>
+    <div class="dashboard-operations">
+      <article class="card activity-card"><div class="card-head"><div><span class="eyebrow">ОПЕРАЦИИ</span><h3>Последняя активность</h3></div></div><dl class="activity-list"><div><dt>Принят пакет</dt><dd id="lastReceived">Ещё не было</dd></div><div><dt>Выполнен маршрут</dt><dd id="lastDelivery">Ещё не было</dd></div></dl></article>
+      <article class="card operations-card">
+        <section class="operation-group"><div class="operation-title"><span class="eyebrow">СОСТОЯНИЕ СЕРВИСА</span><h3 id="serviceControlState">Проверяем</h3></div><div class="control-actions"><button id="controlStart" class="button primary" type="button" title="Запустить обработку">Старт</button><button id="controlStop" class="button ghost" type="button" title="Остановить обработку">Стоп</button><button id="controlRefresh" class="button secondary" type="button" title="Перечитать настройки и переподключить транспорт">Обновить</button></div></section>
+        <section class="operation-group service-tools"><div class="operation-title"><span class="eyebrow">СЕРВИСНЫЕ ОПЕРАЦИИ</span><h3>Диагностика и обновление</h3></div><div class="control-actions"><button id="downloadDiagnostics" class="button secondary" type="button">Скачать диагностику</button><label class="button primary">Установить обновление<input id="updateFile" hidden type="file" accept=".zip,application/zip"></label></div><small id="updateResult" class="operation-result muted" aria-live="polite"></small></section>
+      </article>
+    </div>
   </section>
 
   <section id="transport" class="page">

@@ -182,6 +182,9 @@ async function refreshStatus() {
   $('controlStart').disabled = status.processing || !status.configured;
   $('controlStop').disabled = !status.processing;
   $('controlRefresh').disabled = !status.configured;
+  $('serviceControlState').textContent = !status.configured
+    ? 'Настройка не завершена'
+    : (status.processing ? 'Центр запущен' : 'Центр остановлен');
 
   const stats = status.stats || {};
   const workingClients = (stats.clients_online || 0) + (stats.clients_degraded || 0);
@@ -540,12 +543,17 @@ async function loadOverview() {
 
 function renderReadiness() {
   const items = [
-    [Boolean(status?.configured), 'Настроить связь с рабочими точками'],
-    [Object.keys(destinations).length > 0, 'Добавить хотя бы одного получателя'],
-    [clients.length > 0, 'Создать файл настроек рабочей точки'],
-    [Object.keys(rules?.positions || {}).length > 0, 'Добавить позиции'],
-    [Object.keys(rules?.positions || {}).length > 0 && !rulesDirty, 'Опубликовать маршруты']
+    [Boolean(status?.configured), 'Связь центра и рабочих точек'],
+    [Object.keys(destinations).length > 0, 'Получатель доставки'],
+    [clients.length > 0, 'Настройки рабочей точки'],
+    [Object.keys(rules?.positions || {}).length > 0, 'Каталог позиций'],
+    [Object.keys(rules?.positions || {}).length > 0 && !rulesDirty, 'Опубликованные маршруты']
   ];
+  const completed = items.filter(([done]) => done).length;
+  const ready = completed === items.length;
+  $('readinessTitle').textContent = ready ? 'Система готова к работе' : 'Требуется завершить настройку';
+  $('readinessMeta').textContent = `${completed} из ${items.length}`;
+  $('readinessMeta').className = `readiness-meta ${ready ? 'complete' : 'pending'}`;
   $('readiness').innerHTML = items.map(([done, label]) => `
     <div class="check-item${done ? ' done' : ''}">
       <span class="check-mark">${done ? '✓' : ''}</span><span>${escapeHTML(label)}</span>
