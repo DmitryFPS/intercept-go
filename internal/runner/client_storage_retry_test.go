@@ -50,3 +50,21 @@ func TestClientDoesNotRetryPermanentMigrationFailure(t *testing.T) {
 		t.Fatalf("постоянную ошибку повторили %d раз", attempts)
 	}
 }
+
+func TestClientEndsTransientStorageCycleForAutomaticRestart(t *testing.T) {
+	client := NewClient(t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client.storageRetry = time.Millisecond
+	client.storageCycle = 3 * time.Millisecond
+	attempts := 0
+	client.storageOpener = func(context.Context, string) (localQueueHandle, error) {
+		attempts++
+		return localQueueHandle{}, errors.New("database remains locked")
+	}
+
+	if _, err := client.waitForLocalQueue(context.Background(), "client.db"); !errors.Is(err, errLocalStorageRetryCycle) {
+		t.Fatalf("ожидалось завершение цикла восстановления, получено %v", err)
+	}
+	if attempts < 2 {
+		t.Fatalf("временное хранилище проверено только %d раз", attempts)
+	}
+}

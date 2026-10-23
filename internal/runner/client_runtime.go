@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"sync"
 	"time"
@@ -23,6 +24,8 @@ type localQueueHandle struct {
 
 type localQueueOpener func(context.Context, string) (localQueueHandle, error)
 
+var errLocalStorageRetryCycle = errors.New("цикл восстановления локального хранилища завершён")
+
 func openLocalQueueOnce(ctx context.Context, path string) (localQueueHandle, error) {
 	database, err := stateDB.OpenState(path)
 	if err != nil {
@@ -41,6 +44,11 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 	if delay <= 0 {
 		delay = 5 * time.Second
 	}
+	cycle := client.storageCycle
+	if cycle <= 0 {
+		cycle = 2 * time.Minute
+	}
+	started := time.Now()
 	for {
 		handle, err := client.storageOpener(ctx, path)
 		if err == nil {
@@ -54,6 +62,9 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 			"Данные сохранены. Программа повторит открытие автоматически.",
 			err,
 		)
+		if time.Since(started) >= cycle {
+			return localQueueHandle{}, errLocalStorageRetryCycle
+		}
 		if !waitForRetry(ctx, delay) {
 			return localQueueHandle{}, ctx.Err()
 		}
@@ -63,6 +74,26 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 				delay = time.Minute
 			}
 		}
+	}
+}
+
+// runSupervised перезапускает весь рабочий цикл после затянувшегося временного
+// сбоя хранилища. Это заново открывает источник EAVC и SQLite после перезагрузки
+// Windows, не требуя от оператора нажимать «Стоп» и «Старт».
+func (client *Client) runSupervised(ctx context.Context, cfg config.Client) {
+	for {
+		client.run(ctx, cfg)
+		if ctx.Err() != nil || client.Status().State != "waiting" {
+			return
+		}
+		if !waitForRetry(ctx, 5*time.Second) {
+			return
+		}
+		client.update(func(status *ClientStatus) {
+			status.State = "starting"
+			status.Title = "Повторный запуск"
+			status.Detail = "Автоматически восстанавливаем локальное хранилище и связь."
+		})
 	}
 }
 
@@ -100,7 +131,7 @@ func (client *Client) restartWorker(parent context.Context) error {
 	client.mu.Unlock()
 	go func() {
 		defer close(done)
-		client.run(workerContext, cfg)
+		client.runSupervised(workerContext, cfg)
 	}()
 	return nil
 }
@@ -149,6 +180,9 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 	storage, err := client.waitForLocalQueue(ctx, filepath.Join(client.BaseDir, "data", "client.db"))
 	if err != nil {
 		if ctx.Err() != nil {
+			return
+		}
+		if errors.Is(err, errLocalStorageRetryCycle) {
 			return
 		}
 		client.fail(
