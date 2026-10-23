@@ -218,6 +218,17 @@ func (client *Client) Status() ClientStatus {
 	return client.status
 }
 
+// OperationalStatus excludes local paths and stable identifiers from the
+// long-running technical journal and downloadable diagnostics.
+func (client *Client) OperationalStatus() ClientStatus {
+	status := client.Status()
+	status.ClientID = ""
+	if status.EAVCPath != "" {
+		status.EAVCPath = filepath.Base(status.EAVCPath)
+	}
+	return status
+}
+
 func (client *Client) applicationContext() context.Context {
 	client.mu.RLock()
 	defer client.mu.RUnlock()

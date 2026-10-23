@@ -192,7 +192,7 @@ func (client *Client) reportTransportCheckTimeout(ctx context.Context, probeID s
 func (client *Client) Diagnostics() ([]byte, error) {
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
-	status, _ := json.MarshalIndent(client.Status(), "", "  ")
+	status, _ := json.MarshalIndent(client.OperationalStatus(), "", "  ")
 	part, _ := archive.Create("status.json")
 	_, _ = part.Write(status)
 	if err := addDiagnosticLogs(archive, client.BaseDir, "client.log"); err != nil {

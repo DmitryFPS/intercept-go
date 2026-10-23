@@ -81,7 +81,7 @@ func main() {
 	}
 	defer application.Close()
 	application.Start(ctx)
-	observability.StartOperationalRecorder(ctx, baseDir, "center", buildVersion(), func() any { return application.Status() })
+	observability.StartOperationalRecorder(ctx, baseDir, "center", buildVersion(), func() any { return application.OperationalStatus() })
 	updater := selfupdate.NewManager(selfupdate.Configuration{
 		BaseDir: baseDir, Product: "eavc-connect-center", Version: buildVersion(),
 		PublicKey: updatePublicKey, Application: filepath.Base(executable), Helper: "EAVC Connect Updater.exe",

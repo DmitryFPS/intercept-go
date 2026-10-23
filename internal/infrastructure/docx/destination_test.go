@@ -77,6 +77,28 @@ func TestEmbeddedDefaultTemplateMatchesReleaseAsset(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateRejectsExternalRelationship(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "external.docx")
+	createModifiedTemplate(t, path, map[string][]byte{
+		"word/_rels/document.xml.rels": []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="https://example.invalid/template.dotm" TargetMode="External"/></Relationships>`),
+	})
+	if err := ValidateTemplate(path); err == nil || (!strings.Contains(err.Error(), "внешнюю связь") && !strings.Contains(err.Error(), "активную связь")) {
+		t.Fatalf("внешняя связь должна быть отклонена: %v", err)
+	}
+}
+
+func TestValidateTemplateRejectsMacroAndEmbeddedParts(t *testing.T) {
+	for name := range map[string]bool{"word/vbaProject.bin": true, "word/embeddings/object1.bin": true, "word/activeX/activeX1.bin": true} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "active.docx")
+			createModifiedTemplate(t, path, map[string][]byte{name: []byte("active")})
+			if err := ValidateTemplate(path); err == nil || !strings.Contains(err.Error(), "активную часть") {
+				t.Fatalf("активная часть должна быть отклонена: %v", err)
+			}
+		})
+	}
+}
+
 // Описание карточки EAVC сохраняется, а её внутренний номер не должен
 // попадать в итоговый документ.
 func TestBuildUsesLocalCallsignNumberAndEAVCDescription(t *testing.T) {
@@ -520,6 +542,61 @@ func createTemplate(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func createModifiedTemplate(t *testing.T, path string, replacements map[string][]byte) {
+	t.Helper()
+	source, err := zip.OpenReader(filepath.Join("..", "..", "..", "assets", "word_template.docx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	output, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(output)
+	written := make(map[string]bool)
+	for _, item := range source.File {
+		payload, replaced := replacements[item.Name]
+		if !replaced {
+			reader, openErr := item.Open()
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			payload, err = io.ReadAll(reader)
+			reader.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		part, createErr := writer.Create(item.Name)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, err := part.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+		written[item.Name] = true
+	}
+	for name, payload := range replacements {
+		if written[name] {
+			continue
+		}
+		part, createErr := writer.Create(name)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, err := part.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := output.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

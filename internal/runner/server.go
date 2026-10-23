@@ -222,6 +222,14 @@ func (server *Server) Status() ServerStatus {
 	return server.status
 }
 
+// OperationalStatus contains only technical health data suitable for a
+// diagnostic archive. The private Telegram invitation is UI-only.
+func (server *Server) OperationalStatus() ServerStatus {
+	status := server.Status()
+	status.InviteLink = ""
+	return status
+}
+
 func (server *Server) applicationContext() context.Context {
 	server.mu.RLock()
 	defer server.mu.RUnlock()

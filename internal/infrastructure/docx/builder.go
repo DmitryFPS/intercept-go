@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -80,6 +81,9 @@ func ValidateTemplate(templatePath string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateSafeTemplateParts(parts); err != nil {
+		return err
+	}
 	documentXML, exists := parts["word/document.xml"]
 	if !exists {
 		return errors.New("шаблон Word не содержит word/document.xml")
@@ -91,6 +95,9 @@ func ValidateTemplate(templatePath string) error {
 func Build(templatePath string, document Document) ([]byte, error) {
 	parts, order, err := readTemplate(templatePath)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateSafeTemplateParts(parts); err != nil {
 		return nil, err
 	}
 	original, exists := parts["word/document.xml"]
@@ -138,11 +145,15 @@ func readTemplate(templatePath string) (map[string][]byte, []string, error) {
 	order := make([]string, 0, len(archive.File))
 	var totalSize uint64
 	for _, file := range archive.File {
-		if file.UncompressedSize64 > maxTemplatePartBytes || totalSize+file.UncompressedSize64 > maxTemplateTotalBytes {
-			return nil, nil, fmt.Errorf("шаблон Word слишком велик после распаковки: %s", file.Name)
+		name, err := safeDOCXPartName(file.Name)
+		if err != nil {
+			return nil, nil, err
 		}
-		if _, duplicate := parts[file.Name]; duplicate {
-			return nil, nil, fmt.Errorf("шаблон Word содержит повторяющуюся часть: %s", file.Name)
+		if file.UncompressedSize64 > maxTemplatePartBytes || totalSize+file.UncompressedSize64 > maxTemplateTotalBytes {
+			return nil, nil, fmt.Errorf("шаблон Word слишком велик после распаковки: %s", name)
+		}
+		if _, duplicate := parts[name]; duplicate {
+			return nil, nil, fmt.Errorf("шаблон Word содержит повторяющуюся часть: %s", name)
 		}
 		reader, err := file.Open()
 		if err != nil {
@@ -157,10 +168,114 @@ func readTemplate(templatePath string) (map[string][]byte, []string, error) {
 			return nil, nil, fmt.Errorf("часть шаблона Word слишком велика: %s", file.Name)
 		}
 		totalSize += uint64(len(payload))
-		parts[file.Name] = payload
-		order = append(order, file.Name)
+		parts[name] = payload
+		order = append(order, name)
 	}
 	return parts, order, nil
+}
+
+func safeDOCXPartName(value string) (string, error) {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+	clean := filepath.ToSlash(filepath.Clean(value))
+	if value == "" || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") || strings.Contains(clean, ":") {
+		return "", fmt.Errorf("шаблон Word содержит небезопасный путь: %q", value)
+	}
+	return clean, nil
+}
+
+func validateSafeTemplateParts(parts map[string][]byte) error {
+	for name, payload := range parts {
+		if !allowedDOCXPart(name) {
+			return fmt.Errorf("шаблон Word содержит неподдерживаемую активную часть: %s", name)
+		}
+		lowerPayload := strings.ToLower(string(payload))
+		if strings.HasSuffix(strings.ToLower(name), ".rels") {
+			if err := validateRelationships(payload, name); err != nil {
+				return err
+			}
+		}
+		if strings.HasSuffix(strings.ToLower(name), ".xml") &&
+			(strings.Contains(lowerPayload, "attachedtemplate") || strings.Contains(lowerPayload, "oleobject") || strings.Contains(lowerPayload, "activex")) {
+			return fmt.Errorf("шаблон Word содержит активное содержимое: %s", name)
+		}
+		if name == "[Content_Types].xml" &&
+			(strings.Contains(lowerPayload, "macroenabled") || strings.Contains(lowerPayload, "vbaproject") || strings.Contains(lowerPayload, "activex") || strings.Contains(lowerPayload, "oleobject")) {
+			return errors.New("шаблон Word содержит макросы или активные объекты")
+		}
+	}
+	return nil
+}
+
+func allowedDOCXPart(name string) bool {
+	lower := strings.ToLower(name)
+	if lower == "[content_types].xml" || lower == "_rels/.rels" {
+		return true
+	}
+	if strings.HasPrefix(lower, "docprops/") && strings.HasSuffix(lower, ".xml") {
+		return true
+	}
+	if strings.HasPrefix(lower, "word/_rels/") && strings.HasSuffix(lower, ".rels") {
+		return true
+	}
+	if strings.HasPrefix(lower, "word/theme/") && strings.HasSuffix(lower, ".xml") {
+		return true
+	}
+	if strings.HasPrefix(lower, "word/media/") {
+		switch filepath.Ext(lower) {
+		case ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff":
+			return true
+		}
+	}
+	if !strings.HasPrefix(lower, "word/") || !strings.HasSuffix(lower, ".xml") {
+		return false
+	}
+	base := strings.TrimSuffix(strings.TrimPrefix(lower, "word/"), ".xml")
+	for _, allowed := range []string{"document", "styles", "settings", "fonttable", "websettings", "numbering", "footnotes", "endnotes", "comments"} {
+		if base == allowed {
+			return true
+		}
+	}
+	return (strings.HasPrefix(base, "header") || strings.HasPrefix(base, "footer")) && allDigits(strings.TrimLeft(base, "abcdefghijklmnopqrstuvwxyz"))
+}
+
+func allDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, symbol := range value {
+		if symbol < '0' || symbol > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validateRelationships(payload []byte, part string) error {
+	decoder := xml.NewDecoder(bytes.NewReader(payload))
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("прочитать связи шаблона %s: %w", part, err)
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "Relationship" {
+			continue
+		}
+		for _, attribute := range start.Attr {
+			if attribute.Name.Local == "TargetMode" && strings.EqualFold(strings.TrimSpace(attribute.Value), "External") {
+				return fmt.Errorf("шаблон Word содержит внешнюю связь: %s", part)
+			}
+			if attribute.Name.Local == "Type" {
+				value := strings.ToLower(attribute.Value)
+				if strings.Contains(value, "attachedtemplate") || strings.Contains(value, "oleobject") || strings.Contains(value, "activex") || strings.Contains(value, "vbaproject") {
+					return fmt.Errorf("шаблон Word содержит активную связь: %s", part)
+				}
+			}
+		}
+	}
 }
 
 func validateTemplateXML(payload string) error {

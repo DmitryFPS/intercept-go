@@ -31,6 +31,13 @@ func Apply(options ApplyOptions) error {
 	if options.OldPID <= 0 || options.BaseDir == "" || options.Package == "" || options.WorkRoot == "" {
 		return errors.New("неполные параметры обновления")
 	}
+	// Помощник запускается из WorkRoot, поэтому Windows не позволит удалить сам
+	// исполняемый файл до завершения процесса. При любом исходе немедленно
+	// удаляем остальное: пакет, распакованную копию и резервную копию данных.
+	// В каталоге остаётся только несекретный помощник. Если откат сам не смог
+	// восстановить файлы, резервная копия намеренно сохраняется для ремонта.
+	preserveBackup := false
+	defer func() { cleanupUpdateArtifacts(options, preserveBackup) }()
 	verifiedRoot := filepath.Join(options.WorkRoot, "verified")
 	plan, err := VerifyAndExtract(options.Package, verifiedRoot, options.Product, options.FromVersion, options.PublicKey)
 	if err != nil {
@@ -52,7 +59,8 @@ func Apply(options ApplyOptions) error {
 		_ = restartApplication(options, options.FromVersion)
 		message := "Установка не завершена; предыдущая версия восстановлена."
 		if rollbackErr != nil {
-			message = "Установка и автоматический откат завершились ошибкой. Передайте диагностику администратору."
+			preserveBackup = true
+			message = "Установка и автоматический откат завершились ошибкой. Резервная копия сохранена в " + backupRoot + ". Передайте диагностику администратору."
 		}
 		return finishApply(options, Result{State: "rolled_back", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: message, UpdatedAt: time.Now()}, errors.Join(err, rollbackErr))
 	}
@@ -72,8 +80,26 @@ func Apply(options ApplyOptions) error {
 	if rollbackErr != nil || restartErr != nil {
 		state = "failed"
 		message = "Новая версия не запустилась, а автоматический откат требует вмешательства администратора."
+		if rollbackErr != nil {
+			preserveBackup = true
+			message += " Резервная копия сохранена в " + backupRoot + "."
+		}
 	}
 	return finishApply(options, Result{State: state, FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: message, UpdatedAt: time.Now()}, errors.Join(healthErr, rollbackErr, restartErr))
+}
+
+func cleanupUpdateArtifacts(options ApplyOptions, preserveBackup bool) {
+	paths := []string{
+		options.Package,
+		filepath.Join(options.WorkRoot, "payload"),
+		filepath.Join(options.WorkRoot, "verified"),
+	}
+	if !preserveBackup {
+		paths = append(paths, filepath.Join(options.WorkRoot, "backup"))
+	}
+	for _, path := range paths {
+		_ = os.RemoveAll(path)
+	}
 }
 
 func backupInstallation(baseDir, backupRoot string, files []File) error {

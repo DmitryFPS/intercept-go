@@ -4,6 +4,7 @@ param(
     [switch]$SkipSmoke,
     [string]$SigningCertificateThumbprint = '',
     [switch]$RequireSignature,
+	[switch]$LabBuild,
     [string]$UpdateSigningKeyPath = ''
 )
 
@@ -20,7 +21,13 @@ $buildCacheRoot = Join-Path $workspaceRoot '.build-cache\release'
 New-Item -ItemType Directory -Force -Path $buildCacheRoot | Out-Null
 $clientRoot = Join-Path $distRoot 'EAVC Connect Station'
 $serverRoot = Join-Path $distRoot 'EAVC Connect Center'
-if ([string]::IsNullOrWhiteSpace($UpdateSigningKeyPath)) {
+if (-not $LabBuild -and [string]::IsNullOrWhiteSpace($SigningCertificateThumbprint)) {
+    throw 'Промышленная сборка требует -SigningCertificateThumbprint. Для явно лабораторной сборки укажите -LabBuild.'
+}
+if (-not $LabBuild -and [string]::IsNullOrWhiteSpace($UpdateSigningKeyPath)) {
+    throw 'Промышленная сборка требует явно заданный -UpdateSigningKeyPath из защищённого хранилища.'
+}
+if ($LabBuild -and [string]::IsNullOrWhiteSpace($UpdateSigningKeyPath)) {
     $UpdateSigningKeyPath = Join-Path $workspaceRoot '.release-keys\update-ed25519.key'
 }
 $env:GOPATH = Join-Path $buildCacheRoot 'gopath'
@@ -74,7 +81,7 @@ function Add-DeterministicArchive {
 function Protect-Executable {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($SigningCertificateThumbprint)) {
-        if ($RequireSignature) { throw 'Для рабочей сборки требуется сертификат подписи EXE.' }
+		if (-not $LabBuild -or $RequireSignature) { throw 'Для рабочей сборки требуется сертификат подписи EXE.' }
         Write-Warning "Лабораторная сборка без Authenticode: $Path"
         return $false
     }
@@ -112,7 +119,15 @@ try {
     }
     New-Item -ItemType Directory -Path $clientRoot, $serverRoot | Out-Null
 
+	if (-not $LabBuild) {
+		$resolvedKey = [System.IO.Path]::GetFullPath($UpdateSigningKeyPath)
+		$resolvedWorkspace = [System.IO.Path]::GetFullPath($workspaceRoot) + [System.IO.Path]::DirectorySeparatorChar
+		if ($resolvedKey.StartsWith($resolvedWorkspace, [System.StringComparison]::OrdinalIgnoreCase)) {
+			throw 'Промышленный ключ обновлений нельзя хранить внутри рабочей области.'
+		}
+	}
     if (-not (Test-Path -LiteralPath $UpdateSigningKeyPath)) {
+		if (-not $LabBuild) { throw 'Промышленный ключ обновлений не найден; автоматическое создание запрещено.' }
         go run ./cmd/update-packager keygen -key $UpdateSigningKeyPath
         if ($LASTEXITCODE -ne 0) { throw 'Не удалось создать ключ подписи обновлений.' }
     }
@@ -180,8 +195,15 @@ try {
             finally { $sha.Dispose() }
         )
         reproducible_archives = $true
+		build_profile = $(if ($LabBuild) { 'laboratory' } else { 'production' })
     } | ConvertTo-Json
-    [System.IO.File]::WriteAllText((Join-Path $distRoot 'release-manifest.json'), $manifest, [System.Text.UTF8Encoding]::new($false))
+	$releaseManifestPath = Join-Path $distRoot 'release-manifest.json'
+    [System.IO.File]::WriteAllText($releaseManifestPath, $manifest, [System.Text.UTF8Encoding]::new($false))
+	go run ./cmd/update-packager sign -input $releaseManifestPath -output (Join-Path $distRoot 'release-manifest.sig') -key $UpdateSigningKeyPath
+	if ($LASTEXITCODE -ne 0) { throw 'Не удалось подписать манифест выпуска.' }
+	[System.IO.File]::WriteAllText((Join-Path $distRoot 'update-public-key.txt'), $updatePublicKey, [System.Text.UTF8Encoding]::new($false))
+	go run ./cmd/update-packager verify -input $releaseManifestPath -signature (Join-Path $distRoot 'release-manifest.sig') -public-key $updatePublicKey
+	if ($LASTEXITCODE -ne 0) { throw 'Подпись манифеста выпуска не прошла проверку.' }
 
     if (-not $SkipSmoke) {
         & (Join-Path $PSScriptRoot 'smoke-release.ps1') -DistRoot $distRoot

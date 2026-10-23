@@ -613,12 +613,22 @@ func (server *Server) DestinationWordTemplate(id string) ([]byte, string, error)
 func (server *Server) Diagnostics(ctx context.Context) ([]byte, error) {
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
-	status, _ := json.MarshalIndent(server.Status(), "", "  ")
+	status, _ := json.MarshalIndent(server.OperationalStatus(), "", "  ")
 	part, _ := archive.Create("status.json")
 	_, _ = part.Write(status)
 	history, err := server.RuleHistory(ctx)
 	if err == nil {
-		payload, _ := json.MarshalIndent(history, "", "  ")
+		var active int64
+		var latest time.Time
+		for _, item := range history {
+			if item.Active {
+				active = item.Version
+			}
+			if item.CreatedAt.After(latest) {
+				latest = item.CreatedAt
+			}
+		}
+		payload, _ := json.MarshalIndent(map[string]any{"count": len(history), "active_version": active, "latest_at": latest}, "", "  ")
 		part, _ = archive.Create("rule-versions.json")
 		_, _ = part.Write(payload)
 	}

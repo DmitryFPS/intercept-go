@@ -23,7 +23,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail(errors.New("ожидается keygen, public или package"))
+		fail(errors.New("ожидается keygen, public, sign, verify или package"))
 	}
 	var err error
 	switch os.Args[1] {
@@ -31,6 +31,10 @@ func main() {
 		err = keygen(os.Args[2:])
 	case "public":
 		err = public(os.Args[2:])
+	case "sign":
+		err = signFile(os.Args[2:])
+	case "verify":
+		err = verifyFile(os.Args[2:])
 	case "package":
 		err = createPackage(os.Args[2:])
 	default:
@@ -39,6 +43,56 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
+}
+
+func verifyFile(arguments []string) error {
+	set := flag.NewFlagSet("verify", flag.ContinueOnError)
+	input := set.String("input", "", "")
+	signaturePath := set.String("signature", "", "")
+	publicKeyText := set.String("public-key", "", "")
+	if err := set.Parse(arguments); err != nil {
+		return err
+	}
+	if *input == "" || *signaturePath == "" || *publicKeyText == "" {
+		return errors.New("неполные параметры проверки подписи")
+	}
+	payload, err := os.ReadFile(*input)
+	if err != nil {
+		return err
+	}
+	signatureText, err := os.ReadFile(*signaturePath)
+	if err != nil {
+		return err
+	}
+	publicKey, keyErr := base64.StdEncoding.DecodeString(strings.TrimSpace(*publicKeyText))
+	signature, signatureErr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(signatureText)))
+	if keyErr != nil || signatureErr != nil || len(publicKey) != ed25519.PublicKeySize || !ed25519.Verify(ed25519.PublicKey(publicKey), payload, signature) {
+		return errors.New("подпись файла недействительна")
+	}
+	return nil
+}
+
+func signFile(arguments []string) error {
+	set := flag.NewFlagSet("sign", flag.ContinueOnError)
+	input := set.String("input", "", "")
+	output := set.String("output", "", "")
+	keyPath := set.String("key", "", "")
+	if err := set.Parse(arguments); err != nil {
+		return err
+	}
+	if *input == "" || *output == "" || *keyPath == "" {
+		return errors.New("неполные параметры подписи")
+	}
+	payload, err := os.ReadFile(*input)
+	if err != nil {
+		return err
+	}
+	key, err := loadPrivate(*keyPath)
+	if err != nil {
+		return err
+	}
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(key, payload))
+	return os.WriteFile(*output, []byte(signature), 0o600)
 }
 
 func keygen(arguments []string) error {
