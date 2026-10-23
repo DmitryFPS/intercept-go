@@ -54,6 +54,14 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 			t.Errorf("элемент истории %q не подключён", id)
 		}
 	}
+	for _, id := range []string{"clientIncidentLauncher", "openClientIncidents", "clientIncidentDialog", "incidentList", "incidentClear"} {
+		if !strings.Contains(html, `id="`+id+`"`) || !strings.Contains(javascript, `'`+id+`'`) {
+			t.Errorf("отдельное окно истории связи не подключает элемент %q", id)
+		}
+	}
+	if !strings.Contains(javascript, "$('historyDialog').close()") {
+		t.Error("история сбоев должна открываться отдельно от текущего состояния точек")
+	}
 	if !strings.Contains(javascript, "Активные очереди и настройки не изменятся") {
 		t.Error("интерфейс не объясняет безопасные границы очистки")
 	}

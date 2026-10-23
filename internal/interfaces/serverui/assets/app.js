@@ -32,9 +32,12 @@ let historyKind = '';
 let historyOffset = 0;
 let historyData = null;
 let historyFilters = { q: '', client: '', destination: '', quality: '' };
+let incidentOffset = 0;
+let incidentData = null;
+let incidentFilters = { q: '', client: '' };
 
 const historySections = {
-  clients: ['Рабочие точки', 'Текущее качество связи, последние сигналы, сбои и восстановления.'],
+  clients: ['Рабочие точки', 'Текущее качество связи и последние сигналы от каждой рабочей точки.'],
   received: ['Получено', 'События, которые центр надёжно принял от рабочих точек.'],
   pending: ['Ожидает отправки', 'Живая очередь с попытками, ошибкой и временем следующего повтора.'],
   delivered: ['Доставлено', 'Успешные доставки по каждому Telegram- и Word-направлению.'],
@@ -242,6 +245,57 @@ async function openHistory(kind, offset = 0, keepFilters = false) {
   }
 }
 
+function incidentRequestURL(offset) {
+  const query = new URLSearchParams({ limit: String(historyPageSize), offset: String(offset) });
+  if (incidentFilters.q) query.set('q', incidentFilters.q);
+  if (incidentFilters.client) query.set('client', incidentFilters.client);
+  return `/api/history/clients?${query}`;
+}
+
+async function openClientIncidents(offset = 0, keepFilters = false) {
+  if (!keepFilters) {
+    incidentFilters = { q: '', client: '' };
+    $('incidentSearch').value = '';
+    $('incidentClientFilter').value = '';
+  }
+  incidentOffset = Math.max(0, offset);
+  $('incidentClientFilter').innerHTML = '<option value="">Все точки</option>' + clients.map(client =>
+    `<option value="${escapeHTML(client.id)}" ${client.id === incidentFilters.client ? 'selected' : ''}>${escapeHTML(client.number)} · ${escapeHTML(client.name)}</option>`
+  ).join('');
+  openDialog('clientIncidentDialog');
+  $('incidentList').innerHTML = '<div class="history-empty">Загружаем историю…</div>';
+  $('incidentEmpty').classList.add('hidden');
+  try {
+    incidentData = await request(incidentRequestURL(incidentOffset));
+    renderClientIncidents();
+  } catch (error) {
+    $('incidentList').innerHTML = '';
+    $('incidentEmpty').textContent = error.message;
+    $('incidentEmpty').classList.remove('hidden');
+  }
+}
+
+function renderClientIncidents() {
+  const data = incidentData || {};
+  const incidents = data.incidents || [];
+  $('incidentList').innerHTML = incidents.map(item => `
+    <article class="incident-row ${item.recovered_at ? 'recovered' : 'active'}">
+      <span class="incident-marker" aria-hidden="true"></span>
+      <div class="incident-main"><strong>${escapeHTML(item.client_name)}</strong><p>${escapeHTML(item.reason)}</p></div>
+      <div class="incident-state"><b>${item.recovered_at ? 'Связь восстановлена' : 'Сбой продолжается'}</b><span>${item.recovered_at ? `Восстановлено ${formatDate(item.recovered_at)}` : 'Ожидается восстановление'}</span></div>
+      <time><span>Начало сбоя</span>${formatDate(item.started_at)}</time>
+    </article>`).join('');
+  $('incidentEmpty').textContent = 'Сбоев и восстановлений пока не зафиксировано.';
+  $('incidentEmpty').classList.toggle('hidden', incidents.length > 0);
+  $('incidentFilteredCount').textContent = `Найдено: ${data.total || 0}`;
+  $('incidentRetention').textContent = `Автоочистка: ${data.retention_days || 90} дней.`;
+  const pageNumber = Math.floor(incidentOffset / historyPageSize) + 1;
+  const pageCount = Math.max(1, Math.ceil((data.total || 0) / historyPageSize));
+  $('incidentPage').textContent = `${pageNumber} из ${pageCount}`;
+  $('incidentPrev').disabled = incidentOffset === 0;
+  $('incidentNext').disabled = incidentOffset + historyPageSize >= (data.total || 0);
+}
+
 function qualityLabel(client) {
   if (client.quality === 'good') return 'Связь хорошая';
   if (client.quality === 'degraded') return 'Связь нестабильна';
@@ -315,19 +369,15 @@ function renderHistory() {
       </dl>
     </article>`).join('');
 
-  const incidentHeading = $('clientIncidentHeading');
-  incidentHeading.classList.toggle('hidden', historyKind !== 'clients');
-  $('clientIncidentCount').textContent = `${items.length} ${items.length === 1 ? 'событие' : (items.length > 1 && items.length < 5 ? 'события' : 'событий')}`;
+  const incidentLauncher = $('clientIncidentLauncher');
+  incidentLauncher.classList.toggle('hidden', historyKind !== 'clients');
+  const incidentCount = data.total || 0;
+  $('clientIncidentCount').textContent = `${incidentCount} ${incidentCount === 1 ? 'событие' : (incidentCount > 1 && incidentCount < 5 ? 'события' : 'событий')}`;
   $('historyList').classList.toggle('incident-list', historyKind === 'clients');
+  $('historyList').classList.toggle('hidden', historyKind === 'clients');
 
   $('historyList').innerHTML = historyKind === 'clients'
-    ? items.map(item => `
-      <article class="incident-row ${item.recovered_at ? 'recovered' : 'active'}">
-        <span class="incident-marker" aria-hidden="true"></span>
-        <div class="incident-main"><strong>${escapeHTML(item.client_name)}</strong><p>${escapeHTML(item.reason)}</p></div>
-        <div class="incident-state"><b>${item.recovered_at ? 'Связь восстановлена' : 'Сбой продолжается'}</b><span>${item.recovered_at ? `Восстановлено ${formatDate(item.recovered_at)}` : 'Ожидается восстановление'}</span></div>
-        <time><span>Начало сбоя</span>${formatDate(item.started_at)}</time>
-      </article>`).join('')
+    ? ''
     : items.map(item => {
       const route = historyKind === 'rejected'
         ? item.destination
@@ -338,18 +388,54 @@ function renderHistory() {
       </article>`;
     }).join('');
 
-  const hasRows = clients.length > 0 || items.length > 0;
+  const hasRows = historyKind === 'clients' ? clients.length > 0 : items.length > 0;
   $('historyEmpty').textContent = 'Записей пока нет.';
   $('historyEmpty').classList.toggle('hidden', hasRows);
   $('historyRetention').textContent = `Автоочистка: ${data.retention_days || 30} дней.`;
-  $('historyFilteredCount').textContent = `Найдено: ${data.total || 0}`;
+  $('historyFilteredCount').textContent = `Найдено: ${historyKind === 'clients' ? clients.length : (data.total || 0)}`;
   const pageNumber = Math.floor(historyOffset / historyPageSize) + 1;
   const pageCount = Math.max(1, Math.ceil((data.total || 0) / historyPageSize));
   $('historyPage').textContent = `${pageNumber} из ${pageCount}`;
   $('historyPrev').disabled = historyOffset === 0;
   $('historyNext').disabled = historyOffset + historyPageSize >= (data.total || 0);
   $('historyClear').classList.toggle('hidden', !data.clearable);
+  $('historyFooter').classList.toggle('hidden', historyKind === 'clients');
 }
+
+$('openClientIncidents').addEventListener('click', () => {
+  $('historyDialog').close();
+  openClientIncidents();
+});
+$('incidentBackToClients').addEventListener('click', () => {
+  $('clientIncidentDialog').close();
+  openHistory('clients', 0, true);
+});
+$('incidentPrev').addEventListener('click', () => openClientIncidents(incidentOffset - historyPageSize, true));
+$('incidentNext').addEventListener('click', () => openClientIncidents(incidentOffset + historyPageSize, true));
+$('incidentApplyFilters').addEventListener('click', () => {
+  incidentFilters = { q: $('incidentSearch').value.trim(), client: $('incidentClientFilter').value };
+  openClientIncidents(0, true);
+});
+$('incidentResetFilters').addEventListener('click', () => openClientIncidents());
+$('incidentSearch').addEventListener('keydown', event => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    $('incidentApplyFilters').click();
+  }
+});
+$('incidentClear').addEventListener('click', async event => {
+  if (!confirm('Очистить историю сбоев и восстановлений? Текущее состояние рабочих точек не изменится.')) return;
+  setButtonBusy(event.currentTarget, true, 'Очищаем…');
+  try {
+    await request('/api/history/clients', { method: 'DELETE' });
+    await Promise.all([openClientIncidents(0, true), refreshStatus()]);
+    notify('История сбоев и восстановлений очищена. Текущее состояние точек сохранено.', true);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    setButtonBusy(event.currentTarget, false);
+  }
+});
 
 $('historyPrev').addEventListener('click', () => openHistory(historyKind, historyOffset - historyPageSize, true));
 $('historyNext').addEventListener('click', () => openHistory(historyKind, historyOffset + historyPageSize, true));

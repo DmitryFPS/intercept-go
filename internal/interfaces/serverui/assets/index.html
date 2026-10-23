@@ -108,10 +108,27 @@
   </div>
   <div id="historyColumns" class="history-columns hidden"></div>
   <div id="clientHealthList" class="health-list hidden"></div>
-  <div id="clientIncidentHeading" class="incident-heading hidden"><div><h3>История сбоев и восстановлений</h3><p>Когда пропала связь, по какой причине и когда она восстановилась.</p></div><span id="clientIncidentCount"></span></div>
+  <section id="clientIncidentLauncher" class="incident-launcher hidden">
+    <div class="incident-launcher-icon" aria-hidden="true">↺</div>
+    <div><h3>История сбоев и восстановлений</h3><p>Отдельный журнал: когда пропадала связь, по какой причине и когда она восстановилась.</p></div>
+    <span id="clientIncidentCount" class="incident-count"></span>
+    <button id="openClientIncidents" class="button ghost" type="button">Открыть историю</button>
+  </section>
   <div id="historyList" class="history-list"></div>
   <div id="historyEmpty" class="history-empty hidden">Записей пока нет.</div>
-  <div class="history-footer"><span id="historyRetention" class="muted"></span><div class="history-pagination"><button id="historyPrev" class="button ghost" type="button">Назад</button><span id="historyPage" class="muted"></span><button id="historyNext" class="button ghost" type="button">Дальше</button></div><button id="historyClear" class="button danger" type="button">Очистить историю</button></div>
+  <div id="historyFooter" class="history-footer"><span id="historyRetention" class="muted"></span><div class="history-pagination"><button id="historyPrev" class="button ghost" type="button">Назад</button><span id="historyPage" class="muted"></span><button id="historyNext" class="button ghost" type="button">Дальше</button></div><button id="historyClear" class="button danger" type="button">Очистить историю</button></div>
+</dialog>
+
+<dialog id="clientIncidentDialog" class="modal history-modal incident-modal">
+  <div class="modal-head"><div><span class="eyebrow">ЖУРНАЛ СВЯЗИ</span><h2>История сбоев и восстановлений</h2><p class="muted">Когда пропала связь с точкой, что стало причиной и когда работа восстановилась.</p></div><button type="button" class="icon-button" data-close="clientIncidentDialog" aria-label="Закрыть">×</button></div>
+  <div class="history-filters incident-filters">
+    <label class="history-filter-search">Поиск<input id="incidentSearch" placeholder="Рабочая точка или причина сбоя"></label>
+    <label>Рабочая точка<select id="incidentClientFilter"><option value="">Все точки</option></select></label>
+    <div class="history-filter-actions"><button id="incidentApplyFilters" class="button primary" type="button">Применить</button><button id="incidentResetFilters" class="button ghost" type="button">Сбросить</button><span id="incidentFilteredCount" class="muted"></span></div>
+  </div>
+  <div id="incidentList" class="history-list incident-list"></div>
+  <div id="incidentEmpty" class="history-empty hidden">Сбоев и восстановлений пока не зафиксировано.</div>
+  <div class="history-footer"><span id="incidentRetention" class="muted"></span><div class="history-pagination"><button id="incidentPrev" class="button ghost" type="button">Назад</button><span id="incidentPage" class="muted"></span><button id="incidentNext" class="button ghost" type="button">Дальше</button></div><div class="incident-footer-actions"><button id="incidentBackToClients" class="button ghost" type="button">К рабочим точкам</button><button id="incidentClear" class="button danger" type="button">Очистить историю</button></div></div>
 </dialog>
 
 <script src="/app.js"></script>
