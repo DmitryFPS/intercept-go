@@ -282,8 +282,8 @@ function renderClientIncidents() {
     <article class="incident-row ${item.recovered_at ? 'recovered' : 'active'}">
       <span class="incident-marker" aria-hidden="true"></span>
       <div class="incident-main"><strong>${escapeHTML(item.client_name)}</strong><p>${escapeHTML(item.reason)}</p></div>
-      <div class="incident-state"><b>${item.recovered_at ? 'Связь восстановлена' : 'Сбой продолжается'}</b><span>${item.recovered_at ? `Восстановлено ${formatDate(item.recovered_at)}` : 'Ожидается восстановление'}</span></div>
       <time><span>Начало сбоя</span>${formatDate(item.started_at)}</time>
+      <div class="incident-state"><b>${item.recovered_at ? 'Связь восстановлена' : 'Сбой продолжается'}</b><span>${item.recovered_at ? `Восстановлено ${formatDate(item.recovered_at)}` : 'Ожидается восстановление'}</span></div>
     </article>`).join('');
   $('incidentEmpty').textContent = 'Сбоев и восстановлений пока не зафиксировано.';
   $('incidentEmpty').classList.toggle('hidden', incidents.length > 0);

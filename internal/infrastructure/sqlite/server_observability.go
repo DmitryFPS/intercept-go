@@ -131,6 +131,24 @@ func (store *ServerStore) recordClientSignal(ctx context.Context, clientID strin
 			}
 		}
 	}
+	if status == "offline" {
+		var startedRaw string
+		lookupErr := tx.QueryRowContext(ctx, `
+			SELECT started_at FROM client_connection_incidents
+			WHERE client_id=? AND recovered_at IS NULL
+			ORDER BY started_at DESC LIMIT 1`, clientID).Scan(&startedRaw)
+		if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+			return lookupErr
+		}
+		if lookupErr == nil {
+			started, parseErr := time.Parse(time.RFC3339Nano, startedRaw)
+			if parseErr == nil && !at.After(started) {
+				// Пакет был отправлен ещё до начала зафиксированного сбоя и лишь
+				// задержался в Telegram. Он не доказывает восстановление связи.
+				return tx.Commit()
+			}
+		}
+	}
 	probeAt, eventAt := any(nil), any(nil)
 	if probe {
 		probeAt = stamp(at)
@@ -151,8 +169,9 @@ func (store *ServerStore) recordClientSignal(ctx context.Context, clientID strin
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE client_connection_incidents SET recovered_at=?
 			WHERE id=(SELECT id FROM client_connection_incidents
-				WHERE client_id=? AND recovered_at IS NULL ORDER BY started_at DESC LIMIT 1)`,
-			stamp(at), clientID); err != nil {
+				WHERE client_id=? AND recovered_at IS NULL AND julianday(started_at)<julianday(?)
+				ORDER BY started_at DESC LIMIT 1)`,
+			stamp(at), clientID, stamp(at)); err != nil {
 			return err
 		}
 	}

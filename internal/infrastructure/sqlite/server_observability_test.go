@@ -80,6 +80,62 @@ func TestOlderTransportSignalCannotRegressClientHealth(t *testing.T) {
 	}
 }
 
+func TestDelayedSignalCannotRecoverIncidentBeforeItStarted(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	started := time.Date(2026, 10, 23, 7, 0, 0, 0, time.UTC)
+	if err := store.RecordClientSignalByTransport(ctx, 12, -1001, 10, true, started); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EvaluateClientHealth(ctx, started.Add(6*time.Minute), 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordClientSignalByTransport(ctx, 12, -1001, 10, false, started.Add(4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.HistoryPage(ctx, "clients", 30, 0, started.Add(6*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Clients[0].Status != "offline" || page.Incidents[0].RecoveredAt != nil {
+		t.Fatalf("задержанный пакет ошибочно восстановил связь: %#v %#v", page.Clients[0], page.Incidents[0])
+	}
+	if err := store.RecordClientSignalByTransport(ctx, 12, -1001, 10, false, started.Add(7*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	page, err = store.HistoryPage(ctx, "clients", 30, 0, started.Add(7*time.Minute))
+	if err != nil || page.Incidents[0].RecoveredAt == nil || page.Incidents[0].RecoveredAt.Before(page.Incidents[0].StartedAt) {
+		t.Fatalf("свежее восстановление записано неверно: %#v, %v", page.Incidents[0], err)
+	}
+}
+
+func TestRepairIncidentTimesReopensLatestInvalidIncident(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	started := time.Date(2026, 10, 23, 10, 7, 25, 0, time.UTC)
+	invalidRecovery := time.Date(2026, 10, 23, 10, 3, 47, 0, time.UTC)
+	if err := store.RecordClientSignalByTransport(ctx, 12, -1001, 10, true, invalidRecovery); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO client_connection_incidents(client_id,started_at,recovered_at,reason)
+		VALUES('textile',?,?,?)`, stamp(started), stamp(invalidRecovery), "Нет контрольного пакета или данных более 5 минут"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repairIncidentTimes(ctx, store.db); err != nil {
+		t.Fatal(err)
+	}
+	var recovered *string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT recovered_at FROM client_connection_incidents
+		WHERE client_id='textile' ORDER BY started_at DESC LIMIT 1`).Scan(&recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recovered != nil {
+		t.Fatalf("последний нелогичный сбой должен быть снова открыт, recovered_at=%q", *recovered)
+	}
+}
+
 func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 	t.Parallel()
 	store, ctx := openObservabilityStore(t)

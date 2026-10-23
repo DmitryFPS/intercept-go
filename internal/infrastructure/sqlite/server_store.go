@@ -42,7 +42,40 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 	if err := backfillServerStreamKeys(ctx, db); err != nil {
 		return nil, err
 	}
+	if err := repairIncidentTimes(ctx, db); err != nil {
+		return nil, err
+	}
 	return &ServerStore{db: db}, nil
+}
+
+// repairIncidentTimes исправляет записи старых версий, в которых задержанный
+// Telegram-пакет мог ошибочно поставить восстановление раньше начала сбоя.
+func repairIncidentTimes(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `
+		UPDATE client_connection_incidents
+		SET recovered_at=CASE
+			WHEN EXISTS(
+				SELECT 1 FROM client_health h
+				WHERE h.client_id=client_connection_incidents.client_id
+				  AND julianday(h.last_seen_at)>=julianday(client_connection_incidents.started_at)
+			) THEN (
+			(SELECT h.last_seen_at FROM client_health h
+			 WHERE h.client_id=client_connection_incidents.client_id
+			   AND julianday(h.last_seen_at)>=julianday(client_connection_incidents.started_at))
+			)
+			WHEN id=(
+				SELECT latest.id FROM client_connection_incidents latest
+				WHERE latest.client_id=client_connection_incidents.client_id
+				ORDER BY julianday(latest.started_at) DESC, latest.id DESC LIMIT 1
+			) THEN NULL
+			ELSE started_at
+		END
+		WHERE recovered_at IS NOT NULL
+		  AND julianday(recovered_at)<julianday(started_at)`)
+	if err != nil {
+		return fmt.Errorf("исправить время истории связи: %w", err)
+	}
+	return nil
 }
 
 // Close освобождает файл базы после штатной остановки сервера.
