@@ -54,6 +54,37 @@
 .history-columns span:last-child { text-align: right; }
 .health-list,
 .history-list { display: grid; gap: 9px; }
+.incident-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 22px 0 10px;
+  padding-top: 18px;
+  border-top: 1px solid #e3e8ef;
+}
+.incident-heading h3 { margin: 0; font-size: 16px; }
+.incident-heading p { margin: 4px 0 0; color: #75839a; font-size: 12px; }
+.incident-heading > span { color: #63728a; font-size: 12px; font-weight: 750; white-space: nowrap; }
+.incident-list { gap: 7px; }
+.incident-row {
+  display: grid;
+  grid-template-columns: 10px minmax(190px, 1.2fr) minmax(190px, .9fr) minmax(190px, auto);
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  border: 1px solid #e2e7ee;
+  border-radius: 11px;
+  background: #fff;
+}
+.incident-marker { width: 8px; height: 8px; border-radius: 50%; background: #d6434b; }
+.incident-row.recovered .incident-marker { background: #16a565; }
+.incident-main strong,
+.incident-state b { display: block; font-size: 13px; }
+.incident-main p,
+.incident-state span,
+.incident-row time span { display: block; margin: 3px 0 0; color: #75839a; font-size: 11px; }
+.incident-row time { color: #25344d; font-size: 12px; font-weight: 700; text-align: right; white-space: nowrap; }
 .health-card,
 .history-row {
   border: 1px solid #e0e6ee;
@@ -116,6 +147,9 @@
   .history-filter-actions .muted { margin-left: 0; }
   .health-card,
   .history-row { grid-template-columns: 1fr; }
+  .incident-row { grid-template-columns: 10px 1fr; }
+  .incident-state,
+  .incident-row time { grid-column: 2; text-align: left; }
   .history-columns { display: none; }
   .health-card dl { grid-template-columns: 1fr 1fr; }
   .history-footer { align-items: stretch; flex-direction: column; }

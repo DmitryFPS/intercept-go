@@ -91,6 +91,9 @@ func TestHistoryColumnLabelsMatchOperatorScreens(t *testing.T) {
 	if !strings.Contains(css, ".history-row time { text-align: right; white-space: nowrap; }") {
 		t.Error("время истории должно быть выровнено по правой границе своей колонки")
 	}
+	if !strings.Contains(javascript, "incident-row") || !strings.Contains(javascript, "Начало сбоя") {
+		t.Error("сбои рабочих точек должны быть отделены от карточек состояния понятной временной шкалой")
+	}
 }
 
 func TestTelegramGuideStaysAvailableAndComplete(t *testing.T) {

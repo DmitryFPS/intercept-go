@@ -25,7 +25,7 @@ async function refresh() {
     element('title').textContent = status.title;
     element('detail').textContent = status.detail;
     element('stateLabel').textContent = ({
-      running: 'ВСЁ В ПОРЯДКЕ', waiting: 'ПОВТОРИМ АВТОМАТИЧЕСКИ',
+      running: 'ВСЁ В ПОРЯДКЕ', waiting: 'НЕТ СВЯЗИ С ЦЕНТРОМ',
       error: 'ТРЕБУЕТСЯ ПОМОЩЬ', setup: 'ПЕРВЫЙ ЗАПУСК', starting: 'ЗАПУСК',
       paused: 'ОСТАНОВЛЕНО'
     })[status.state] || 'СОСТОЯНИЕ';

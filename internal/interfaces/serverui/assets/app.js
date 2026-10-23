@@ -315,11 +315,18 @@ function renderHistory() {
       </dl>
     </article>`).join('');
 
+  const incidentHeading = $('clientIncidentHeading');
+  incidentHeading.classList.toggle('hidden', historyKind !== 'clients');
+  $('clientIncidentCount').textContent = `${items.length} ${items.length === 1 ? 'событие' : (items.length > 1 && items.length < 5 ? 'события' : 'событий')}`;
+  $('historyList').classList.toggle('incident-list', historyKind === 'clients');
+
   $('historyList').innerHTML = historyKind === 'clients'
     ? items.map(item => `
-      <article class="history-row">
-        <strong>${escapeHTML(item.client_name)}</strong><span>${item.recovered_at ? 'Связь восстановлена' : 'Сбой продолжается'}</span><time>${formatDate(item.started_at)}</time>
-        <p>${escapeHTML(item.reason)}${item.recovered_at ? ` · восстановлено ${formatDate(item.recovered_at)}` : ''}</p>
+      <article class="incident-row ${item.recovered_at ? 'recovered' : 'active'}">
+        <span class="incident-marker" aria-hidden="true"></span>
+        <div class="incident-main"><strong>${escapeHTML(item.client_name)}</strong><p>${escapeHTML(item.reason)}</p></div>
+        <div class="incident-state"><b>${item.recovered_at ? 'Связь восстановлена' : 'Сбой продолжается'}</b><span>${item.recovered_at ? `Восстановлено ${formatDate(item.recovered_at)}` : 'Ожидается восстановление'}</span></div>
+        <time><span>Начало сбоя</span>${formatDate(item.started_at)}</time>
       </article>`).join('')
     : items.map(item => {
       const route = historyKind === 'rejected'

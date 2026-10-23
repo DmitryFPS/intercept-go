@@ -278,7 +278,7 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 		if err != nil && ctx.Err() == nil {
 			client.transientFailure(
 				"Нет подтверждения центра",
-				"Связь временно прервалась. Программа повторит проверку автоматически; данные сохранены.",
+				"Связь временно прервалась.",
 				err,
 			)
 			time.Sleep(5 * time.Second)
