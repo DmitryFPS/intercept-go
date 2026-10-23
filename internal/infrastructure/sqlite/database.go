@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,20 +44,63 @@ func Migrate(ctx context.Context, db *sql.DB, migrations []string) error {
 	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version INTEGER PRIMARY KEY,
-			applied_at TEXT NOT NULL
+			applied_at TEXT NOT NULL,
+			checksum TEXT NOT NULL DEFAULT ''
 		)`); err != nil {
 		return fmt.Errorf("создать журнал миграций: %w", err)
+	}
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info(schema_migrations)")
+	if err != nil {
+		return fmt.Errorf("проверить журнал миграций: %w", err)
+	}
+	hasChecksum := false
+	for rows.Next() {
+		var id, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&id, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "checksum" {
+			hasChecksum = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasChecksum {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("обновить журнал миграций: %w", err)
+		}
+	}
+	var newest int
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&newest); err != nil {
+		return err
+	}
+	if newest > len(migrations) {
+		return fmt.Errorf("база создана более новой версией программы (схема %d, поддерживается %d)", newest, len(migrations))
 	}
 
 	for index, migration := range migrations {
 		version := index + 1
-		var exists int
-		if err := db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM schema_migrations WHERE version = ?", version,
-		).Scan(&exists); err != nil {
+		digest := sha256.Sum256([]byte(migration))
+		checksum := hex.EncodeToString(digest[:])
+		var stored string
+		err := db.QueryRowContext(ctx,
+			"SELECT checksum FROM schema_migrations WHERE version = ?", version,
+		).Scan(&stored)
+		if err != nil && err != sql.ErrNoRows {
 			return fmt.Errorf("проверить миграцию %d: %w", version, err)
 		}
-		if exists != 0 {
+		if err == nil {
+			if stored == "" {
+				if _, err := db.ExecContext(ctx, "UPDATE schema_migrations SET checksum=? WHERE version=?", checksum, version); err != nil {
+					return fmt.Errorf("записать отпечаток миграции %d: %w", version, err)
+				}
+			} else if stored != checksum {
+				return fmt.Errorf("миграция %d изменена после применения; запуск остановлен для защиты данных", version)
+			}
 			continue
 		}
 		tx, err := db.BeginTx(ctx, nil)
@@ -67,8 +112,8 @@ func Migrate(ctx context.Context, db *sql.DB, migrations []string) error {
 			return fmt.Errorf("выполнить миграцию %d: %w", version, err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
-			version, time.Now().UTC().Format(time.RFC3339Nano),
+			"INSERT INTO schema_migrations(version, applied_at, checksum) VALUES(?, ?, ?)",
+			version, time.Now().UTC().Format(time.RFC3339Nano), checksum,
 		); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("зафиксировать миграцию %d: %w", version, err)

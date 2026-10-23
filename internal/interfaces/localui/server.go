@@ -9,14 +9,13 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
 )
 
-const accessCookieName = "intercept_local_access"
+const accessHeaderName = "X-EAVC-Access"
 
 // ListenAndServe запускает интерфейс только на loopback-адресе.
 func ListenAndServe(ctx context.Context, address string, handler http.Handler, open bool, accessToken string) error {
@@ -54,7 +53,9 @@ func ListenAndServe(ctx context.Context, address string, handler http.Handler, o
 
 // AccessURL возвращает защищённую ссылку локального интерфейса.
 func AccessURL(address, accessToken string) string {
-	return "http://" + address + "/?access=" + url.QueryEscape(accessToken)
+	// Фрагмент URL не передаётся HTTP-серверу и не попадает в журналы или
+	// Cookie других локальных портов. JavaScript переносит его в sessionStorage.
+	return "http://" + address + "/#access=" + accessToken
 }
 
 // IsRunning проверяет, принадлежит ли уже занятый адрес экземпляру программы с тем же ключом доступа.
@@ -65,12 +66,17 @@ func IsRunning(address, accessToken string) bool {
 			return http.ErrUseLastResponse
 		},
 	}
-	response, err := client.Get(AccessURL(address, accessToken))
+	request, err := http.NewRequest(http.MethodGet, "http://"+address+"/api/status", nil)
+	if err != nil {
+		return false
+	}
+	request.Header.Set(accessHeaderName, accessToken)
+	response, err := client.Do(request)
 	if err != nil {
 		return false
 	}
 	defer response.Body.Close()
-	return response.StatusCode == http.StatusSeeOther
+	return response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices
 }
 
 func protectLocalUI(authority, token string, next http.Handler) http.Handler {
@@ -80,22 +86,7 @@ func protectLocalUI(authority, token string, next http.Handler) http.Handler {
 			http.Error(writer, "Интерфейс доступен только по локальному адресу программы.", http.StatusMisdirectedRequest)
 			return
 		}
-		if request.Method == http.MethodGet && request.URL.Path == "/" {
-			if supplied := request.URL.Query().Get("access"); supplied != "" {
-				if !constantEqual(supplied, token) {
-					http.Error(writer, "Неверная ссылка запуска.", http.StatusForbidden)
-					return
-				}
-				http.SetCookie(writer, &http.Cookie{
-					Name: accessCookieName, Value: token, Path: "/", HttpOnly: true,
-					SameSite: http.SameSiteStrictMode, MaxAge: 365 * 24 * 60 * 60,
-				})
-				http.Redirect(writer, request, "/", http.StatusSeeOther)
-				return
-			}
-		}
-		cookie, err := request.Cookie(accessCookieName)
-		if err != nil || !constantEqual(cookie.Value, token) {
+		if strings.HasPrefix(request.URL.Path, "/api/") && !constantEqual(request.Header.Get(accessHeaderName), token) {
 			http.Error(writer, "Запустите интерфейс двойным нажатием на EXE.", http.StatusUnauthorized)
 			return
 		}

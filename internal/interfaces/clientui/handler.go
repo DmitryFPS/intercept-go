@@ -6,11 +6,13 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
 	"intercept/internal/interfaces/localui"
 	"intercept/internal/runner"
+	"intercept/internal/selfupdate"
 )
 
 //go:embed assets/*
@@ -18,8 +20,10 @@ var assets embed.FS
 
 // Handler связывает локальный экран клиента с его прикладным объектом.
 type Handler struct {
-	Client  *runner.Client
-	Context context.Context
+	Client   *runner.Client
+	Context  context.Context
+	Updater  *selfupdate.Manager
+	Shutdown context.CancelFunc
 }
 
 // Routes собирает экран оператора и закрытые локальные API клиента.
@@ -38,7 +42,45 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/diagnostics", handler.diagnostics)
 	mux.HandleFunc("GET /api/queue/{state}", handler.queueEvents)
 	mux.HandleFunc("DELETE /api/queue/{state}", handler.clearQueueEvents)
+	mux.HandleFunc("GET /api/update/status", handler.updateStatus)
+	mux.HandleFunc("POST /api/update", handler.installUpdate)
 	return localui.SecurityHeaders(mux)
+}
+
+func (handler Handler) updateStatus(writer http.ResponseWriter, _ *http.Request) {
+	if handler.Updater == nil {
+		localui.WriteJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "Обновление недоступно в этой сборке."})
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, handler.Updater.LatestResult())
+}
+
+func (handler Handler) installUpdate(writer http.ResponseWriter, request *http.Request) {
+	if handler.Updater == nil || handler.Shutdown == nil {
+		localui.WriteJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "Обновление недоступно в этой сборке."})
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, selfupdate.MaxPackageSize+1024*1024)
+	if err := request.ParseMultipartForm(8 * 1024 * 1024); err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Пакет обновления слишком большой или повреждён.", err)
+		return
+	}
+	file, header, err := request.FormFile("update")
+	if err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Выберите подписанный пакет обновления.", err)
+		return
+	}
+	defer file.Close()
+	result, err := handler.Updater.Prepare(file, header.Size, os.Getpid())
+	if err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Пакет обновления не принят. Проверьте, что он предназначен для этой программы и получен от администратора.", err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusAccepted, result)
+	if flusher, ok := writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	time.AfterFunc(750*time.Millisecond, handler.Shutdown)
 }
 
 func (handler Handler) queueEvents(writer http.ResponseWriter, request *http.Request) {

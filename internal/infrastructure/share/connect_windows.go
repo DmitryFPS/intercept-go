@@ -28,9 +28,8 @@ type netResource struct {
 }
 
 var (
-	mprDLL                 = windows.NewLazySystemDLL("mpr.dll")
-	wnetAddConnection2W    = mprDLL.NewProc("WNetAddConnection2W")
-	wnetCancelConnection2W = mprDLL.NewProc("WNetCancelConnection2W")
+	mprDLL              = windows.NewLazySystemDLL("mpr.dll")
+	wnetAddConnection2W = mprDLL.NewProc("WNetAddConnection2W")
 )
 
 // Connect подключает только корень UNC-шары через Windows Network Provider.
@@ -65,8 +64,7 @@ func Connect(ctx context.Context, path, username, password string) error {
 	}
 	result := connect()
 	if result == errorSessionCredentialConflict {
-		wnetCancelConnection2W.Call(uintptr(unsafe.Pointer(remoteName)), 0, 1)
-		result = connect()
+		return fmt.Errorf("к %s уже подключена другая учётная запись Windows; отключите её вручную после завершения операций других программ: %w", root, result)
 	}
 	if result != windows.ERROR_SUCCESS {
 		return fmt.Errorf("не удалось подключить сетевую папку %s: %w", root, result)

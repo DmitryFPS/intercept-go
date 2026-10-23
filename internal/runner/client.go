@@ -151,6 +151,8 @@ type Client struct {
 	workerStop     context.CancelFunc
 	workerDone     chan struct{}
 	rootContext    context.Context
+	rootStop       context.CancelFunc
+	background     sync.WaitGroup
 	pendingProbeID string
 }
 
@@ -165,8 +167,10 @@ func NewClient(baseDir, version string, logger *slog.Logger) *Client {
 // Start загружает сохранённые настройки и поддерживает рабочий процесс до
 // отмены переданного контекста.
 func (client *Client) Start(ctx context.Context) {
+	rootContext, rootStop := context.WithCancel(ctx)
 	client.mu.Lock()
-	client.rootContext = ctx
+	client.rootContext = rootContext
+	client.rootStop = rootStop
 	client.mu.Unlock()
 	if _, err := os.Stat(client.configPath()); errors.Is(err, os.ErrNotExist) {
 		if installed, installErr := client.installProvisionedConfig(); installErr != nil {
@@ -180,7 +184,7 @@ func (client *Client) Start(ctx context.Context) {
 		}
 	}
 	if _, err := os.Stat(client.configPath()); err == nil {
-		if err := client.restartWorker(ctx); err != nil {
+		if err := client.restartWorker(rootContext); err != nil {
 			client.fail(
 				"Не удалось загрузить настройки",
 				"Загрузите файл настроек рабочей точки ещё раз.",
@@ -188,10 +192,25 @@ func (client *Client) Start(ctx context.Context) {
 			)
 		}
 	}
+	client.background.Add(1)
 	go func() {
-		<-ctx.Done()
+		defer client.background.Done()
+		<-rootContext.Done()
 		client.stopWorker()
 	}()
+}
+
+// Close дожидается завершения всех циклов клиента перед обновлением или выходом.
+func (client *Client) Close() {
+	client.mu.Lock()
+	rootStop := client.rootStop
+	client.rootStop = nil
+	client.mu.Unlock()
+	if rootStop != nil {
+		rootStop()
+	}
+	client.stopWorker()
+	client.background.Wait()
 }
 
 // Status возвращает безопасный снимок состояния для экрана оператора.

@@ -10,15 +10,22 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
+	"intercept/internal/autostart"
 	"intercept/internal/infrastructure/secrets"
 	"intercept/internal/interfaces/clientui"
 	"intercept/internal/interfaces/localui"
 	"intercept/internal/observability"
 	"intercept/internal/runner"
+	"intercept/internal/selfupdate"
+	"intercept/internal/singleinstance"
 )
 
-var version = "dev"
+var (
+	version         = "dev"
+	updatePublicKey = ""
+)
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
@@ -29,6 +36,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	executable, _ := os.Executable()
 	logger, closer, err := observability.NewLogger(filepath.Join(baseDir, "logs", "client.log"), "client")
 	if err != nil {
 		logger = slog.Default()
@@ -43,16 +51,39 @@ func main() {
 		return
 	}
 	address := "127.0.0.1:17631"
+	if err := autostart.Ensure("EAVC Connect Station", executable); err != nil {
+		logger.Warn("не удалось включить автозапуск", "error", err)
+	}
 	openBrowser := len(os.Args) < 2 || os.Args[1] != "--no-browser"
-	if openBrowser && localui.IsRunning(address, accessToken) {
-		_ = localui.OpenBrowser(localui.AccessURL(address, accessToken))
+	releaseInstance, alreadyRunning, err := singleinstance.Acquire("EAVC-Connect-Station")
+	if err != nil {
+		logger.Error("не удалось проверить запущенный экземпляр", "error", err)
 		return
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer releaseInstance()
+	if alreadyRunning {
+		if openBrowser {
+			for attempt := 0; attempt < 20 && !localui.IsRunning(address, accessToken); attempt++ {
+				time.Sleep(100 * time.Millisecond)
+			}
+			_ = localui.OpenBrowser(localui.AccessURL(address, accessToken))
+		}
+		return
+	}
+	signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, shutdown := context.WithCancel(signalContext)
+	defer shutdown()
 	application := runner.NewClient(baseDir, buildVersion(), logger)
+	defer application.Close()
 	application.Start(ctx)
-	handler := clientui.Handler{Client: application, Context: ctx}.Routes()
+	observability.StartOperationalRecorder(ctx, baseDir, "station", buildVersion(), func() any { return application.Status() })
+	updater := selfupdate.NewManager(selfupdate.Configuration{
+		BaseDir: baseDir, Product: "eavc-connect-station", Version: buildVersion(),
+		PublicKey: updatePublicKey, Application: filepath.Base(executable), Helper: "EAVC Connect Updater.exe",
+		HealthAddress: address, TokenFile: filepath.Join("data", "client-ui-access.dat"), Logger: logger,
+	})
+	handler := clientui.Handler{Client: application, Context: ctx, Updater: updater, Shutdown: shutdown}.Routes()
 	if err := localui.ListenAndServe(ctx, address, handler, openBrowser, accessToken); err != nil {
 		logger.Error("локальный интерфейс завершён", "error", err)
 		_ = localui.OpenBrowser(localui.AccessURL(address, accessToken))

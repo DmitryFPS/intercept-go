@@ -131,3 +131,11 @@ CREATE TABLE transport_cleanup (
 );
 CREATE INDEX transport_cleanup_due_idx ON transport_cleanup(next_attempt_at, message_id);
 `
+
+const serverIntegrityMigration = `
+CREATE UNIQUE INDEX unique_active_sender_bot
+	ON server_clients(sender_bot_id) WHERE active=1;
+UPDATE client_connection_incidents
+	SET started_at=recovered_at
+	WHERE recovered_at IS NOT NULL AND julianday(started_at)>julianday(recovered_at);
+`

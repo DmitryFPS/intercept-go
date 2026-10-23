@@ -3,7 +3,8 @@ param(
     [string]$Version = '0.1.0',
     [switch]$SkipSmoke,
     [string]$SigningCertificateThumbprint = '',
-    [switch]$RequireSignature
+    [switch]$RequireSignature,
+    [string]$UpdateSigningKeyPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +20,9 @@ $buildCacheRoot = Join-Path $workspaceRoot '.build-cache\release'
 New-Item -ItemType Directory -Force -Path $buildCacheRoot | Out-Null
 $clientRoot = Join-Path $distRoot 'EAVC Connect Station'
 $serverRoot = Join-Path $distRoot 'EAVC Connect Center'
+if ([string]::IsNullOrWhiteSpace($UpdateSigningKeyPath)) {
+    $UpdateSigningKeyPath = Join-Path $workspaceRoot '.release-keys\update-ed25519.key'
+}
 $env:GOPATH = Join-Path $buildCacheRoot 'gopath'
 $env:GOCACHE = Join-Path $buildCacheRoot 'gocache'
 $env:GOMODCACHE = Join-Path $buildCacheRoot 'gomodcache'
@@ -108,14 +112,31 @@ try {
     }
     New-Item -ItemType Directory -Path $clientRoot, $serverRoot | Out-Null
 
-    $clientFlags = "-s -w -H=windowsgui -X main.version=$Version"
-    go build -trimpath -ldflags $clientFlags -o (Join-Path $clientRoot 'EAVC Connect Station.exe') ./cmd/intercept-client
+    if (-not (Test-Path -LiteralPath $UpdateSigningKeyPath)) {
+        go run ./cmd/update-packager keygen -key $UpdateSigningKeyPath
+        if ($LASTEXITCODE -ne 0) { throw 'Не удалось создать ключ подписи обновлений.' }
+    }
+    $updatePublicKey = (& go run ./cmd/update-packager public -key $UpdateSigningKeyPath | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($updatePublicKey)) {
+        throw 'Не удалось получить открытый ключ обновлений.'
+    }
+
+    $applicationFlags = "-s -w -H=windowsgui -X main.version=$Version -X main.updatePublicKey=$updatePublicKey"
+    $updaterFlags = "-s -w -H=windowsgui -X main.updatePublicKey=$updatePublicKey"
+    go build -trimpath -ldflags $applicationFlags -o (Join-Path $clientRoot 'EAVC Connect Station.exe') ./cmd/intercept-client
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось собрать EAVC Connect — Рабочая точка.' }
-    go build -trimpath -ldflags $clientFlags -o (Join-Path $serverRoot 'EAVC Connect Center.exe') ./cmd/intercept-server
+    go build -trimpath -ldflags $applicationFlags -o (Join-Path $serverRoot 'EAVC Connect Center.exe') ./cmd/intercept-server
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось собрать EAVC Connect — Центр управления.' }
+    $updaterBuild = Join-Path $buildCacheRoot 'EAVC Connect Updater.exe'
+    go build -trimpath -ldflags $updaterFlags -o $updaterBuild ./cmd/intercept-updater
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось собрать помощник безопасного обновления.' }
 
     $clientSigned = Protect-Executable (Join-Path $clientRoot 'EAVC Connect Station.exe')
     $serverSigned = Protect-Executable (Join-Path $serverRoot 'EAVC Connect Center.exe')
+    $updaterSigned = Protect-Executable $updaterBuild
+
+    Copy-Item -LiteralPath $updaterBuild -Destination (Join-Path $clientRoot 'EAVC Connect Updater.exe')
+    Copy-Item -LiteralPath $updaterBuild -Destination (Join-Path $serverRoot 'EAVC Connect Updater.exe')
 
     Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\client-readme.txt') -Destination (Join-Path $clientRoot 'ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\server-readme.txt') -Destination (Join-Path $serverRoot 'ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt')
@@ -123,6 +144,7 @@ try {
     $stationTemplate = Join-Path $serverRoot 'station-template'
     New-Item -ItemType Directory -Path $stationTemplate | Out-Null
     Copy-Item -LiteralPath (Join-Path $clientRoot 'EAVC Connect Station.exe') -Destination (Join-Path $stationTemplate 'EAVC Connect Station.exe')
+    Copy-Item -LiteralPath $updaterBuild -Destination (Join-Path $stationTemplate 'EAVC Connect Updater.exe')
     New-Item -ItemType Directory -Path (Join-Path $clientRoot 'data'), (Join-Path $clientRoot 'logs'), (Join-Path $serverRoot 'data'), (Join-Path $serverRoot 'logs') | Out-Null
 
     $clientArchive = Join-Path $distRoot 'EAVC-Connect-Station-portable.zip'
@@ -130,7 +152,14 @@ try {
     Add-DeterministicArchive -SourceDirectory $clientRoot -DestinationPath $clientArchive
     Add-DeterministicArchive -SourceDirectory $serverRoot -DestinationPath $serverArchive
 
-    $hashes = Get-FileHash -Algorithm SHA256 -LiteralPath $clientArchive, $serverArchive
+    $clientUpdate = Join-Path $distRoot 'EAVC-Connect-Station-update.zip'
+    $serverUpdate = Join-Path $distRoot 'EAVC-Connect-Center-update.zip'
+    go run ./cmd/update-packager package -source $clientRoot -product eavc-connect-station -version $Version -output $clientUpdate -key $UpdateSigningKeyPath
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось подписать пакет обновления рабочей точки.' }
+    go run ./cmd/update-packager package -source $serverRoot -product eavc-connect-center -version $Version -output $serverUpdate -key $UpdateSigningKeyPath
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось подписать пакет обновления центра.' }
+
+    $hashes = Get-FileHash -Algorithm SHA256 -LiteralPath $clientArchive, $serverArchive, $clientUpdate, $serverUpdate
     $lines = $hashes | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($_.Path))" }
     [System.IO.File]::WriteAllLines((Join-Path $distRoot 'SHA256SUMS.txt'), $lines, [System.Text.UTF8Encoding]::new($false))
     $manifest = [ordered]@{
@@ -139,6 +168,17 @@ try {
         cgo = $false
         client_authenticode = $clientSigned
         center_authenticode = $serverSigned
+        updater_authenticode = $updaterSigned
+        signed_updates = $true
+        update_public_key_sha256 = $(
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                ([System.BitConverter]::ToString(
+                    $sha.ComputeHash([System.Convert]::FromBase64String($updatePublicKey))
+                )).Replace('-', '').ToLowerInvariant()
+            }
+            finally { $sha.Dispose() }
+        )
         reproducible_archives = $true
     } | ConvertTo-Json
     [System.IO.File]::WriteAllText((Join-Path $distRoot 'release-manifest.json'), $manifest, [System.Text.UTF8Encoding]::new($false))

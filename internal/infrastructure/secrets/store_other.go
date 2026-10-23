@@ -9,7 +9,7 @@ import (
 
 // Save использует права 0600 вне Windows. Целевые поставки используют DPAPI.
 func Save(path string, plain []byte) error {
-	if err := os.WriteFile(path, plain, 0o600); err != nil {
+	if err := writeAtomic(path, plain); err != nil {
 		return fmt.Errorf("сохранить настройки: %w", err)
 	}
 	return nil

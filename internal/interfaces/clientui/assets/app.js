@@ -1,4 +1,10 @@
 const element = id => document.getElementById(id);
+const hashAccess = new URLSearchParams(location.hash.slice(1)).get('access');
+if (hashAccess) {
+  sessionStorage.setItem('eavc_access', hashAccess);
+  history.replaceState(null, '', location.pathname + location.search);
+}
+const accessToken = sessionStorage.getItem('eavc_access') || '';
 const formatTime = value => value ? new Date(value).toLocaleString('ru-RU') : 'Ещё не было';
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, character => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -12,10 +18,22 @@ function showMessage(text = '', tone = 'error') {
 }
 
 async function requestJSON(url, options = {}) {
+	options.headers = {...(options.headers || {}), 'X-EAVC-Access': accessToken};
   const response = await fetch(url, options);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Не удалось выполнить действие.');
   return data;
+}
+
+async function downloadAPI(url, fallbackName) {
+  const response = await fetch(url, {cache: 'no-store', headers: {'X-EAVC-Access': accessToken}});
+  if (!response.ok) throw new Error('Не удалось подготовить файл.');
+  const blob = await response.blob();
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = fallbackName;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
 async function refresh() {
@@ -223,6 +241,30 @@ element('checkTransport').addEventListener('click', async () => {
     showMessage('Пакет отправлен. Ответ центра появится в блоке «Подтверждение центра».', 'success');
   } catch (error) {
     showMessage(error.message);
+  }
+});
+element('downloadDiagnostics').addEventListener('click', async () => {
+  try { await downloadAPI('/api/diagnostics', 'EAVC-Connect-Station-diagnostics.zip'); }
+  catch (error) { showMessage(error.message); }
+});
+
+element('updateFile').addEventListener('change', async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (!confirm('Установить выбранное обновление? Программа проверит подпись, перезапустится и автоматически вернёт предыдущую версию при ошибке.')) {
+    event.target.value = '';
+    return;
+  }
+  const form = new FormData();
+  form.append('update', file);
+  showMessage('Проверяем цифровую подпись и готовим обновление…', 'info');
+  try {
+    const result = await requestJSON('/api/update', {method: 'POST', body: form});
+    showMessage(result.message + ' После запуска окно снова станет доступно.', 'success');
+  } catch (error) {
+    showMessage(error.message);
+  } finally {
+    event.target.value = '';
   }
 });
 

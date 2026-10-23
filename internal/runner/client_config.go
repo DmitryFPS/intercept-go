@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +26,17 @@ func (client *Client) ImportConfig(ctx context.Context, payload []byte) error {
 	cfg, err := config.DecodeClient(bytes.NewReader(payload))
 	if err != nil {
 		return err
+	}
+	if current, loadErr := secrets.Load(client.configPath()); loadErr == nil {
+		existing, decodeErr := config.DecodeClient(bytes.NewReader(current))
+		if decodeErr != nil {
+			return fmt.Errorf("прочитать установленные настройки: %w", decodeErr)
+		}
+		if existing.ClientID != cfg.ClientID {
+			return errors.New("файл относится к другой рабочей точке; сначала сохраните диагностику и переустановите программу для нужной точки")
+		}
+	} else if !errors.Is(loadErr, os.ErrNotExist) {
+		return loadErr
 	}
 	issuer, firstImport, err := client.verifyTrustedIssuer(cfg)
 	if err != nil {
@@ -166,15 +176,9 @@ func (client *Client) Diagnostics() ([]byte, error) {
 	status, _ := json.MarshalIndent(client.Status(), "", "  ")
 	part, _ := archive.Create("status.json")
 	_, _ = part.Write(status)
-	for _, name := range []string{"client.log", "client.log.1", "client.log.2"} {
-		path := filepath.Join(client.BaseDir, "logs", name)
-		file, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		part, _ := archive.Create(filepath.Join("logs", name))
-		_, _ = io.Copy(part, io.LimitReader(file, 10*1024*1024))
-		file.Close()
+	if err := addDiagnosticLogs(archive, client.BaseDir, "client.log"); err != nil {
+		_ = archive.Close()
+		return nil, err
 	}
 	if err := archive.Close(); err != nil {
 		return nil, err

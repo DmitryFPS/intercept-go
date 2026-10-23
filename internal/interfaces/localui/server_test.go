@@ -37,7 +37,7 @@ func TestProtectLocalUI(t *testing.T) {
 		t.Fatalf("ожидался 401 без локального токена, получен %d", response.Code)
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "http://evil.example/?access="+token, nil)
+	request = httptest.NewRequest(http.MethodGet, "http://evil.example/", nil)
 	request.Host = "evil.example"
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -45,27 +45,23 @@ func TestProtectLocalUI(t *testing.T) {
 		t.Fatalf("ожидался 421 для подменённого Host, получен %d", response.Code)
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "http://"+authority+"/?access="+token, nil)
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusSeeOther {
-		t.Fatalf("ожидался 303 при входе по защищённой ссылке, получен %d", response.Code)
-	}
-	cookies := response.Result().Cookies()
-	if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
-		t.Fatalf("защитная cookie настроена неверно: %#v", cookies)
-	}
-
-	request = httptest.NewRequest(http.MethodGet, "http://"+authority+"/api/status", nil)
-	request.AddCookie(cookies[0])
+	request = httptest.NewRequest(http.MethodGet, "http://"+authority+"/", nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent {
-		t.Fatalf("ожидался доступ с cookie, получен %d", response.Code)
+		t.Fatalf("ожидалась доступная статическая оболочка, получен %d", response.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "http://"+authority+"/api/status", nil)
+	request.Header.Set(accessHeaderName, token)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("ожидался доступ с заголовком сеанса, получен %d", response.Code)
 	}
 
 	request = httptest.NewRequest(http.MethodPost, "http://"+authority+"/api/action", nil)
-	request.AddCookie(cookies[0])
+	request.Header.Set(accessHeaderName, token)
 	request.Header.Set("Origin", "http://attacker.example")
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -74,7 +70,7 @@ func TestProtectLocalUI(t *testing.T) {
 	}
 
 	request = httptest.NewRequest(http.MethodPost, "http://"+authority+"/api/action", nil)
-	request.AddCookie(cookies[0])
+	request.Header.Set(accessHeaderName, token)
 	request.Header.Set("Origin", "http://"+authority)
 	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	response = httptest.NewRecorder()

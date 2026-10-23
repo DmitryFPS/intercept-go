@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,8 @@ import (
 	stateDB "intercept/internal/infrastructure/sqlite"
 	"intercept/internal/infrastructure/telegram"
 )
+
+var destinationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
 // ConfigureTransport проверяет серверного бота и сохраняет транспортную группу.
 func (server *Server) ConfigureTransport(ctx context.Context, setup TransportSetup) error {
@@ -42,8 +45,19 @@ func (server *Server) ConfigureTransport(ctx context.Context, setup TransportSet
 		return fmt.Errorf("проверка транспортной группы: %w", err)
 	}
 	server.mu.RLock()
+	currentTransport := server.config.Transport
+	wasConfigured := server.status.Configured
 	destinations := cloneDestinations(server.config.Destinations)
 	server.mu.RUnlock()
+	if wasConfigured && (currentTransport.BotID != me.ID || currentTransport.ChatID != setup.ChatID) {
+		clients, clientsErr := server.Store.Clients(ctx)
+		if clientsErr != nil {
+			return clientsErr
+		}
+		if len(clients) > 0 {
+			return errors.New("нельзя заменить бота или транспортную группу, пока зарегистрированы рабочие точки: их настройки перестанут работать")
+		}
+	}
 	if destinations == nil {
 		destinations = make(map[string]config.DestinationConfig)
 	}
@@ -67,12 +81,13 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 	server.mu.RLock()
 	cfg := cloneServerConfig(server.config)
 	server.mu.RUnlock()
+	previousConfig := cloneServerConfig(cfg)
 	if !server.Status().Configured {
 		return errors.New("сначала настройте транспортную группу")
 	}
 	id := strings.TrimSpace(setup.ID)
-	if id == "" {
-		return errors.New("не задан ID направления")
+	if !destinationIDPattern.MatchString(id) {
+		return errors.New("ID направления должен содержать только латинские буквы, цифры, дефис или подчёркивание и быть не длиннее 64 символов")
 	}
 	name := strings.TrimSpace(setup.Name)
 	if name == "" {
@@ -167,7 +182,7 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 	}
 	rules.Version++
 	if err := server.Store.PublishRules(ctx, rules, "Настройка направления"); err != nil {
-		return err
+		return errors.Join(err, server.saveConfig(previousConfig))
 	}
 	return server.restartWorker(server.applicationContext())
 }
@@ -181,6 +196,7 @@ func (server *Server) DeleteDestination(ctx context.Context, id string) error {
 	server.mu.RLock()
 	cfg := cloneServerConfig(server.config)
 	server.mu.RUnlock()
+	previousConfig := cloneServerConfig(cfg)
 	if _, exists := cfg.Destinations[id]; !exists {
 		return errors.New("направление не найдено")
 	}
@@ -206,7 +222,7 @@ func (server *Server) DeleteDestination(ctx context.Context, id string) error {
 		return err
 	}
 	if err := server.Store.PublishRules(ctx, rules, "Удаление направления"); err != nil {
-		return err
+		return errors.Join(err, server.saveConfig(previousConfig))
 	}
 	return server.restartWorker(server.applicationContext())
 }
@@ -267,15 +283,6 @@ func (server *Server) AddClient(ctx context.Context, request config.ClientReques
 	if err != nil {
 		return nil, err
 	}
-	key, _ := clientConfig.Key()
-	if err := server.Store.SaveClient(ctx, application.RegisteredClient{
-		ID: clientConfig.ClientID, Number: clientConfig.ClientNumber, Name: clientConfig.ClientName,
-		SenderBotID: me.ID, SenderBotUsername: me.Username,
-		ChatID: request.ChatID, ThreadID: request.ThreadID,
-		KeyID: clientConfig.Cryptography.KeyID, Key: key, Active: true,
-	}); err != nil {
-		return nil, err
-	}
 	payload, err := json.MarshalIndent(clientConfig, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("подготовить настройки точки: %w", err)
@@ -286,6 +293,16 @@ func (server *Server) AddClient(ctx context.Context, request config.ClientReques
 	}
 	if err := secrets.Save(clientConfigPath, payload); err != nil {
 		return nil, fmt.Errorf("сохранить резервную копию настроек точки: %w", err)
+	}
+	key, _ := clientConfig.Key()
+	if err := server.Store.SaveClient(ctx, application.RegisteredClient{
+		ID: clientConfig.ClientID, Number: clientConfig.ClientNumber, Name: clientConfig.ClientName,
+		SenderBotID: me.ID, SenderBotUsername: me.Username,
+		ChatID: request.ChatID, ThreadID: request.ThreadID,
+		KeyID: clientConfig.Cryptography.KeyID, Key: key, Active: true,
+	}); err != nil {
+		_ = os.Remove(clientConfigPath)
+		return nil, err
 	}
 	server.Logger.Info("точка добавлена", "client_id", clientConfig.ClientID, "client_number", clientConfig.ClientNumber)
 	return payload, nil
@@ -426,6 +443,9 @@ func (server *Server) PublishRules(ctx context.Context, rules domain.RuleSet, au
 		return err
 	}
 	rules = canonical
+	if err := server.validateRuleDestinations(rules); err != nil {
+		return err
+	}
 	next, err := server.Store.NextRuleVersion(ctx)
 	if err != nil {
 		return err
@@ -447,12 +467,32 @@ func (server *Server) RestoreRules(ctx context.Context, version int64, author st
 	if err != nil {
 		return err
 	}
+	if err := server.validateRuleDestinations(rules); err != nil {
+		return fmt.Errorf("эту версию нельзя восстановить: %w", err)
+	}
 	next, err := server.Store.NextRuleVersion(ctx)
 	if err != nil {
 		return err
 	}
 	rules.Version = next
 	return server.Store.PublishRules(ctx, rules, author+" · восстановление версии "+strconv.FormatInt(version, 10))
+}
+
+func (server *Server) validateRuleDestinations(rules domain.RuleSet) error {
+	server.mu.RLock()
+	configured := cloneDestinations(server.config.Destinations)
+	server.mu.RUnlock()
+	for id := range rules.Destinations {
+		if _, exists := configured[id]; !exists {
+			return fmt.Errorf("получатель %q отсутствует в текущей конфигурации", id)
+		}
+	}
+	for id := range configured {
+		if _, exists := rules.Destinations[id]; !exists {
+			return fmt.Errorf("для настроенного получателя %q отсутствует описание маршрута", id)
+		}
+	}
+	return nil
 }
 
 func canonicalRules(rules domain.RuleSet) (domain.RuleSet, error) {
@@ -561,15 +601,9 @@ func (server *Server) Diagnostics(ctx context.Context) ([]byte, error) {
 		part, _ = archive.Create("rule-versions.json")
 		_, _ = part.Write(payload)
 	}
-	for _, name := range []string{"server.log", "server.log.1", "server.log.2"} {
-		path := filepath.Join(server.BaseDir, "logs", name)
-		file, openErr := os.Open(path)
-		if openErr != nil {
-			continue
-		}
-		part, _ = archive.Create(filepath.Join("logs", name))
-		_, _ = io.Copy(part, io.LimitReader(file, 10*1024*1024))
-		file.Close()
+	if err := addDiagnosticLogs(archive, server.BaseDir, "server.log"); err != nil {
+		_ = archive.Close()
+		return nil, err
 	}
 	if err := archive.Close(); err != nil {
 		return nil, err

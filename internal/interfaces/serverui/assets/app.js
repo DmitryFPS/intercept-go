@@ -1,4 +1,10 @@
 const $ = id => document.getElementById(id);
+const hashAccess = new URLSearchParams(location.hash.slice(1)).get('access');
+if (hashAccess) {
+  sessionStorage.setItem('eavc_access', hashAccess);
+  history.replaceState(null, '', location.pathname + location.search);
+}
+const accessToken = sessionStorage.getItem('eavc_access') || '';
 
 const pageTitles = {
   dashboard: 'Обзор',
@@ -64,6 +70,7 @@ function formatDate(value) {
 }
 
 async function request(url, options = {}) {
+  options.headers = {...(options.headers || {}), 'X-EAVC-Access': accessToken};
   const response = await fetch(url, { cache: 'no-store', ...options });
   const type = response.headers.get('content-type') || '';
   const payload = type.includes('application/json') ? await response.json() : await response.text();
@@ -71,6 +78,17 @@ async function request(url, options = {}) {
     throw new Error(payload?.error || payload || 'Не удалось выполнить действие');
   }
   return payload;
+}
+
+async function downloadAPI(url, fallbackName) {
+  const response = await fetch(url, {cache: 'no-store', headers: {'X-EAVC-Access': accessToken}});
+  if (!response.ok) throw new Error('Не удалось подготовить файл.');
+  const blob = await response.blob();
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = fallbackName;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
 function post(url, payload) {
@@ -189,6 +207,32 @@ async function controlProcessing(action, button, busyText) {
 $('controlStart').addEventListener('click', event => controlProcessing('start', event.currentTarget, 'Запускаем…'));
 $('controlStop').addEventListener('click', event => controlProcessing('stop', event.currentTarget, 'Останавливаем…'));
 $('controlRefresh').addEventListener('click', event => controlProcessing('refresh', event.currentTarget, 'Обновляем…'));
+$('downloadDiagnostics').addEventListener('click', async () => {
+  try { await downloadAPI('/api/diagnostics', 'EAVC-Connect-Center-diagnostics.zip'); }
+  catch (error) { notify(error.message); }
+});
+
+$('updateFile').addEventListener('change', async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (!confirm('Установить выбранное обновление? Центр проверит подпись, перезапустится и автоматически восстановит предыдущую версию при ошибке.')) {
+    event.target.value = '';
+    return;
+  }
+  const form = new FormData();
+  form.append('update', file);
+  $('updateResult').textContent = 'Проверяем пакет обновления…';
+  try {
+    const result = await request('/api/update', {method: 'POST', body: form});
+    $('updateResult').textContent = result.message;
+    notify(result.message, true);
+  } catch (error) {
+    $('updateResult').textContent = error.message;
+    notify(error.message);
+  } finally {
+    event.target.value = '';
+  }
+});
 
 document.querySelectorAll('[data-history]').forEach(button => {
   button.addEventListener('click', () => openHistory(button.dataset.history));
@@ -710,8 +754,15 @@ function renderClients() {
     <article class="entity-card">
       <div class="entity-card-head"><div><h3>${escapeHTML(client.name)}</h3><p>Точка № ${escapeHTML(client.number)}</p></div><span class="badge ${client.active ? 'success' : 'neutral'}">${client.active ? 'Активна' : 'Отключена'}</span></div>
       <dl class="entity-meta"><dt>Бот</dt><dd>${escapeHTML(client.bot || 'Не указан')}</dd><dt>Тема обмена</dt><dd>${escapeHTML(client.thread_id)}</dd></dl>
-      <div class="entity-actions"><a class="button primary" href="/api/clients/${encodeURIComponent(client.id)}/package">Скачать готовую программу</a><a class="button ghost" href="/api/clients/${encodeURIComponent(client.id)}/config">Скачать новые настройки JSON</a></div>
+      <div class="entity-actions"><button class="button primary" data-client-download="package" data-client-id="${escapeHTML(client.id)}">Скачать готовую программу</button><button class="button ghost" data-client-download="config" data-client-id="${escapeHTML(client.id)}">Скачать новые настройки JSON</button></div>
     </article>`).join('');
+	$('clientsList').querySelectorAll('[data-client-download]').forEach(button => button.addEventListener('click', async () => {
+		const client = clients.find(item => item.id === button.dataset.clientId);
+		const kind = button.dataset.clientDownload;
+		const extension = kind === 'package' ? 'zip' : 'json';
+		try { await downloadAPI(`/api/clients/${encodeURIComponent(button.dataset.clientId)}/${kind}`, `EAVC Connect Station-${client?.number || 'point'}.${extension}`); }
+		catch (error) { notify(error.message); }
+	}));
 }
 
 $('addClient').addEventListener('click', () => {
@@ -728,7 +779,7 @@ $('clientForm').addEventListener('submit', async event => {
   try {
     const response = await fetch('/api/clients', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-EAVC-Access': accessToken },
       body: JSON.stringify({
         number: data.get('number'),
         name: data.get('name'),

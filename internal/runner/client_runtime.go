@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"intercept/internal/application"
@@ -176,9 +177,12 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		status.EAVCPath = eavcPath
 	})
 
-	go client.ackLoop(ctx, service, queue)
-	go client.clientMaintenanceLoop(ctx, queue)
-	go client.heartbeatLoop(ctx, cfg.ClientID, transport)
+	var background sync.WaitGroup
+	background.Add(3)
+	go func() { defer background.Done(); client.ackLoop(ctx, service, queue) }()
+	go func() { defer background.Done(); client.clientMaintenanceLoop(ctx, queue) }()
+	go func() { defer background.Done(); client.heartbeatLoop(ctx, cfg.ClientID, transport) }()
+	defer background.Wait()
 	ticker := time.NewTicker(time.Duration(cfg.Polling.EAVCSeconds) * time.Second)
 	defer ticker.Stop()
 	for {
@@ -281,7 +285,9 @@ func (client *Client) ackLoop(ctx context.Context, service *application.ClientSe
 				"Связь временно прервалась.",
 				err,
 			)
-			time.Sleep(5 * time.Second)
+			if !waitForRetry(ctx, 5*time.Second) {
+				return
+			}
 			continue
 		}
 		client.transportRecovered("EAVC подключён.")

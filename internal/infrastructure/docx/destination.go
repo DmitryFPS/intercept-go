@@ -97,17 +97,19 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 	for _, block := range blocks {
 		callsigns = append(callsigns, block.Callsigns...)
 	}
-	sourceKey := strings.TrimSpace(event.Source.UUID)
-	if sourceKey == "" {
-		sourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
+	legacySourceKey := strings.TrimSpace(event.Source.UUID)
+	if legacySourceKey == "" {
+		legacySourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
 	}
+	sourceKey := strings.TrimSpace(event.ClientID) + "|" + legacySourceKey
 	prefix := sourceKey + "|"
+	legacyPrefix := legacySourceKey + "|"
 	key := prefix + "record"
 	record, exists := current.Blocks[key]
 	legacyMigration := false
 	if !exists {
 		for legacyKey, legacyRecord := range current.Blocks {
-			if !strings.HasPrefix(legacyKey, prefix) || legacyKey == key {
+			if (!strings.HasPrefix(legacyKey, prefix) && !strings.HasPrefix(legacyKey, legacyPrefix)) || legacyKey == key {
 				continue
 			}
 			if !legacyMigration || legacyRecord.Number < record.Number {
@@ -133,6 +135,7 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 	}
 	render := renderDigest(document)
 	filename := destination.documentName(record.Number, event.Position.UnitName)
+	previousFilename := record.Filename
 	target, err := safeDestinationPath(destination.Folder, filename)
 	if err != nil {
 		return err
@@ -165,7 +168,7 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 	}
 	current.Blocks[key] = record
 	for key, record := range current.Blocks {
-		if !strings.HasPrefix(key, prefix) || key == prefix+"record" {
+		if (!strings.HasPrefix(key, prefix) && !strings.HasPrefix(key, legacyPrefix)) || key == prefix+"record" {
 			continue
 		}
 		if record.Filename != "" && record.Filename != filename {
@@ -175,7 +178,17 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 		}
 		delete(current.Blocks, key)
 	}
-	return saveState(destination.StatePath, current)
+	if err := saveState(destination.StatePath, current); err != nil {
+		return err
+	}
+	// После успешной фиксации нового имени удаляем предыдущий документ этой
+	// же записи, чтобы исправление подразделения не оставляло два DOCX.
+	if previousFilename != "" && previousFilename != filename {
+		if obsolete, pathErr := safeDestinationPath(destination.Folder, previousFilename); pathErr == nil {
+			_ = os.Remove(obsolete)
+		}
+	}
+	return nil
 }
 
 func tryDestinationLock(path string) (func(), bool) {

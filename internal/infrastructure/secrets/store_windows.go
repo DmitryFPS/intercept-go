@@ -25,7 +25,7 @@ func Save(path string, plain []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, protected, 0o600); err != nil {
+	if err := writeAtomic(path, protected); err != nil {
 		return fmt.Errorf("сохранить защищённые настройки: %w", err)
 	}
 	return nil

@@ -39,15 +39,29 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	if destination.API == nil || destination.ChatID == 0 || strings.TrimSpace(destination.StatePath) == "" {
 		return errors.New("telegram-направление настроено не полностью")
 	}
-	itemKey := strings.TrimSpace(event.Source.UUID)
-	if itemKey == "" {
-		itemKey = fmt.Sprintf("id:%d", event.Source.ID)
+	legacyItemKey := strings.TrimSpace(event.Source.UUID)
+	if legacyItemKey == "" {
+		legacyItemKey = fmt.Sprintf("id:%d", event.Source.ID)
 	}
+	// Локальные ID EAVC повторяются на разных рабочих точках. Без ClientID
+	// исправление одной точки могло изменить сообщение другой.
+	itemKey := strings.TrimSpace(event.ClientID) + "|" + legacyItemKey
 	unlockItem := destination.lockItem(itemKey)
 	defer unlockItem()
 	item, err := destination.loadItem(itemKey)
 	if err != nil {
 		return err
+	}
+	migratedLegacy := false
+	if item.Blocks == nil {
+		legacy, legacyErr := destination.loadItem(legacyItemKey)
+		if legacyErr != nil {
+			return legacyErr
+		}
+		if legacy.Blocks != nil {
+			item = legacy
+			migratedLegacy = true
+		}
 	}
 	if item.Blocks == nil {
 		item.Blocks = make(map[string]destinationBlock)
@@ -67,7 +81,13 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		if err := destination.deleteAll(ctx, item.Blocks); err != nil {
 			return err
 		}
-		return destination.saveItem(itemKey, destinationItem{}, true)
+		if err := destination.saveItem(itemKey, destinationItem{}, true); err != nil {
+			return err
+		}
+		if migratedLegacy {
+			return destination.saveItem(legacyItemKey, destinationItem{}, true)
+		}
+		return nil
 	}
 	stored, combinedState := item.Blocks[recordStateKey]
 	if !combinedState {
@@ -97,14 +117,25 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		)
 	}
 	renderHash := hashChunks(chunks)
-	messageIDs, err := destination.upsertBlock(ctx, threadID, stored.MessageIDs, chunks)
+	progress := func(messageIDs []int64) error {
+		stored.MessageIDs = append([]int64(nil), messageIDs...)
+		item.Blocks = map[string]destinationBlock{recordStateKey: stored}
+		return destination.saveItem(itemKey, item, false)
+	}
+	messageIDs, err := destination.upsertBlock(ctx, threadID, stored.MessageIDs, chunks, progress)
 	if err != nil {
 		return fmt.Errorf("синхронизировать запись: %w", err)
 	}
 	item.Blocks = map[string]destinationBlock{
 		recordStateKey: {Hash: renderHash, SourceHash: baseHash, MessageIDs: messageIDs, Sequence: 0},
 	}
-	return destination.saveItem(itemKey, item, false)
+	if err := destination.saveItem(itemKey, item, false); err != nil {
+		return err
+	}
+	if migratedLegacy {
+		return destination.saveItem(legacyItemKey, destinationItem{}, true)
+	}
+	return nil
 }
 
 func legacyMessageIDs(blocks map[string]destinationBlock) []int64 {
@@ -172,6 +203,7 @@ func (destination *Destination) saveItem(key string, item destinationItem, remov
 
 func (destination *Destination) upsertBlock(
 	ctx context.Context, threadID int64, oldIDs []int64, chunks []string,
+	progress func([]int64) error,
 ) ([]int64, error) {
 	ids := append([]int64(nil), oldIDs...)
 	common := len(ids)
@@ -201,10 +233,18 @@ func (destination *Destination) upsertBlock(
 		}
 	}
 	if len(ids) > len(chunks) {
-		if err := destination.deleteMessages(ctx, ids[len(chunks):]); err != nil {
-			return nil, err
+		for len(ids) > len(chunks) {
+			last := len(ids) - 1
+			if err := destination.deleteMessage(ctx, ids[last]); err != nil {
+				return nil, err
+			}
+			ids = ids[:last]
+			if progress != nil {
+				if err := progress(ids); err != nil {
+					return nil, err
+				}
+			}
 		}
-		ids = ids[:len(chunks)]
 	}
 	for index := len(ids); index < len(chunks); index++ {
 		message, err := destination.API.SendHTML(ctx, destination.ChatID, threadID, chunks[index])
@@ -212,6 +252,13 @@ func (destination *Destination) upsertBlock(
 			return nil, err
 		}
 		ids = append(ids, message.MessageID)
+		// Сохраняем каждый успешно созданный фрагмент немедленно. Если связь
+		// оборвётся на следующем фрагменте, повтор продолжит с него без дубля.
+		if progress != nil {
+			if err := progress(ids); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return ids, nil
 }
@@ -227,11 +274,25 @@ func (destination *Destination) deleteAll(ctx context.Context, blocks map[string
 
 func (destination *Destination) deleteMessages(ctx context.Context, ids []int64) error {
 	for _, id := range ids {
-		if err := destination.API.DeleteMessage(ctx, destination.ChatID, id); err != nil {
+		if err := destination.deleteMessage(ctx, id); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (destination *Destination) deleteMessage(ctx context.Context, id int64) error {
+	err := destination.API.DeleteMessage(ctx, destination.ChatID, id)
+	if err == nil || missingDeleteError(err) {
+		return nil
+	}
+	return err
+}
+
+func missingDeleteError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "message to delete not found") ||
+		strings.Contains(message, "message_id_invalid")
 }
 
 func terminalEditError(err error) bool {
