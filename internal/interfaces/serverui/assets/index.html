@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>EAVC Connect — Центр</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/history.css">
-  <style>.empty-state:empty::before{display:grid;grid-column:1/-1;place-items:center;min-height:150px}</style>
+  <style>.empty-state:empty::before{display:grid;grid-column:1/-1;place-items:center;min-height:150px}.button.disabled{opacity:.45;cursor:not-allowed;pointer-events:none}</style>
 </head>
 <body>
 <aside class="sidebar">
@@ -39,7 +39,7 @@
       <article class="card activity-card"><div class="card-head"><div><span class="eyebrow">ОПЕРАЦИИ</span><h3>Последняя активность</h3></div></div><dl class="activity-list"><div><dt>Принят пакет</dt><dd id="lastReceived">Ещё не было</dd></div><div><dt>Выполнен маршрут</dt><dd id="lastDelivery">Ещё не было</dd></div></dl></article>
       <article class="card operations-card">
         <section class="operation-group"><div class="operation-title"><span class="eyebrow">СОСТОЯНИЕ СЕРВИСА</span><h3 id="serviceControlState">Проверяем</h3></div><div class="control-actions"><button id="controlStart" class="button primary" type="button" title="Запустить обработку">Старт</button><button id="controlStop" class="button ghost" type="button" title="Остановить обработку">Стоп</button><button id="controlRefresh" class="button secondary" type="button" title="Перечитать настройки и переподключить транспорт">Обновить</button></div></section>
-        <section class="operation-group service-tools"><div class="operation-title"><span class="eyebrow">СЕРВИСНЫЕ ОПЕРАЦИИ</span><h3>Диагностика и обновление</h3></div><div class="control-actions"><button id="downloadDiagnostics" class="button secondary" type="button">Скачать диагностику</button><label class="button primary">Установить обновление<input id="updateFile" hidden type="file" accept=".zip,application/zip"></label></div><small id="updateResult" class="operation-result muted" aria-live="polite"></small></section>
+        <section class="operation-group service-tools"><div class="operation-title"><span class="eyebrow">СЕРВИСНЫЕ ОПЕРАЦИИ</span><h3>Диагностика и обновление</h3></div><div class="control-actions"><button id="downloadDiagnostics" class="button secondary" type="button">Скачать диагностику</button><label id="updateUpload" class="button primary">Установить обновление<input id="updateFile" hidden type="file" accept=".zip,application/zip"></label></div><small id="updateResult" class="operation-result muted" aria-live="polite"></small></section>
       </article>
     </div>
   </section>

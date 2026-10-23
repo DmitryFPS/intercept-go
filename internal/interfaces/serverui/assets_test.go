@@ -126,6 +126,35 @@ func TestDashboardUsesOperationalSummaryWithoutTrainingCopy(t *testing.T) {
 	}
 }
 
+func TestServiceActionsFollowProcessingState(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	javascript := string(application)
+	for _, expected := range []string{
+		"setControlDisabled('controlStart', serviceOperationBusy || !configured || processing)",
+		"setControlDisabled('controlStop', serviceOperationBusy || !processing)",
+		"setControlDisabled('controlRefresh', serviceOperationBusy || !configured || !processing)",
+		"setControlDisabled('downloadDiagnostics', serviceOperationBusy)",
+	} {
+		if !strings.Contains(javascript, expected) {
+			t.Errorf("не зафиксирована логика доступности серверной кнопки: %s", expected)
+		}
+	}
+	for _, expected := range []string{
+		"$('clearRouteFilters').disabled = !query && !recipientID",
+		"$('publishRules').disabled = !rulesDirty",
+		"$('positionPrev').disabled = currentPositionPage <= 1",
+		"$('positionNext').disabled = currentPositionPage >= pages",
+		"button.disabled = !rulesDirty",
+	} {
+		if !strings.Contains(javascript, expected) {
+			t.Errorf("не зафиксирована логика вспомогательной серверной кнопки: %s", expected)
+		}
+	}
+}
+
 func TestHistoryColumnLabelsMatchOperatorScreens(t *testing.T) {
 	application, err := assets.ReadFile("assets/app.js")
 	if err != nil {

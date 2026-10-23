@@ -41,6 +41,7 @@ let historyFilters = { q: '', client: '', destination: '', quality: '' };
 let incidentOffset = 0;
 let incidentData = null;
 let incidentFilters = { q: '', client: '' };
+let serviceOperationBusy = false;
 
 const historySections = {
   clients: ['Рабочие точки', 'Текущее качество связи и последние сигналы от каждой рабочей точки.'],
@@ -123,6 +124,30 @@ function setButtonBusy(button, busy, busyText = 'Проверяем…') {
   }
 }
 
+function setControlDisabled(id, disabled) {
+  const control = $(id);
+  control.disabled = disabled;
+  control.setAttribute('aria-disabled', String(disabled));
+}
+
+function syncServiceActions(current = status) {
+  if (!current) return;
+  const configured = Boolean(current.configured);
+  const processing = Boolean(current.processing);
+  setControlDisabled('controlStart', serviceOperationBusy || !configured || processing);
+  setControlDisabled('controlStop', serviceOperationBusy || !processing);
+  setControlDisabled('controlRefresh', serviceOperationBusy || !configured || !processing);
+  setControlDisabled('downloadDiagnostics', serviceOperationBusy);
+  $('updateFile').disabled = serviceOperationBusy;
+  $('updateUpload').classList.toggle('disabled', serviceOperationBusy);
+  $('updateUpload').setAttribute('aria-disabled', String(serviceOperationBusy));
+}
+
+function setServiceOperationBusy(busy) {
+  serviceOperationBusy = busy;
+  syncServiceActions();
+}
+
 function openDialog(id) {
   const dialog = $(id);
   if (!dialog.open) dialog.showModal();
@@ -179,9 +204,7 @@ async function refreshStatus() {
   $('sidebarDot').style.background = status.transport_ok ? '#16a565' : (status.configured ? '#dd941a' : '#8190a5');
   $('transportBadge').textContent = status.transport_ok ? 'Связь работает' : (status.configured ? 'Настроено, нужна связь' : 'Не настроено');
   $('transportBadge').className = `badge ${status.transport_ok ? 'success' : (status.configured ? 'warning' : 'neutral')}`;
-  $('controlStart').disabled = status.processing || !status.configured;
-  $('controlStop').disabled = !status.processing;
-  $('controlRefresh').disabled = !status.configured;
+  syncServiceActions(status);
   $('serviceControlState').textContent = !status.configured
     ? 'Настройка не завершена'
     : (status.processing ? 'Центр запущен' : 'Центр остановлен');
@@ -199,7 +222,9 @@ async function refreshStatus() {
 }
 
 async function controlProcessing(action, button, busyText) {
-  setButtonBusy(button, true, busyText);
+  const label = button.textContent;
+  setServiceOperationBusy(true);
+  button.textContent = busyText;
   try {
     await post(`/api/control/${action}`, {});
     await refreshStatus();
@@ -207,7 +232,8 @@ async function controlProcessing(action, button, busyText) {
   } catch (error) {
     notify(error.message);
   } finally {
-    setButtonBusy(button, false);
+    button.textContent = label;
+    setServiceOperationBusy(false);
   }
 }
 
@@ -215,8 +241,10 @@ $('controlStart').addEventListener('click', event => controlProcessing('start', 
 $('controlStop').addEventListener('click', event => controlProcessing('stop', event.currentTarget, 'Останавливаем…'));
 $('controlRefresh').addEventListener('click', event => controlProcessing('refresh', event.currentTarget, 'Обновляем…'));
 $('downloadDiagnostics').addEventListener('click', async () => {
+  setServiceOperationBusy(true);
   try { await downloadAPI('/api/diagnostics', 'EAVC-Connect-Center-diagnostics.zip'); }
   catch (error) { notify(error.message); }
+  finally { setServiceOperationBusy(false); }
 });
 
 $('updateFile').addEventListener('change', async event => {
@@ -228,6 +256,7 @@ $('updateFile').addEventListener('change', async event => {
   }
   const form = new FormData();
   form.append('update', file);
+  setServiceOperationBusy(true);
   $('updateResult').textContent = 'Проверяем пакет обновления…';
   try {
     const result = await request('/api/update', {method: 'POST', body: form});
@@ -238,6 +267,7 @@ $('updateFile').addEventListener('change', async event => {
     notify(error.message);
   } finally {
     event.target.value = '';
+    setServiceOperationBusy(false);
   }
 });
 
@@ -1085,6 +1115,7 @@ $('publishRules').addEventListener('click', async event => {
     notify(error.message);
   } finally {
     setButtonBusy(button, false);
+    button.disabled = !rulesDirty;
   }
 });
 
