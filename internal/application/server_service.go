@@ -32,10 +32,11 @@ type IncomingPacket struct {
 
 // PacketResult нужен приёмнику для безопасного подтверждения клиенту.
 type PacketResult struct {
-	EventID           string
-	ClientBotUsername string
-	Accepted          bool
-	Status            string
+	EventID            string
+	ClientBotUsername  string
+	AcknowledgementKey []byte
+	Accepted           bool
+	Status             string
 }
 
 // ServerService проверяет входные пакеты и создаёт независимые задания.
@@ -101,13 +102,15 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	if known {
 		return PacketResult{
 			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
-			Status: "accepted",
+			AcknowledgementKey: append([]byte(nil), client.Key...),
+			Status:             "accepted",
 		}, nil
 	}
 	if event.Expired(now) {
 		return PacketResult{
 			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
-			Status: "expired",
+			AcknowledgementKey: append([]byte(nil), client.Key...),
+			Status:             "expired",
 		}, nil
 	}
 	rules, err := service.Rules.ActiveRules(ctx)
@@ -132,7 +135,8 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	}
 	return PacketResult{
 		EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
-		Accepted: accepted, Status: "accepted",
+		AcknowledgementKey: append([]byte(nil), client.Key...),
+		Accepted:           accepted, Status: "accepted",
 	}, nil
 }
 

@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	acknowledgementPrefixV1    = "IC-ACK/1 "
-	acknowledgementPrefixV2    = "IC-ACK/2 "
-	probeAcknowledgementPrefix = "IC-PROBE-ACK/1 "
+	acknowledgementPrefixV3    = "IC-ACK/3 "
+	probeAcknowledgementPrefix = "IC-PROBE-ACK/2 "
 	probeSchema                = "IC-PROBE/1"
+	acknowledgementSchema      = "IC-ACK/3"
+	probeAcknowledgementSchema = "IC-PROBE-ACK/2"
 )
 
 // ClientTransport передаёт конверты точки и принимает подтверждения сервера.
@@ -131,16 +132,20 @@ func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset i
 		eventID := ""
 		switch {
 		case strings.HasPrefix(message.Text, probeAcknowledgementPrefix):
-			eventID = strings.TrimSpace(strings.TrimPrefix(message.Text, probeAcknowledgementPrefix))
-			status = "probe"
-		case strings.HasPrefix(message.Text, acknowledgementPrefixV2):
-			parts := strings.Fields(strings.TrimPrefix(message.Text, acknowledgementPrefixV2))
-			if len(parts) != 2 || (parts[1] != "accepted" && parts[1] != "expired") {
+			parts := strings.Fields(strings.TrimPrefix(message.Text, probeAcknowledgementPrefix))
+			if len(parts) != 2 || !validAcknowledgementMAC(
+				transport.Key, probeAcknowledgementSchema, parts[0], "probe", parts[1],
+			) {
+				continue
+			}
+			eventID, status = parts[0], "probe"
+		case strings.HasPrefix(message.Text, acknowledgementPrefixV3):
+			parts := strings.Fields(strings.TrimPrefix(message.Text, acknowledgementPrefixV3))
+			if len(parts) != 3 || (parts[1] != "accepted" && parts[1] != "expired") ||
+				!validAcknowledgementMAC(transport.Key, acknowledgementSchema, parts[0], parts[1], parts[2]) {
 				continue
 			}
 			eventID, status = parts[0], parts[1]
-		case strings.HasPrefix(message.Text, acknowledgementPrefixV1):
-			eventID = strings.TrimSpace(strings.TrimPrefix(message.Text, acknowledgementPrefixV1))
 		default:
 			continue
 		}
@@ -155,10 +160,32 @@ func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset i
 }
 
 // AcknowledgementText возвращает единый машинно-читаемый ответ сервера.
-func AcknowledgementText(eventID, status string) string {
-	return acknowledgementPrefixV2 + eventID + " " + status
+func acknowledgementMAC(key []byte, schema, eventID, status string) string {
+	digest := hmac.New(sha256.New, key)
+	_, _ = digest.Write([]byte(schema + "\x00" + eventID + "\x00" + status))
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
-func probeAcknowledgementText(probeID string) string {
-	return probeAcknowledgementPrefix + probeID
+func validAcknowledgementMAC(key []byte, schema, eventID, status, value string) bool {
+	if len(key) != 32 || strings.TrimSpace(eventID) == "" {
+		return false
+	}
+	actual, err := hex.DecodeString(value)
+	if err != nil {
+		return false
+	}
+	expected, _ := hex.DecodeString(acknowledgementMAC(key, schema, eventID, status))
+	return hmac.Equal(actual, expected)
+
+}
+
+// AcknowledgementText возвращает подписанный ответ сервера.
+func AcknowledgementText(eventID, status string, key []byte) string {
+	return acknowledgementPrefixV3 + eventID + " " + status + " " +
+		acknowledgementMAC(key, acknowledgementSchema, eventID, status)
+}
+
+func probeAcknowledgementText(probeID string, key []byte) string {
+	return probeAcknowledgementPrefix + probeID + " " +
+		acknowledgementMAC(key, probeAcknowledgementSchema, probeID, "probe")
 }

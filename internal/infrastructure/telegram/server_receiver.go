@@ -112,23 +112,29 @@ func (receiver *ServerReceiver) DeletePacket(ctx context.Context, messageID int6
 }
 
 // Acknowledge сообщает боту точки, что событие записано сервером.
-func (receiver *ServerReceiver) Acknowledge(ctx context.Context, botUsername, eventID, status string) error {
+func (receiver *ServerReceiver) Acknowledge(ctx context.Context, botUsername, eventID, status string, key []byte) error {
 	if strings.TrimSpace(botUsername) == "" || strings.TrimSpace(eventID) == "" {
 		return errors.New("для подтверждения не задан бот или событие")
 	}
 	if status != "accepted" && status != "expired" {
 		return errors.New("для подтверждения задан неизвестный статус")
 	}
-	_, err := receiver.API.SendMessage(ctx, 0, botUsername, AcknowledgementText(eventID, status))
+	if len(key) != 32 {
+		return errors.New("для подтверждения не задан ключ рабочей точки")
+	}
+	_, err := receiver.API.SendMessage(ctx, 0, botUsername, AcknowledgementText(eventID, status, key))
 	return err
 }
 
 // AcknowledgeProbe завершает двустороннюю проверку Bot-to-Bot без постановки
 // тестового сообщения в рабочие маршруты.
-func (receiver *ServerReceiver) AcknowledgeProbe(ctx context.Context, botUsername, probeID string) error {
+func (receiver *ServerReceiver) AcknowledgeProbe(ctx context.Context, botUsername, probeID string, key []byte) error {
 	if strings.TrimSpace(botUsername) == "" || !validProbeID(probeID) {
 		return errors.New("для проверки связи не задан бот или идентификатор")
 	}
-	_, err := receiver.API.SendMessage(ctx, 0, botUsername, probeAcknowledgementText(probeID))
+	if len(key) != 32 {
+		return errors.New("для проверки связи не задан ключ рабочей точки")
+	}
+	_, err := receiver.API.SendMessage(ctx, 0, botUsername, probeAcknowledgementText(probeID, key))
 	return err
 }

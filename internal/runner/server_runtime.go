@@ -180,7 +180,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 				); err != nil {
 					server.Logger.Warn("не удалось обновить состояние связи с точкой", "error", err)
 				}
-				if err := receiver.AcknowledgeProbe(ctx, packet.SenderBotUsername, packet.ProbeID); err != nil {
+				if err := receiver.AcknowledgeProbe(ctx, packet.SenderBotUsername, packet.ProbeID, client.Key); err != nil {
 					server.Logger.Warn("не удалось подтвердить проверку связи",
 						"sender_bot", packet.SenderBotUsername, "error", err)
 				} else {
@@ -213,7 +213,9 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			)
 			acknowledgedAt := time.Now().UTC()
 			if acknowledgementDue(recentAcknowledgements, result.EventID, acknowledgedAt) {
-				if err := receiver.Acknowledge(ctx, result.ClientBotUsername, result.EventID, result.Status); err != nil {
+				if err := receiver.Acknowledge(
+					ctx, result.ClientBotUsername, result.EventID, result.Status, result.AcknowledgementKey,
+				); err != nil {
 					server.Logger.Warn("не удалось подтвердить событие", "event_id", result.EventID, "error", err)
 				} else {
 					recentAcknowledgements[result.EventID] = acknowledgedAt
