@@ -278,6 +278,57 @@ func TestServerStorePreservesOrderInsideTopicWithoutBlockingOtherTopics(t *testi
 	}
 }
 
+// Редакция того же перехвата может изменить подразделение и тему. Даже при
+// одинаковом исходном времени она обязана ждать доставку принятой ранее версии.
+func TestServerStoreKeepsRevisionAfterOriginalAcrossTopics(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	destination := domain.Destination{ID: "telegram", Name: "Группа", Kind: domain.DestinationTelegram, Enabled: true}
+	accept := func(id, content, position string, threadID int64) {
+		event := serverTestEvent()
+		event.ID, event.Source.UUID, event.ContentDigest = id, "same-source", "digest-"+content
+		event.Content, event.Position.UnitName = content, position
+		event.CreatedAt, event.SourceAt, event.ExpiresAt = now, now, now.Add(30*time.Minute)
+		plan := domain.DeliveryPlan{EventID: id, RuleSetVersion: 1, Deliveries: []domain.PlannedDelivery{{
+			Destination: destination, Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: threadID},
+		}}}
+		if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+			t.Fatalf("принять %s: accepted=%v err=%v", id, accepted, acceptErr)
+		}
+	}
+	// Идентификаторы специально расположены против алфавитного порядка.
+	accept("z-original", "исходный", "позиция А", 2)
+	accept("a-revision", "редакция", "позиция Б", 4)
+	jobs, err := store.PendingDeliveries(ctx, 10, now.Add(time.Second))
+	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "z-original" {
+		t.Fatalf("редакция обогнала исходное сообщение: %#v, %v", jobs, err)
+	}
+	if err := store.MarkDelivered(ctx, "z-original", destination.ID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = store.PendingDeliveries(ctx, 10, now.Add(2*time.Second))
+	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "a-revision" {
+		t.Fatalf("редакция не вышла после исходного сообщения: %#v, %v", jobs, err)
+	}
+}
+
 // Ошибка Word-документа одного подразделения не должна задерживать документы
 // остальных подразделений того же удалённого получателя.
 func TestServerStoreSeparatesWordQueuesByPosition(t *testing.T) {

@@ -180,12 +180,21 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 		JOIN received_events e ON e.event_id = j.event_id
 		WHERE j.state = 'pending' AND j.next_attempt_at <= ? AND j.expires_at >= ?
 			AND NOT EXISTS (
-				SELECT 1 FROM delivery_jobs earlier
-				WHERE earlier.state = 'pending' AND earlier.stream_key = j.stream_key
-					AND (earlier.source_at < j.source_at OR
-						(earlier.source_at = j.source_at AND earlier.event_id < j.event_id))
+				SELECT 1
+				FROM delivery_jobs earlier
+				JOIN received_events earlier_event ON earlier_event.event_id = earlier.event_id
+				WHERE earlier.state = 'pending'
+					AND earlier_event.rowid < e.rowid
+					AND (
+						earlier.stream_key = j.stream_key
+						OR (
+							earlier.destination_id = j.destination_id
+							AND earlier_event.client_id = e.client_id
+							AND earlier_event.source_uuid = e.source_uuid
+						)
+					)
 			)
-		ORDER BY j.source_at, j.event_id, j.destination_id
+		ORDER BY e.rowid, j.destination_id
 		LIMIT ?`, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, fmt.Errorf("прочитать очередь доставки: %w", err)
