@@ -87,12 +87,13 @@ func (cfg Server) Validate() error {
 	return nil
 }
 
-// DeliveryTimeout сохраняет десятиминутное окно для ранее созданных настроек,
-// в которых новое поле ещё отсутствует.
+// DeliveryTimeout гарантирует центру не менее тридцати минут на внешние
+// доставки. Старые настройки содержали 10 минут, которых недостаточно для
+// штатного всплеска от трёх точек при ограничениях Telegram.
 func (cfg Server) DeliveryTimeout() time.Duration {
 	minutes := cfg.DeliveryTimeoutMinutes
-	if minutes == 0 {
-		minutes = 10
+	if minutes < 30 {
+		minutes = 30
 	}
 	return time.Duration(minutes) * time.Minute
 }

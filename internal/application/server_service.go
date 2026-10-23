@@ -120,7 +120,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	}
 	deliveryWindow := service.DeliveryWindow
 	if deliveryWindow <= 0 {
-		deliveryWindow = 10 * time.Minute
+		deliveryWindow = 30 * time.Minute
 	}
 	// После своевременного приёма транспорт больше не отвечает за срок. Сервер
 	// получает собственное ограниченное окно, чтобы завершить внешние доставки.
