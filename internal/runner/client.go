@@ -173,14 +173,12 @@ func (client *Client) Start(ctx context.Context) {
 	client.rootStop = rootStop
 	client.mu.Unlock()
 	if _, err := os.Stat(client.configPath()); errors.Is(err, os.ErrNotExist) {
-		if installed, installErr := client.installProvisionedConfig(); installErr != nil {
-			client.fail(
-				"Не удалось применить подготовленные настройки",
-				"Передайте администратору архив диагностики.",
-				installErr,
-			)
-		} else if installed {
-			client.Logger.Info("первичная настройка выполнена без действий оператора")
+		if _, activationErr := os.Stat(filepath.Join(client.BaseDir, provisionedClientActivationName)); activationErr == nil {
+			client.update(func(status *ClientStatus) {
+				status.State = "setup"
+				status.Title = "Введите код активации"
+				status.Detail = "Код отдельно показывает центр управления при скачивании программы."
+			})
 		}
 	}
 	if _, err := os.Stat(client.configPath()); err == nil {

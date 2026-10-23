@@ -2,6 +2,7 @@ package serverui
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"intercept/internal/config"
 	"intercept/internal/domain"
 	"intercept/internal/interfaces/localui"
+	"intercept/internal/provisioning"
 	"intercept/internal/runner"
 	"intercept/internal/selfupdate"
 )
@@ -195,24 +197,28 @@ func (handler Handler) destinationWordTemplate(writer http.ResponseWriter, reque
 }
 
 func (handler Handler) clientConfig(writer http.ResponseWriter, request *http.Request) {
-	payload, client, err := handler.Server.ClientConfig(request.Context(), request.PathValue("id"))
+	payload, code, client, err := handler.Server.ClientActivation(request.Context(), request.PathValue("id"))
 	if err != nil {
 		handler.publicError(writer, http.StatusBadRequest, "Не удалось подготовить файл настроек рабочей точки.", err)
 		return
 	}
-	filename := "EAVC Connect Station-" + safeFilename(client.Number) + ".json"
+	filename := "EAVC Connect Station-" + safeFilename(client.Number) + ".activation"
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("X-EAVC-Activation-Code", code)
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	writer.Write(payload)
 }
 
 func (handler Handler) clientPackage(writer http.ResponseWriter, request *http.Request) {
-	payload, client, err := handler.Server.ClientPackage(request.Context(), request.PathValue("id"))
+	payload, code, client, err := handler.Server.ClientPackage(request.Context(), request.PathValue("id"))
 	if err != nil {
 		handler.publicError(writer, http.StatusBadRequest, "Не удалось подготовить готовый комплект рабочей точки.", err)
 		return
 	}
 	filename := "EAVC Connect Station-" + safeFilename(client.Number) + ".zip"
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("X-EAVC-Activation-Code", code)
 	writer.Header().Set("Content-Type", "application/zip")
 	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	writer.Write(payload)
@@ -314,10 +320,17 @@ func (handler Handler) addClient(writer http.ResponseWriter, request *http.Reque
 		handler.publicError(writer, http.StatusBadRequest, "Не удалось создать настройки рабочей точки. Проверьте токен, тему и введённые данные.", err)
 		return
 	}
-	filename := "EAVC Connect Station-" + safeFilename(input.Number) + ".json"
+	sealed, code, err := provisioning.Seal(payload, rand.Reader)
+	if err != nil {
+		handler.publicError(writer, http.StatusInternalServerError, "Не удалось защитить файл активации рабочей точки.", err)
+		return
+	}
+	filename := "EAVC Connect Station-" + safeFilename(input.Number) + ".activation"
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("X-EAVC-Activation-Code", code)
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-	writer.Write(payload)
+	writer.Write(sealed)
 }
 
 func (handler Handler) addDestination(writer http.ResponseWriter, request *http.Request) {

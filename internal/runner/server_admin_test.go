@@ -17,6 +17,7 @@ import (
 	"intercept/internal/application"
 	"intercept/internal/config"
 	"intercept/internal/infrastructure/secrets"
+	"intercept/internal/provisioning"
 )
 
 // Готовый комплект точки должен содержать исполняемый файл, подписанные
@@ -79,7 +80,7 @@ func TestClientPackageContainsRunnableStation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	archivePayload, client, err := server.ClientPackage(ctx, cfg.ClientID)
+	archivePayload, activationCode, client, err := server.ClientPackage(ctx, cfg.ClientID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,15 @@ func TestClientPackageContainsRunnableStation(t *testing.T) {
 	if !bytes.Equal(entries[folder+"EAVC Connect Station.exe"], executable) {
 		t.Fatal("в комплекте отсутствует исполняемый файл рабочей точки")
 	}
-	if _, err := config.DecodeClient(bytes.NewReader(entries[folder+provisionedClientConfigName])); err != nil {
+	sealed := entries[folder+provisionedClientActivationName]
+	if bytes.Contains(sealed, []byte(cfg.Transport.BotToken)) {
+		t.Fatal("токен бота попал в комплект открытым текстом")
+	}
+	plain, err := provisioning.Open(sealed, activationCode)
+	if err != nil {
+		t.Fatalf("файл активации не открылся: %v", err)
+	}
+	if _, err := config.DecodeClient(bytes.NewReader(plain)); err != nil {
 		t.Fatalf("в комплекте повреждены настройки точки: %v", err)
 	}
 	if len(entries[folder+"ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt"]) == 0 {

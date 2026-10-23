@@ -15,9 +15,10 @@ import (
 	"intercept/internal/config"
 	"intercept/internal/infrastructure/secrets"
 	"intercept/internal/infrastructure/telegram"
+	"intercept/internal/provisioning"
 )
 
-const provisionedClientConfigName = "EAVC Connect Station.json"
+const provisionedClientActivationName = "EAVC Connect Station.activation"
 
 // ImportConfig проверяет полученные настройки и только после этого заменяет рабочие.
 // При первой установке доверие задаёт сам комплект, полученный от администратора.
@@ -37,6 +38,11 @@ func (client *Client) ImportConfig(ctx context.Context, payload []byte) error {
 		}
 	} else if !errors.Is(loadErr, os.ErrNotExist) {
 		return loadErr
+	}
+	if _, err := secrets.Load(client.trustedIssuerPath()); errors.Is(err, os.ErrNotExist) {
+		return errors.New("первичная настройка принимается только из защищённого файла активации с отдельным кодом")
+	} else if err != nil {
+		return fmt.Errorf("прочитать доверенный ключ центра: %w", err)
 	}
 	issuer, firstImport, err := client.verifyTrustedIssuer(cfg)
 	if err != nil {
@@ -64,35 +70,48 @@ func (client *Client) ImportConfig(ctx context.Context, payload []byte) error {
 	return nil
 }
 
-// installProvisionedConfig принимает файл, уже вложенный администратором в
-// готовую папку программы. Сетевая проверка здесь не нужна: целостность файла
-// подтверждает подпись, а доступ к Telegram рабочий процесс проверит сам.
-func (client *Client) installProvisionedConfig() (bool, error) {
-	path := filepath.Join(client.BaseDir, provisionedClientConfigName)
+// ActivateProvisionedConfig принимает отдельно переданный код и запускает
+// клиент только после успешной аутентифицированной расшифровки комплекта.
+func (client *Client) ActivateProvisionedConfig(code string) error {
+	if err := client.installProvisionedActivation(code); err != nil {
+		return err
+	}
+	return client.restartWorker(client.applicationContext())
+}
+
+func (client *Client) installProvisionedActivation(code string) error {
+	if err := provisioning.ValidateCode(code); err != nil {
+		return err
+	}
+	path := filepath.Join(client.BaseDir, provisionedClientActivationName)
 	payload, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return errors.New("файл активации не найден рядом с программой")
 	}
 	if err != nil {
-		return false, fmt.Errorf("прочитать подготовленные настройки: %w", err)
+		return fmt.Errorf("прочитать файл активации: %w", err)
 	}
-	cfg, err := config.DecodeClient(bytes.NewReader(payload))
+	plain, err := provisioning.Open(payload, code)
 	if err != nil {
-		return false, fmt.Errorf("проверить подготовленные настройки: %w", err)
+		return err
+	}
+	cfg, err := config.DecodeClient(bytes.NewReader(plain))
+	if err != nil {
+		return fmt.Errorf("проверить подготовленные настройки: %w", err)
 	}
 	issuer, firstImport, err := client.verifyTrustedIssuer(cfg)
 	if err != nil {
-		return false, err
+		return err
 	}
 	canonical, _ := json.Marshal(cfg)
 	if err := client.persistConfig(canonical, issuer, firstImport); err != nil {
-		return false, err
+		return err
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		client.Logger.Warn("не удалось удалить открытый файл первичной настройки", "error", err)
+		client.Logger.Warn("не удалось удалить использованный файл активации", "error", err)
 	}
-	client.Logger.Info("готовые настройки точки установлены", "client_id", cfg.ClientID, "client_number", cfg.ClientNumber)
-	return true, nil
+	client.Logger.Info("точка безопасно активирована", "client_id", cfg.ClientID, "client_number", cfg.ClientNumber)
+	return nil
 }
 
 func (client *Client) persistConfig(payload, issuer []byte, firstImport bool) error {

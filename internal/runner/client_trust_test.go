@@ -15,6 +15,7 @@ import (
 
 	"intercept/internal/config"
 	"intercept/internal/infrastructure/secrets"
+	"intercept/internal/provisioning"
 )
 
 func TestFirstClientConfigTrustsProvisionedCenterAndRejectsAnother(t *testing.T) {
@@ -55,7 +56,7 @@ func TestFirstClientConfigTrustsProvisionedCenterAndRejectsAnother(t *testing.T)
 	}
 }
 
-func TestProvisionedConfigInstallsWithoutOperatorAction(t *testing.T) {
+func TestProvisionedConfigRequiresSeparateActivationCode(t *testing.T) {
 	t.Parallel()
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -77,17 +78,23 @@ func TestProvisionedConfigInstallsWithoutOperatorAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	baseDir := t.TempDir()
-	provisionedPath := filepath.Join(baseDir, provisionedClientConfigName)
-	if err := os.WriteFile(provisionedPath, payload, 0o600); err != nil {
+	sealed, code, err := provisioning.Seal(payload, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisionedPath := filepath.Join(baseDir, provisionedClientActivationName)
+	if err := os.WriteFile(provisionedPath, sealed, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	client := NewClient(baseDir, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	installed, err := client.installProvisionedConfig()
-	if err != nil || !installed {
-		t.Fatalf("готовые настройки не установлены: installed=%v err=%v", installed, err)
+	if err := client.installProvisionedActivation("AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AA"); err == nil {
+		t.Fatal("неверный код активации принят")
+	}
+	if err := client.installProvisionedActivation(code); err != nil {
+		t.Fatalf("готовые настройки не установлены: %v", err)
 	}
 	if _, err := os.Stat(provisionedPath); !os.IsNotExist(err) {
-		t.Fatalf("открытый JSON не удалён после импорта: %v", err)
+		t.Fatalf("использованный файл активации не удалён: %v", err)
 	}
 	stored, err := secrets.Load(client.configPath())
 	if err != nil {

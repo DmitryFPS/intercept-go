@@ -49,6 +49,7 @@ async function refresh() {
     })[status.state] || 'СОСТОЯНИЕ';
     element('version').textContent = 'Версия ' + status.version;
     element('identity').classList.toggle('hidden', !status.configured);
+    element('activation').classList.toggle('hidden', status.configured);
     element('clientName').textContent = status.client_name || '—';
     element('clientNumber').textContent = status.client_number || '—';
     element('clientId').textContent = status.client_id || '—';
@@ -91,6 +92,32 @@ async function controlProcessing(action, button, busyText) {
 element('controlStart').addEventListener('click', event => controlProcessing('start', event.currentTarget, 'Запускаем…'));
 element('controlStop').addEventListener('click', event => controlProcessing('stop', event.currentTarget, 'Останавливаем…'));
 element('controlRefresh').addEventListener('click', event => controlProcessing('refresh', event.currentTarget, 'Обновляем…'));
+
+element('activateClient').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  const code = element('activationCode').value.trim();
+  if (!code) {
+    showMessage('Введите код активации, показанный центром управления.');
+    return;
+  }
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Проверяем…';
+  showMessage('Расшифровываем и проверяем настройки…', 'info');
+  try {
+    await requestJSON('/api/config/activate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({code})
+    });
+    element('activationCode').value = '';
+    showMessage('Рабочая точка активирована. Программа запускается.', 'success');
+    await refresh();
+  } catch (error) {
+    showMessage(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+});
 
 const queueLabels = {
   pending: {

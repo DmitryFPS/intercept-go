@@ -134,6 +134,10 @@ h1 { margin: 4px 0 0; font-size: 25px; }
 .danger-action { border: 1px solid #efb6b6; border-radius: 10px; padding: 10px 14px; background: #fff0f0; color: #b4232c; font-weight: 750; cursor: pointer; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 10px; padding: 18px 28px 4px; }
+.activation { margin: 16px 28px 0; padding: 16px 18px; border: 1px solid #b9cff8; border-radius: 14px; background: #f1f6ff; display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 1.2fr); gap: 18px; align-items: center; }
+.activation p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+.activation-row { display: flex; gap: 9px; }
+.activation-row input { min-width: 0; flex: 1; border: 1px solid #b8c6db; border-radius: 10px; padding: 11px 12px; text-transform: uppercase; letter-spacing: .06em; }
 .primary, .secondary { appearance: none; border: 0; border-radius: 10px; padding: 11px 16px; font-weight: 750; text-decoration: none; cursor: pointer; font-size: 13px; text-align: center; }
 .primary { background: var(--blue); color: #fff; }
 .primary input { display: none; }
@@ -170,6 +174,8 @@ footer { padding: 14px 28px 18px; margin-top: 14px; border-top: 1px solid #edf0f
   .queue { margin: 0 16px; grid-template-columns: 1fr; }
   .queue > div, .queue-detail { border-right: 0; border-bottom: 1px solid #344056; }
   .actions { padding: 16px 16px 2px; flex-direction: column; }
+  .activation { margin-left: 16px; margin-right: 16px; grid-template-columns: 1fr; }
+  .activation-row { flex-direction: column; }
   .primary, .secondary { width: 100%; }
   .message { margin-left: 16px; margin-right: 16px; }
   footer { padding-left: 16px; padding-right: 16px; }

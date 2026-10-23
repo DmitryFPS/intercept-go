@@ -24,6 +24,7 @@ import (
 	"intercept/internal/infrastructure/share"
 	stateDB "intercept/internal/infrastructure/sqlite"
 	"intercept/internal/infrastructure/telegram"
+	"intercept/internal/provisioning"
 )
 
 var destinationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
@@ -353,15 +354,27 @@ func (server *Server) ClientConfig(ctx context.Context, clientID string) ([]byte
 // ClientPackage собирает готовую папку рабочей точки: оператору достаточно
 // распаковать ZIP на Рабочий стол и запустить EXE. Индивидуальный JSON будет
 // автоматически принят при первом запуске и перенесён в защищённое хранилище.
-func (server *Server) ClientPackage(ctx context.Context, clientID string) ([]byte, application.RegisteredClient, error) {
+func (server *Server) ClientActivation(ctx context.Context, clientID string) ([]byte, string, application.RegisteredClient, error) {
 	payload, client, err := server.ClientConfig(ctx, clientID)
 	if err != nil {
-		return nil, application.RegisteredClient{}, err
+		return nil, "", application.RegisteredClient{}, err
+	}
+	sealed, code, err := provisioning.Seal(payload, rand.Reader)
+	if err != nil {
+		return nil, "", application.RegisteredClient{}, fmt.Errorf("зашифровать настройки точки: %w", err)
+	}
+	return sealed, code, client, nil
+}
+
+func (server *Server) ClientPackage(ctx context.Context, clientID string) ([]byte, string, application.RegisteredClient, error) {
+	sealedConfig, activationCode, client, err := server.ClientActivation(ctx, clientID)
+	if err != nil {
+		return nil, "", application.RegisteredClient{}, err
 	}
 	executablePath := filepath.Join(server.BaseDir, "station-template", "EAVC Connect Station.exe")
 	executable, err := os.ReadFile(executablePath)
 	if err != nil {
-		return nil, application.RegisteredClient{}, fmt.Errorf("шаблон программы рабочей точки не найден: %w", err)
+		return nil, "", application.RegisteredClient{}, fmt.Errorf("шаблон программы рабочей точки не найден: %w", err)
 	}
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
@@ -371,7 +384,7 @@ func (server *Server) ClientPackage(ctx context.Context, clientID string) ([]byt
 		data []byte
 	}{
 		{folder + "EAVC Connect Station.exe", executable},
-		{folder + provisionedClientConfigName, payload},
+		{folder + provisionedClientActivationName, sealedConfig},
 		{folder + "ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt", []byte(clientPackageReadme)},
 	}
 	for _, entry := range entries {
@@ -379,16 +392,16 @@ func (server *Server) ClientPackage(ctx context.Context, clientID string) ([]byt
 		header.Modified = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 		part, createErr := archive.CreateHeader(header)
 		if createErr != nil {
-			return nil, application.RegisteredClient{}, fmt.Errorf("создать комплект точки: %w", createErr)
+			return nil, "", application.RegisteredClient{}, fmt.Errorf("создать комплект точки: %w", createErr)
 		}
 		if _, writeErr := part.Write(entry.data); writeErr != nil {
-			return nil, application.RegisteredClient{}, fmt.Errorf("записать комплект точки: %w", writeErr)
+			return nil, "", application.RegisteredClient{}, fmt.Errorf("записать комплект точки: %w", writeErr)
 		}
 	}
 	if err := archive.Close(); err != nil {
-		return nil, application.RegisteredClient{}, fmt.Errorf("завершить комплект точки: %w", err)
+		return nil, "", application.RegisteredClient{}, fmt.Errorf("завершить комплект точки: %w", err)
 	}
-	return output.Bytes(), client, nil
+	return output.Bytes(), activationCode, client, nil
 }
 
 func safePackageName(value string) string {
@@ -410,9 +423,11 @@ const clientPackageReadme = `EAVC CONNECT — РАБОЧАЯ ТОЧКА
 
 1. Скопируйте всю распакованную папку на Рабочий стол.
 2. Запустите «EAVC Connect Station.exe».
-3. Если база EAVC не найдена автоматически, укажите её в блоке «Где находится EAVC».
+3. Введите код активации, который отдельно показал центр управления.
+4. Если база EAVC не найдена автоматически, укажите её в блоке «Где находится EAVC».
 
-Настройки уже подготовлены администратором. Вводить токены, ключи и коды не требуется.
+Токен Telegram и ключ шифрования внутри комплекта защищены кодом активации.
+Не храните код активации рядом с ZIP и не отправляйте их одним сообщением.
 Не удаляйте папки data и logs после первого запуска: в них находятся защищённые настройки, очередь и журналы.
 При неисправности нажмите «Скачать диагностику» и отправьте ZIP администратору.
 `

@@ -83,12 +83,16 @@ async function request(url, options = {}) {
 async function downloadAPI(url, fallbackName) {
   const response = await fetch(url, {cache: 'no-store', headers: {'X-EAVC-Access': accessToken}});
   if (!response.ok) throw new Error('Не удалось подготовить файл.');
+	const activationCode = response.headers.get('X-EAVC-Activation-Code') || '';
   const blob = await response.blob();
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
   link.download = fallbackName;
   link.click();
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+	if (activationCode) {
+		prompt('Сохраните код отдельно от скачанного файла. Он потребуется один раз при первом запуске рабочей точки:', activationCode);
+	}
 }
 
 function post(url, payload) {
@@ -754,12 +758,12 @@ function renderClients() {
     <article class="entity-card">
       <div class="entity-card-head"><div><h3>${escapeHTML(client.name)}</h3><p>Точка № ${escapeHTML(client.number)}</p></div><span class="badge ${client.active ? 'success' : 'neutral'}">${client.active ? 'Активна' : 'Отключена'}</span></div>
       <dl class="entity-meta"><dt>Бот</dt><dd>${escapeHTML(client.bot || 'Не указан')}</dd><dt>Тема обмена</dt><dd>${escapeHTML(client.thread_id)}</dd></dl>
-      <div class="entity-actions"><button class="button primary" data-client-download="package" data-client-id="${escapeHTML(client.id)}">Скачать готовую программу</button><button class="button ghost" data-client-download="config" data-client-id="${escapeHTML(client.id)}">Скачать новые настройки JSON</button></div>
+      <div class="entity-actions"><button class="button primary" data-client-download="package" data-client-id="${escapeHTML(client.id)}">Скачать готовую программу</button><button class="button ghost" data-client-download="config" data-client-id="${escapeHTML(client.id)}">Скачать защищённые настройки</button></div>
     </article>`).join('');
 	$('clientsList').querySelectorAll('[data-client-download]').forEach(button => button.addEventListener('click', async () => {
 		const client = clients.find(item => item.id === button.dataset.clientId);
 		const kind = button.dataset.clientDownload;
-		const extension = kind === 'package' ? 'zip' : 'json';
+		const extension = kind === 'package' ? 'zip' : 'activation';
 		try { await downloadAPI(`/api/clients/${encodeURIComponent(button.dataset.clientId)}/${kind}`, `EAVC Connect Station-${client?.number || 'point'}.${extension}`); }
 		catch (error) { notify(error.message); }
 	}));
@@ -793,15 +797,19 @@ $('clientForm').addEventListener('submit', async event => {
       const error = await response.json();
       throw new Error(error.error || 'Не удалось создать настройки');
     }
+		const activationCode = response.headers.get('X-EAVC-Activation-Code') || '';
     const blob = await response.blob();
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `EAVC Connect Station-${data.get('number')}.json`;
+		link.download = `EAVC Connect Station-${data.get('number')}.activation`;
     link.click();
     URL.revokeObjectURL(link.href);
+		if (activationCode) {
+			prompt('Сохраните код отдельно от файла. Он потребуется один раз при первом запуске рабочей точки:', activationCode);
+		}
     closeDialog('clientDialog');
     await loadClients();
-    notify('Файл настроек проверен и скачан.', true);
+		notify('Защищённый файл активации скачан. Сохраните показанный код отдельно.', true);
   } catch (error) {
     notify(error.message);
   } finally {

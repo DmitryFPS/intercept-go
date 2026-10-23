@@ -35,6 +35,7 @@ func (handler Handler) Routes() http.Handler {
 		localui.WriteJSON(writer, http.StatusOK, handler.Client.Status())
 	})
 	mux.HandleFunc("POST /api/config/import", handler.importConfig)
+	mux.HandleFunc("POST /api/config/activate", handler.activateConfig)
 	mux.HandleFunc("POST /api/eavc/search", handler.searchEAVC)
 	mux.HandleFunc("POST /api/eavc/select", handler.selectEAVC)
 	mux.HandleFunc("POST /api/transport/check", handler.checkTransport)
@@ -45,6 +46,21 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/update/status", handler.updateStatus)
 	mux.HandleFunc("POST /api/update", handler.installUpdate)
 	return localui.SecurityHeaders(mux)
+}
+
+func (handler Handler) activateConfig(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Code string `json:"code"`
+	}
+	if err := localui.ReadJSON(request, &input, 16*1024); err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Введите код активации, показанный центром управления.", err)
+		return
+	}
+	if err := handler.Client.ActivateProvisionedConfig(input.Code); err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Активация не выполнена. Проверьте код и комплект рабочей точки.", err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (handler Handler) updateStatus(writer http.ResponseWriter, _ *http.Request) {

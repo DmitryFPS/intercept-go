@@ -21,11 +21,12 @@
       <article><span id="ackDot" class="dot"></span><div><strong>Подтверждение центра</strong><small id="ackText">Ещё не получено</small></div></article>
     </section>
     <section class="queue"><button class="queue-detail" data-queue-state="pending" type="button"><small>ОЖИДАЮТ ОТПРАВКИ</small><strong id="pending">0</strong><span>Посмотреть</span></button><button class="queue-detail" data-queue-state="uploaded" type="button"><small>ЗАГРУЖЕНЫ, ЖДУТ ЦЕНТР</small><strong id="uploaded">0</strong><span>Посмотреть</span></button><button class="queue-detail" data-queue-state="acknowledged" type="button"><small>ПОДТВЕРЖДЕНЫ</small><strong id="acknowledged">0</strong><span>Посмотреть</span></button><button class="queue-detail" data-queue-state="expired" type="button"><small>НЕ ОТПРАВЛЕНЫ СТАРШЕ 30 МИНУТ</small><strong id="expired">0</strong><span>Посмотреть</span></button></section>
+    <section id="activation" class="activation"><div><strong>Активация рабочей точки</strong><p>Введите отдельный код, который центр показал при скачивании этой программы.</p></div><div class="activation-row"><input id="activationCode" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX"><button id="activateClient" class="primary" type="button">Активировать</button></div></section>
     <section class="actions">
       <button id="controlStart" class="primary" type="button">Старт</button>
       <button id="controlStop" class="secondary" type="button">Стоп</button>
       <button id="controlRefresh" class="secondary" type="button">Обновить</button>
-      <label class="primary">Загрузить настройки<input id="configFile" type="file" accept="application/json,.json"></label>
+      <label class="primary">Загрузить новые настройки<input id="configFile" type="file" accept="application/json,.json"></label>
       <button id="checkTransport" class="secondary" type="button">Проверить связь с центром</button>
       <button id="downloadDiagnostics" class="secondary" type="button">Скачать диагностику</button>
       <label class="secondary">Установить обновление<input id="updateFile" hidden type="file" accept=".zip,application/zip"></label>
