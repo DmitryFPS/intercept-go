@@ -37,7 +37,8 @@ func TestActivateApplicationStartsValidatedProcess(t *testing.T) {
 		BaseDir: baseDir, TokenFile: filepath.ToSlash(filepath.Join("data", "access.dat")),
 		Address: strings.TrimPrefix(server.URL, "http://"),
 	}
-	if err := activateApplication(options, "0.2.0-rc46"); err != nil {
+	committed, err := activateApplication(options, "0.2.0-rc46")
+	if err != nil || !committed {
 		t.Fatalf("activate validated application: %v", err)
 	}
 }
@@ -49,15 +50,16 @@ func TestActivateApplicationRejectsPausedConfiguredProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(writer).Encode(map[string]any{
 			"version": "0.2.0-rc46", "state": "paused", "configured": true, "processing": false,
 		})
 	}))
 	defer server.Close()
-	err := activateApplication(ApplyOptions{
+	committed, err := activateApplication(ApplyOptions{
 		BaseDir: baseDir, TokenFile: "access.dat", Address: strings.TrimPrefix(server.URL, "http://"),
 	}, "0.2.0-rc46")
-	if err == nil || !strings.Contains(err.Error(), "обработка не запущена") {
+	if err == nil || !committed || !strings.Contains(err.Error(), "код 503") {
 		t.Fatalf("paused configured application must fail activation: %v", err)
 	}
 }

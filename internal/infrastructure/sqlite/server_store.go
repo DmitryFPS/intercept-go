@@ -25,7 +25,7 @@ type ServerStore struct {
 func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 	if err := Migrate(ctx, db, []string{
 		serverMigration, serverDeliveryOrderMigration, serverStreamRepairMigration,
-		serverObservabilityMigration, serverIntegrityMigration,
+		serverObservabilityMigration, serverIntegrityMigration, serverHistoryIndexesMigration,
 	}); err != nil {
 		return nil, err
 	}

@@ -139,3 +139,16 @@ UPDATE client_connection_incidents
 	SET started_at=recovered_at
 	WHERE recovered_at IS NOT NULL AND julianday(started_at)>julianday(recovered_at);
 `
+
+const serverHistoryIndexesMigration = `
+CREATE INDEX received_events_history_idx
+	ON received_events(received_at DESC, client_id);
+CREATE INDEX delivery_jobs_delivered_history_idx
+	ON delivery_jobs(state, delivered_at DESC, destination_id);
+CREATE INDEX delivery_jobs_expired_history_idx
+	ON delivery_jobs(state, expired_at DESC, destination_id);
+CREATE INDEX rejected_packets_history_idx
+	ON rejected_packets(received_at DESC);
+CREATE INDEX client_connection_incidents_time_idx
+	ON client_connection_incidents(started_at DESC);
+`

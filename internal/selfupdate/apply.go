@@ -95,10 +95,21 @@ func Apply(options ApplyOptions) error {
 	// в этом же процессе, чтобы между миграцией и рабочим запуском не появлялось
 	// второго окна отказа. До подтверждения команды внешние доставки не идут,
 	// поэтому при ошибке безопасно восстанавливаются и программы, и данные.
-	activationErr := activateApplication(options, options.ToVersion)
+	committed, activationErr := activateApplication(options, options.ToVersion)
 	if activationErr == nil {
 		cleanupOldFiles(options.BaseDir, plan.Manifest.Files)
 		return finishApply(options, Result{State: "success", FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: "Обновление успешно установлено и проверено.", UpdatedAt: time.Now()}, nil)
+	}
+	if committed {
+		// После передачи команды Start рабочая обработка могла уже начаться, даже
+		// если локальный HTTP-ответ потерялся. Возврат снимка данных в этот момент
+		// создаст дубли или потеряет подтверждения. Новая версия остаётся запущена,
+		// а неоднозначный результат фиксируется для диагностики.
+		cleanupOldFiles(options.BaseDir, plan.Manifest.Files)
+		return finishApply(options, Result{
+			State: "failed", FromVersion: options.FromVersion, ToVersion: options.ToVersion,
+			Message: "Новая версия проверена и получила команду запуска, но итог обработки не подтверждён. Данные не откатывались во избежание дублей; передайте диагностику администратору.", UpdatedAt: time.Now(),
+		}, activationErr)
 	}
 	stopCheckedProcess(validator)
 	rollbackErr := rollbackInstallation(options.BaseDir, backupRoot, plan.Manifest.Files, true)
@@ -299,25 +310,30 @@ func healthVersion(options ApplyOptions) (string, error) {
 	return status.Version, nil
 }
 
-func activateApplication(options ApplyOptions, expectedVersion string) error {
+func activateApplication(options ApplyOptions, expectedVersion string) (bool, error) {
 	token, err := secrets.Load(filepath.Join(options.BaseDir, filepath.FromSlash(options.TokenFile)))
 	if err != nil {
-		return err
+		return false, err
 	}
 	url := "http://" + options.Address + "/api/control/start"
 	request, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	request.Header.Set("X-EAVC-Access", strings.TrimSpace(string(token)))
 	request.Header.Set("Origin", "http://"+options.Address)
 	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
 	if err != nil {
-		return err
+		// Запрос мог быть обработан до потери ответа. Проверяем фактическое
+		// состояние, но больше не считаем безопасным возврат снимка данных.
+		if statusErr := waitForActivatedApplication(options, expectedVersion, 45*time.Second); statusErr == nil {
+			return true, nil
+		}
+		return true, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("включение обработки вернуло код %d", response.StatusCode)
+		return true, fmt.Errorf("включение обработки вернуло код %d", response.StatusCode)
 	}
 	var status struct {
 		Version    string `json:"version"`
@@ -326,16 +342,39 @@ func activateApplication(options ApplyOptions, expectedVersion string) error {
 		Processing bool   `json:"processing"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(&status); err != nil {
-		return err
+		if statusErr := waitForActivatedApplication(options, expectedVersion, 45*time.Second); statusErr == nil {
+			return true, nil
+		}
+		return true, err
 	}
 	if status.Version != expectedVersion {
-		return fmt.Errorf("после обновления запущена версия %q вместо %q", status.Version, expectedVersion)
+		return true, fmt.Errorf("после обновления запущена версия %q вместо %q", status.Version, expectedVersion)
 	}
 	state := strings.ToLower(strings.TrimSpace(status.State))
-	if state == "" || state == "starting" || state == "error" || (status.Configured && !status.Processing) {
-		return fmt.Errorf("обработка не запущена: состояние %q", status.State)
+	if state == "" || state == "error" || (status.Configured && !status.Processing) {
+		if statusErr := waitForActivatedApplication(options, expectedVersion, 45*time.Second); statusErr == nil {
+			return true, nil
+		}
+		return true, fmt.Errorf("обработка не запущена: состояние %q", status.State)
 	}
-	return nil
+	return true, nil
+}
+
+func waitForActivatedApplication(options ApplyOptions, expectedVersion string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		version, err := healthVersion(options)
+		if err == nil && version == expectedVersion {
+			return nil
+		}
+		lastErr = err
+		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("версия приложения не подтверждена")
+	}
+	return lastErr
 }
 
 func finishApply(options ApplyOptions, result Result, applyErr error) error {
