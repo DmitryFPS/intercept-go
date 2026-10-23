@@ -12,7 +12,7 @@ import (
 // игнорирует одноимённый файл, не относящийся к EAVC.
 func TestDiscoverReturnsOnlyValidatedEAVCDatabase(t *testing.T) {
 	root := t.TempDir()
-	validDir := filepath.Join(root, "EAVC")
+	validDir := filepath.Join(root, "EAVC", "data-hub")
 	if err := os.MkdirAll(validDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -30,6 +30,29 @@ func TestDiscoverReturnsOnlyValidatedEAVCDatabase(t *testing.T) {
 	}
 	if candidates[0].Path != filepath.Join(validDir, databaseFilename) {
 		t.Fatalf("найден неожиданный путь: %s", candidates[0].Path)
+	}
+}
+
+// Проверяет фактическую структуру установки EAVC на рабочих точках:
+// переносимый клиент лежит рядом с каталогом EAVC, а база — в data-hub.
+func TestDiscoverFindsProductionDataHubNextToStation(t *testing.T) {
+	labRoot := t.TempDir()
+	stationRoot := filepath.Join(labRoot, "EAVC Connect Station")
+	databasePath := filepath.Join(labRoot, "EAVC", "data-hub", databaseFilename)
+	if err := os.MkdirAll(stationRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(databasePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	createDiscoveryDatabase(t, databasePath)
+
+	candidates, err := Discover(context.Background(), QuickRoots(stationRoot), false)
+	if err != nil {
+		t.Fatalf("быстрый поиск завершился ошибкой: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].Path != databasePath {
+		t.Fatalf("ожидалась база %q, получено %#v", databasePath, candidates)
 	}
 }
 

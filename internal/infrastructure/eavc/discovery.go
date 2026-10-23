@@ -90,8 +90,11 @@ func Discover(ctx context.Context, roots []string, recursive bool) ([]Candidate,
 func nearbyCandidates(root string) []string {
 	return []string{
 		filepath.Join(root, databaseFilename),
+		filepath.Join(root, "data-hub", databaseFilename),
 		filepath.Join(root, "EAVC", databaseFilename),
+		filepath.Join(root, "EAVC", "data-hub", databaseFilename),
 		filepath.Join(root, "eavc", databaseFilename),
+		filepath.Join(root, "eavc", "data-hub", databaseFilename),
 	}
 }
 
