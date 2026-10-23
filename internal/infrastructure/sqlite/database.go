@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,21 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+var (
+	// ErrMigrationTooNew означает, что база уже использовалась более новой
+	// версией приложения и повторять запуск без обновления бессмысленно.
+	ErrMigrationTooNew = errors.New("схема базы новее программы")
+	// ErrMigrationChanged защищает данные от запуска с изменённой уже
+	// применённой миграцией.
+	ErrMigrationChanged = errors.New("изменена применённая миграция")
+)
+
+// IsPermanentMigrationError отличает несовместимость схемы от временной
+// блокировки или недоступности файла, которые можно безопасно повторить.
+func IsPermanentMigrationError(err error) bool {
+	return errors.Is(err, ErrMigrationTooNew) || errors.Is(err, ErrMigrationChanged)
+}
 
 // OpenState открывает собственную базу приложения и применяет безопасные pragma.
 func OpenState(path string) (*sql.DB, error) {
@@ -83,7 +99,7 @@ func Migrate(ctx context.Context, db *sql.DB, migrations []string) error {
 		return err
 	}
 	if newest > len(migrations) {
-		return fmt.Errorf("база создана более новой версией программы (схема %d, поддерживается %d)", newest, len(migrations))
+		return fmt.Errorf("%w (схема %d, поддерживается %d)", ErrMigrationTooNew, newest, len(migrations))
 	}
 
 	for index, migration := range migrations {
@@ -103,7 +119,7 @@ func Migrate(ctx context.Context, db *sql.DB, migrations []string) error {
 					return fmt.Errorf("записать отпечаток миграции %d: %w", version, err)
 				}
 			} else if stored != checksum {
-				return fmt.Errorf("миграция %d изменена после применения; запуск остановлен для защиты данных", version)
+				return fmt.Errorf("%w: миграция %d; запуск остановлен для защиты данных", ErrMigrationChanged, version)
 			}
 			continue
 		}

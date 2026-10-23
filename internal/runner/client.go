@@ -158,13 +158,17 @@ type Client struct {
 	rootStop       context.CancelFunc
 	background     sync.WaitGroup
 	pendingProbeID string
+	storageOpener  localQueueOpener
+	storageRetry   time.Duration
 }
 
 // NewClient собирает переносимое приложение вокруг выбранной рабочей папки.
 func NewClient(baseDir, version string, logger *slog.Logger) *Client {
 	return &Client{
 		BaseDir: baseDir, Version: version, Logger: logger,
-		status: ClientStatus{State: "setup", Title: "Нужны настройки", Detail: "Загрузите файл настроек, который прислал администратор.", Version: version},
+		status:        ClientStatus{State: "setup", Title: "Нужны настройки", Detail: "Загрузите файл настроек, который прислал администратор.", Version: version},
+		storageOpener: openLocalQueueOnce,
+		storageRetry:  5 * time.Second,
 	}
 }
 

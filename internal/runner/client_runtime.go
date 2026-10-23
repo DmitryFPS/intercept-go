@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"path/filepath"
 	"sync"
 	"time"
@@ -14,6 +15,56 @@ import (
 	stateDB "intercept/internal/infrastructure/sqlite"
 	"intercept/internal/infrastructure/telegram"
 )
+
+type localQueueHandle struct {
+	database *sql.DB
+	queue    *stateDB.ClientQueue
+}
+
+type localQueueOpener func(context.Context, string) (localQueueHandle, error)
+
+func openLocalQueueOnce(ctx context.Context, path string) (localQueueHandle, error) {
+	database, err := stateDB.OpenState(path)
+	if err != nil {
+		return localQueueHandle{}, err
+	}
+	queue, err := stateDB.NewClientQueue(ctx, database)
+	if err != nil {
+		_ = database.Close()
+		return localQueueHandle{}, err
+	}
+	return localQueueHandle{database: database, queue: queue}, nil
+}
+
+func (client *Client) waitForLocalQueue(ctx context.Context, path string) (localQueueHandle, error) {
+	delay := client.storageRetry
+	if delay <= 0 {
+		delay = 5 * time.Second
+	}
+	for {
+		handle, err := client.storageOpener(ctx, path)
+		if err == nil {
+			return handle, nil
+		}
+		if stateDB.IsPermanentMigrationError(err) {
+			return localQueueHandle{}, err
+		}
+		client.transientFailure(
+			"Локальное хранилище временно недоступно",
+			"Данные сохранены. Программа повторит открытие автоматически.",
+			err,
+		)
+		if !waitForRetry(ctx, delay) {
+			return localQueueHandle{}, ctx.Err()
+		}
+		if delay < time.Minute {
+			delay *= 2
+			if delay > time.Minute {
+				delay = time.Minute
+			}
+		}
+	}
+}
 
 const (
 	maintenanceInterval = 6 * time.Hour
@@ -95,25 +146,20 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		return
 	}
 	defer source.Close()
-	db, err := stateDB.OpenState(filepath.Join(client.BaseDir, "data", "client.db"))
+	storage, err := client.waitForLocalQueue(ctx, filepath.Join(client.BaseDir, "data", "client.db"))
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		client.fail(
 			"Не удалось открыть локальное хранилище",
-			"Перезапустите программу. Если ошибка повторится, скачайте диагностику.",
+			"Схема локального хранилища несовместима с этой версией. Установите актуальное обновление.",
 			err,
 		)
 		return
 	}
+	db, queue := storage.database, storage.queue
 	defer db.Close()
-	queue, err := stateDB.NewClientQueue(ctx, db)
-	if err != nil {
-		client.fail(
-			"Не удалось открыть локальное хранилище",
-			"Перезапустите программу. Если ошибка повторится, скачайте диагностику.",
-			err,
-		)
-		return
-	}
 	api, err := telegram.New(cfg.Transport.BotToken, nil)
 	if err != nil {
 		client.fail(
