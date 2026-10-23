@@ -63,3 +63,35 @@ func TestActivateApplicationRejectsPausedConfiguredProcess(t *testing.T) {
 		t.Fatalf("paused configured application must fail activation: %v", err)
 	}
 }
+
+func TestActivateApplicationWaitsUntilStartingProcessIsReady(t *testing.T) {
+	baseDir := t.TempDir()
+	tokenPath := filepath.Join(baseDir, "access.dat")
+	const token = "test-access-token-with-at-least-32-characters"
+	if err := secrets.Save(tokenPath, []byte(token)); err != nil {
+		t.Fatal(err)
+	}
+	statusChecks := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost {
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"version": "0.2.0-rc50", "state": "starting", "configured": true, "processing": true,
+			})
+			return
+		}
+		statusChecks++
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"version": "0.2.0-rc50", "state": "running", "configured": true, "processing": true,
+		})
+	}))
+	defer server.Close()
+	committed, err := activateApplication(ApplyOptions{
+		BaseDir: baseDir, TokenFile: "access.dat", Address: strings.TrimPrefix(server.URL, "http://"),
+	}, "0.2.0-rc50")
+	if err != nil || !committed {
+		t.Fatalf("ожидание запуска завершилось ошибкой: %v", err)
+	}
+	if statusChecks == 0 {
+		t.Fatal("обновлятор не дождался контрольного статуса после состояния starting")
+	}
+}

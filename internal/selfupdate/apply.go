@@ -351,7 +351,7 @@ func activateApplication(options ApplyOptions, expectedVersion string) (bool, er
 		return true, fmt.Errorf("после обновления запущена версия %q вместо %q", status.Version, expectedVersion)
 	}
 	state := strings.ToLower(strings.TrimSpace(status.State))
-	if state == "" || state == "error" || (status.Configured && !status.Processing) {
+	if state == "" || state == "starting" || state == "error" || (status.Configured && !status.Processing) {
 		if statusErr := waitForActivatedApplication(options, expectedVersion, 45*time.Second); statusErr == nil {
 			return true, nil
 		}
