@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -347,6 +349,7 @@ func (server *Server) gateways(cfg config.Server) map[string]application.Deliver
 					Protection:      destination.Protection,
 					MessageTemplate: destination.MessageTemplate,
 					StatePath:       filepath.Join(server.BaseDir, "data", "telegram-"+safeID(id)+".json"),
+					StateScope:      telegramStateScope(destination.BotToken, destination.ChatID),
 					Logger:          server.Logger,
 				}
 			}
@@ -360,6 +363,11 @@ func (server *Server) gateways(cfg config.Server) map[string]application.Deliver
 		}
 	}
 	return result
+}
+
+func telegramStateScope(botToken string, chatID int64) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(botToken) + "\x00" + strconv.FormatInt(chatID, 10)))
+	return hex.EncodeToString(digest[:16])
 }
 
 func (server *Server) statusLoop(ctx context.Context) {

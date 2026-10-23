@@ -404,3 +404,47 @@ func TestDestinationStateDropsRecordsOlderThanRetention(t *testing.T) {
 		t.Fatal("актуальное состояние удалено")
 	}
 }
+
+func TestDestinationDoesNotReuseMessageIDsAfterTargetChange(t *testing.T) {
+	t.Parallel()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{
+		Scope: "old-target",
+		Items: map[string]destinationItem{"textile|source-1": {
+			ThreadID: 42,
+			Blocks:   map[string]destinationBlock{"__record__": {MessageIDs: []int64{77}}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		methods = append(methods, method)
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"ok": true, "result": map[string]any{"message_id": 101},
+		})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1002, StatePath: statePath, StateScope: "new-target"}
+	event := domain.Event{
+		ClientID: "textile", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
+		Position: domain.Position{UnitName: "позиция"},
+		Blocks:   []domain.ContentBlock{{Key: "12.00", Text: "12.00\n-Текст"}},
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 1 || methods[0] != "sendMessage" {
+		t.Fatalf("старый ID использован в новом назначении: %v", methods)
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil || current.Scope != "new-target" {
+		t.Fatalf("новая область состояния не сохранена: %#v err=%v", current, err)
+	}
+}

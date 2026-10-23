@@ -10,6 +10,7 @@ import (
 )
 
 type destinationState struct {
+	Scope string                     `json:"scope,omitempty"`
 	Items map[string]destinationItem `json:"items"`
 }
 

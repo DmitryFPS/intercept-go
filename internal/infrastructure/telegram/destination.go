@@ -22,6 +22,7 @@ type Destination struct {
 	Protection      string
 	MessageTemplate string
 	StatePath       string
+	StateScope      string
 	Logger          *slog.Logger
 
 	mu    sync.Mutex
@@ -178,7 +179,7 @@ func (destination *Destination) lockItem(key string) func() {
 func (destination *Destination) loadItem(key string) (destinationItem, error) {
 	destination.mu.Lock()
 	defer destination.mu.Unlock()
-	current, err := loadDestinationState(destination.StatePath)
+	current, err := destination.loadState()
 	if err != nil {
 		return destinationItem{}, err
 	}
@@ -188,7 +189,7 @@ func (destination *Destination) loadItem(key string) (destinationItem, error) {
 func (destination *Destination) saveItem(key string, item destinationItem, remove bool) error {
 	destination.mu.Lock()
 	defer destination.mu.Unlock()
-	current, err := loadDestinationState(destination.StatePath)
+	current, err := destination.loadState()
 	if err != nil {
 		return err
 	}
@@ -199,6 +200,24 @@ func (destination *Destination) saveItem(key string, item destinationItem, remov
 		current.Items[key] = item
 	}
 	return saveDestinationState(destination.StatePath, current)
+}
+
+func (destination *Destination) loadState() (destinationState, error) {
+	current, err := loadDestinationState(destination.StatePath)
+	if err != nil {
+		return current, err
+	}
+	scope := strings.TrimSpace(destination.StateScope)
+	if scope == "" {
+		return current, nil
+	}
+	if current.Scope != "" && current.Scope != scope {
+		// Идентификаторы сообщений имеют смысл только для конкретной пары
+		// бот+группа. После смены назначения не редактируем сообщения старой пары.
+		return destinationState{Scope: scope, Items: make(map[string]destinationItem)}, nil
+	}
+	current.Scope = scope
+	return current, nil
 }
 
 func (destination *Destination) upsertBlock(
