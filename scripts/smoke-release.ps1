@@ -14,10 +14,9 @@ $succeeded = $false
 
 function Wait-LocalApi {
     param(
-        [string]$BootstrapUri,
         [string]$StatusUri,
         [System.Diagnostics.Process]$Process,
-        [Microsoft.PowerShell.Commands.WebRequestSession]$Session
+        [hashtable]$Headers
     )
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
@@ -25,8 +24,7 @@ function Wait-LocalApi {
             throw "Приложение завершилось с кодом $($Process.ExitCode) до запуска локального интерфейса: $($Process.StartInfo.FileName)"
         }
         try {
-            Invoke-WebRequest -Uri $BootstrapUri -WebSession $Session -UseBasicParsing -TimeoutSec 2 | Out-Null
-            return Invoke-RestMethod -Uri $StatusUri -WebSession $Session -TimeoutSec 2
+            return Invoke-RestMethod -Uri $StatusUri -Headers $Headers -TimeoutSec 2
         }
         catch {
             Start-Sleep -Milliseconds 250
@@ -73,9 +71,8 @@ try {
         $accessToken = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))
         $process = Start-Process -FilePath $executable.FullName -ArgumentList @('--no-browser', "--access-token=$accessToken") -WorkingDirectory $executable.DirectoryName -WindowStyle Hidden -PassThru
         $processes.Add($process)
-        $session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
-        $bootstrapUri = $case.Uri.Replace('/api/status', '/?access=' + [uri]::EscapeDataString($accessToken))
-        $status = Wait-LocalApi -BootstrapUri $bootstrapUri -StatusUri $case.Uri -Process $process -Session $session
+        $headers = @{ 'X-EAVC-Access' = $accessToken }
+        $status = Wait-LocalApi -StatusUri $case.Uri -Process $process -Headers $headers
         if ($process.HasExited) {
             throw "Приложение $($case.Exe) завершилось во время smoke-теста"
         }
@@ -83,7 +80,7 @@ try {
             throw "Приложение $($case.Exe) вернуло статус без версии"
         }
         $diagnosticsUri = $case.Uri.Replace('/api/status', '/api/diagnostics')
-        $diagnostics = Invoke-WebRequest -Uri $diagnosticsUri -WebSession $session -UseBasicParsing -TimeoutSec 5
+        $diagnostics = Invoke-WebRequest -Uri $diagnosticsUri -Headers $headers -UseBasicParsing -TimeoutSec 5
         if ($diagnostics.Headers['Content-Type'] -notlike 'application/zip*' -or $diagnostics.RawContentLength -lt 100) {
             throw "Приложение $($case.Exe) не сформировало диагностический ZIP"
         }
