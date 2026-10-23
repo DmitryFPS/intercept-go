@@ -18,3 +18,30 @@ func TestWaitingStateUsesConciseOperatorText(t *testing.T) {
 		t.Error("на операторском экране не должно быть лишней надписи о повторе")
 	}
 }
+
+func TestOperatorActionsFollowProcessingState(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(application)
+	checks := []string{
+		"setDisabled('controlStart', operationBusy || !configured || processing)",
+		"setDisabled('controlStop', operationBusy || !processing)",
+		"setDisabled('controlRefresh', operationBusy || !configured || !processing)",
+		"setDisabled('checkTransport', operationBusy || !configured || !processing)",
+	}
+	for _, expected := range checks {
+		if !strings.Contains(content, expected) {
+			t.Errorf("не зафиксирована логика доступности кнопки: %s", expected)
+		}
+	}
+
+	styles, err := assets.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(styles), "cursor: not-allowed") {
+		t.Error("заблокированная кнопка должна визуально отличаться от доступной")
+	}
+}

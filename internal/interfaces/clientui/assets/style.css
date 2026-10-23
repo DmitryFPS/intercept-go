@@ -144,6 +144,16 @@ h1 { margin: 4px 0 0; font-size: 25px; }
 .secondary { background: #edf1f7; color: #273247; }
 .primary:hover { background: #174fd4; }
 .secondary:hover { background: #e3e9f2; }
+.primary:disabled, .secondary:disabled,
+.primary.disabled, .secondary.disabled {
+  background: #e8edf4;
+  color: #98a3b3;
+  border: 1px solid #dce3ec;
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 1;
+  pointer-events: none;
+}
 
 .message { min-height: 0; margin: 10px 28px 0; color: #a9252d; font-size: 13px; }
 .message:not(:empty) { padding: 10px 12px; border: 1px solid #efc5c7; border-radius: 10px; background: #fff2f2; }

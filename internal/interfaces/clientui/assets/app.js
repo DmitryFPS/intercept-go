@@ -10,6 +10,41 @@ const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, character =>
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 })[character]);
 let searchController;
+let lastStatus;
+let operationBusy = false;
+
+function setDisabled(id, disabled) {
+  const control = element(id);
+  control.disabled = disabled;
+  control.setAttribute('aria-disabled', String(disabled));
+}
+
+function setUploadDisabled(labelId, inputId, disabled) {
+  const label = element(labelId);
+  element(inputId).disabled = disabled;
+  label.classList.toggle('disabled', disabled);
+  label.setAttribute('aria-disabled', String(disabled));
+}
+
+function applyActionAvailability(status = lastStatus) {
+  if (!status) return;
+  const processing = Boolean(status.processing);
+  const configured = Boolean(status.configured);
+  setDisabled('controlStart', operationBusy || !configured || processing);
+  setDisabled('controlStop', operationBusy || !processing);
+  setDisabled('controlRefresh', operationBusy || !configured || !processing);
+  setDisabled('checkTransport', operationBusy || !configured || !processing);
+  for (const id of ['downloadDiagnostics', 'saveEavc', 'quickSearch', 'fullSearch', 'activateClient']) {
+    setDisabled(id, operationBusy);
+  }
+  setUploadDisabled('configUpload', 'configFile', operationBusy);
+  setUploadDisabled('updateUpload', 'updateFile', operationBusy);
+}
+
+function setOperationBusy(busy) {
+  operationBusy = busy;
+  applyActionAvailability();
+}
 
 function showMessage(text = '', tone = 'error') {
   const message = element('message');
@@ -39,6 +74,7 @@ async function downloadAPI(url, fallbackName) {
 async function refresh() {
   try {
     const status = await requestJSON('/api/status', {cache: 'no-store'});
+    lastStatus = status;
     element('hero').className = 'hero ' + status.state;
     element('title').textContent = status.title;
     element('detail').textContent = status.detail;
@@ -64,9 +100,7 @@ async function refresh() {
     element('uploaded').textContent = status.queue?.uploaded || 0;
     element('acknowledged').textContent = status.queue?.acknowledged || 0;
     element('expired').textContent = status.queue?.expired || 0;
-    element('controlStart').disabled = status.processing || !status.configured;
-    element('controlStop').disabled = !status.processing;
-    element('controlRefresh').disabled = !status.configured;
+    applyActionAvailability(status);
     if (status.eavc_path && !element('eavcPath').value) element('eavcPath').value = status.eavc_path;
   } catch (error) {
     console.error(error);
@@ -76,16 +110,16 @@ async function refresh() {
 
 async function controlProcessing(action, button, busyText) {
   const original = button.textContent;
-  button.disabled = true;
+  setOperationBusy(true);
   button.textContent = busyText;
   try {
     await requestJSON(`/api/control/${action}`, {method: 'POST'});
     showMessage(action === 'stop' ? 'Обработка остановлена. Очередь сохранена.' : 'Команда выполнена.', 'success');
-    await refresh();
   } catch (error) {
     showMessage(error.message);
   } finally {
     button.textContent = original;
+    try { await refresh(); } finally { setOperationBusy(false); }
   }
 }
 
@@ -101,7 +135,7 @@ element('activateClient').addEventListener('click', async event => {
     return;
   }
   const label = button.textContent;
-  button.disabled = true;
+  setOperationBusy(true);
   button.textContent = 'Проверяем…';
   showMessage('Расшифровываем и проверяем настройки…', 'info');
   try {
@@ -114,8 +148,8 @@ element('activateClient').addEventListener('click', async event => {
   } catch (error) {
     showMessage(error.message);
   } finally {
-    button.disabled = false;
     button.textContent = label;
+    setOperationBusy(false);
   }
 });
 
@@ -190,6 +224,7 @@ element('clearQueue').addEventListener('click', async () => {
 
 async function searchEAVC(extended) {
   searchController = new AbortController();
+  setOperationBusy(true);
   element('cancelSearch').classList.remove('hidden');
   showMessage(extended ? 'Ищем базы EAVC на дисках…' : 'Ищем EAVC рядом с программой…', 'info');
   element('eavcCandidates').replaceChildren();
@@ -204,6 +239,7 @@ async function searchEAVC(extended) {
   } finally {
     searchController = undefined;
     element('cancelSearch').classList.add('hidden');
+    setOperationBusy(false);
   }
 }
 
@@ -227,6 +263,7 @@ function showCandidates(candidates) {
 }
 
 async function selectEAVC(path) {
+  setOperationBusy(true);
   showMessage('Проверяем выбранную базу…', 'info');
   try {
     await requestJSON('/api/eavc/select', {
@@ -237,12 +274,15 @@ async function selectEAVC(path) {
     await refresh();
   } catch (error) {
     showMessage(error.message);
+  } finally {
+    setOperationBusy(false);
   }
 }
 
 element('configFile').addEventListener('change', async event => {
   const file = event.target.files[0];
   if (!file) return;
+  setOperationBusy(true);
   showMessage('Проверяем настройки…', 'info');
   const form = new FormData();
   form.append('config', file);
@@ -254,6 +294,7 @@ element('configFile').addEventListener('change', async event => {
     showMessage(error.message);
   } finally {
     event.target.value = '';
+    setOperationBusy(false);
   }
 });
 
@@ -262,17 +303,22 @@ element('fullSearch').addEventListener('click', () => searchEAVC(true));
 element('cancelSearch').addEventListener('click', () => searchController?.abort());
 element('saveEavc').addEventListener('click', () => selectEAVC(element('eavcPath').value));
 element('checkTransport').addEventListener('click', async () => {
+  setOperationBusy(true);
   showMessage('Отправляем проверочный пакет…', 'info');
   try {
     await requestJSON('/api/transport/check', {method: 'POST'});
     showMessage('Пакет отправлен. Ответ центра появится в блоке «Подтверждение центра».', 'success');
   } catch (error) {
     showMessage(error.message);
+  } finally {
+    setOperationBusy(false);
   }
 });
 element('downloadDiagnostics').addEventListener('click', async () => {
+  setOperationBusy(true);
   try { await downloadAPI('/api/diagnostics', 'EAVC-Connect-Station-diagnostics.zip'); }
   catch (error) { showMessage(error.message); }
+  finally { setOperationBusy(false); }
 });
 
 element('updateFile').addEventListener('change', async event => {
@@ -284,6 +330,7 @@ element('updateFile').addEventListener('change', async event => {
   }
   const form = new FormData();
   form.append('update', file);
+  setOperationBusy(true);
   showMessage('Проверяем цифровую подпись и готовим обновление…', 'info');
   try {
     const result = await requestJSON('/api/update', {method: 'POST', body: form});
@@ -292,6 +339,7 @@ element('updateFile').addEventListener('change', async event => {
     showMessage(error.message);
   } finally {
     event.target.value = '';
+    setOperationBusy(false);
   }
 });
 
