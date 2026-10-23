@@ -35,6 +35,21 @@ func TestRecentTransportPacketRejectsBacklogAndFutureTime(t *testing.T) {
 	}
 }
 
+func TestDuplicateAcknowledgementIsSuppressedOnlyTemporarily(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	recent := map[string]time.Time{"event-1": now}
+	if acknowledgementDue(recent, "event-1", now.Add(time.Minute)) {
+		t.Fatal("плотный повтор одного подтверждения не подавлен")
+	}
+	if !acknowledgementDue(recent, "event-1", now.Add(duplicateAcknowledgementInterval)) {
+		t.Fatal("повтор после защитного интервала должен быть разрешён")
+	}
+	if !acknowledgementDue(recent, "event-2", now) {
+		t.Fatal("подтверждение другого события ошибочно подавлено")
+	}
+}
+
 func TestClearDestinationThreads(t *testing.T) {
 	t.Parallel()
 	rules := domain.RuleSet{

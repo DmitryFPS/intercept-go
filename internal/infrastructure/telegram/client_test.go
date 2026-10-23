@@ -63,6 +63,17 @@ func TestSendLimiterHonorsSharedCooldown(t *testing.T) {
 	}
 }
 
+func TestPrivateRecipientLimiterSeparatesBots(t *testing.T) {
+	t.Parallel()
+	first := privateRecipientLimiterID("@First_Point_Bot")
+	if first <= 0 || first != privateRecipientLimiterID("first_point_bot") {
+		t.Fatalf("идентификатор одного бота должен быть положительным и стабильным: %d", first)
+	}
+	if first == privateRecipientLimiterID("second_point_bot") {
+		t.Fatal("разные боты ошибочно делят ограничение одного личного диалога")
+	}
+}
+
 // Сетевая ошибка стандартной библиотеки может содержать полный URL Bot API;
 // токен должен быть удалён ещё до передачи ошибки в журнал.
 func TestTelegramClientRemovesTokenFromTransportError(t *testing.T) {

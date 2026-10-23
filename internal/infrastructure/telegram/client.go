@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -246,7 +247,11 @@ func (client *Client) SendDocument(ctx context.Context, chatID, threadID int64, 
 
 // SendMessage отправляет личное машинное подтверждение указанному боту.
 func (client *Client) SendMessage(ctx context.Context, chatID int64, username, text string) (Message, error) {
-	if err := client.sends.wait(ctx, chatID); err != nil {
+	limiterID := chatID
+	if strings.TrimSpace(username) != "" {
+		limiterID = privateRecipientLimiterID(username)
+	}
+	if err := client.sends.wait(ctx, limiterID); err != nil {
 		return Message{}, err
 	}
 	target := any(chatID)
@@ -256,6 +261,18 @@ func (client *Client) SendMessage(ctx context.Context, chatID int64, username, t
 	var message Message
 	err := client.callJSON(ctx, "sendMessage", map[string]any{"chat_id": target, "text": text}, &message)
 	return message, err
+}
+
+// privateRecipientLimiterID не позволяет ответам разным ботам ошибочно делить
+// одно ограничение личного диалога. Общий лимит бота при этом остаётся единым.
+func privateRecipientLimiterID(username string) int64 {
+	digest := fnv.New64a()
+	_, _ = digest.Write([]byte(strings.ToLower(strings.TrimPrefix(strings.TrimSpace(username), "@"))))
+	value := int64(digest.Sum64() & ((1 << 63) - 1))
+	if value == 0 {
+		return 1
+	}
+	return value
 }
 
 // SendText публикует текст в указанную группу и тему.

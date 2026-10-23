@@ -95,7 +95,11 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		return
 	}
 	for {
-		if err := api.DeleteWebhook(ctx, false); err == nil {
+		// Клиентская очередь является источником истины и повторяет пакет до
+		// подтверждения. Поэтому после перезапуска центра безопаснее удалить
+		// накопленные Telegram-дубли: актуальные неподтверждённые события точки
+		// пришлют повторно, а старый хвост не заблокирует свежие сигналы связи.
+		if err := api.DeleteWebhook(ctx, true); err == nil {
 			break
 		} else {
 			server.warn(
@@ -140,6 +144,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	// выбрать одно задание до фиксации результата и отправить его дважды.
 	defer background.Wait()
 	offset := int64(0)
+	recentAcknowledgements := make(map[string]time.Time)
 	if raw, exists, _ := server.Store.Value(ctx, serverOffsetName); exists {
 		offset, _ = strconv.ParseInt(raw, 10, 64)
 	}
@@ -207,8 +212,13 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 				"event_id", result.EventID, "status", result.Status,
 				"new_event", result.Accepted, "sender_bot", result.ClientBotUsername,
 			)
-			if err := receiver.Acknowledge(ctx, result.ClientBotUsername, result.EventID, result.Status); err != nil {
-				server.Logger.Warn("не удалось подтвердить событие", "event_id", result.EventID, "error", err)
+			acknowledgedAt := time.Now().UTC()
+			if acknowledgementDue(recentAcknowledgements, result.EventID, acknowledgedAt) {
+				if err := receiver.Acknowledge(ctx, result.ClientBotUsername, result.EventID, result.Status); err != nil {
+					server.Logger.Warn("не удалось подтвердить событие", "event_id", result.EventID, "error", err)
+				} else {
+					recentAcknowledgements[result.EventID] = acknowledgedAt
+				}
 			}
 			server.deleteTransportPacket(ctx, receiver, packet.MessageID)
 			now := time.Now().UTC()
@@ -220,6 +230,25 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		}
 		server.retryTransportDeletions(ctx, receiver)
 	}
+}
+
+const duplicateAcknowledgementInterval = 90 * time.Second
+
+// acknowledgementDue подавляет плотную серию одинаковых ответов на дубли,
+// но разрешает повтор через интервал — например, если первый ответ потерялся.
+func acknowledgementDue(recent map[string]time.Time, eventID string, now time.Time) bool {
+	if previous, exists := recent[eventID]; exists && now.Sub(previous) < duplicateAcknowledgementInterval {
+		return false
+	}
+	if len(recent) > 4096 {
+		cutoff := now.Add(-duplicateAcknowledgementInterval)
+		for id, at := range recent {
+			if at.Before(cutoff) {
+				delete(recent, id)
+			}
+		}
+	}
+	return true
 }
 
 func recentTransportPacket(sentAt, now time.Time) bool {
