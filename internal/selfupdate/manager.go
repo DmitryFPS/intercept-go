@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -40,7 +41,34 @@ type Result struct {
 // serving work, then delegates only the short switch-over to a temporary helper.
 type Manager struct{ config Configuration }
 
-func NewManager(configuration Configuration) *Manager { return &Manager{config: configuration} }
+func NewManager(configuration Configuration) *Manager {
+	cleanupOrphanedWorkRoots(os.TempDir(), time.Now())
+	return &Manager{config: configuration}
+}
+
+// cleanupOrphanedWorkRoots removes only old completed helper directories.
+// A directory containing backup is an unsuccessful rollback and is preserved
+// for administrator recovery.
+func cleanupOrphanedWorkRoots(tempRoot string, now time.Time) {
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "EAVC-Connect-Update-") {
+			continue
+		}
+		path := filepath.Join(tempRoot, entry.Name())
+		if _, err := os.Stat(filepath.Join(path, "backup")); err == nil {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || now.Sub(info.ModTime()) < 24*time.Hour {
+			continue
+		}
+		_ = os.RemoveAll(path)
+	}
+}
 
 func (manager *Manager) resultPath() string {
 	return filepath.Join(manager.config.BaseDir, "logs", "latest-update.json")

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVerifyAndExtractSignedPackage(t *testing.T) {
@@ -132,6 +133,28 @@ func TestCleanupUpdateArtifactsPreservesFailedRollbackBackup(t *testing.T) {
 		t.Fatalf("package remains after cleanup: %v", err)
 	}
 	assertTestFile(t, filepath.Join(workRoot, "backup", "data", "queue.db"), "recovery copy")
+}
+
+func TestCleanupOrphanedWorkRootsKeepsRecoveryBackup(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-48 * time.Hour)
+	completed := filepath.Join(root, "EAVC-Connect-Update-completed")
+	recovery := filepath.Join(root, "EAVC-Connect-Update-recovery")
+	unrelated := filepath.Join(root, "another-program")
+	for _, path := range []string{completed, recovery, unrelated} {
+		mustWriteTestFile(t, filepath.Join(path, "helper.exe"), "helper")
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWriteTestFile(t, filepath.Join(recovery, "backup", "data", "queue.db"), "recovery")
+
+	cleanupOrphanedWorkRoots(root, time.Now())
+	if _, err := os.Stat(completed); !os.IsNotExist(err) {
+		t.Fatalf("completed work root remains: %v", err)
+	}
+	assertTestFile(t, filepath.Join(recovery, "backup", "data", "queue.db"), "recovery")
+	assertTestFile(t, filepath.Join(unrelated, "helper.exe"), "helper")
 }
 
 func writeSignedTestPackage(t *testing.T, product, version string, signedFiles, archiveFiles map[string][]byte) (string, string) {
