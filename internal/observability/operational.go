@@ -26,22 +26,31 @@ type OperationalRecord struct {
 
 // StartOperationalRecorder writes a snapshot immediately, every fifteen
 // minutes, and at shutdown. Twelve bounded archives support long observations.
-func StartOperationalRecorder(ctx context.Context, baseDir, component, version string, status func() any) {
+func StartOperationalRecorder(ctx context.Context, baseDir, component, version string, status func() any) <-chan error {
+	errorsChannel := make(chan error, 1)
 	go func() {
+		defer close(errorsChannel)
 		writer := &RotatingWriter{Path: filepath.Join(baseDir, "logs", "operations.log"), MaxBytes: 5 * 1024 * 1024, Backups: 12}
 		defer writer.Close()
 		started := time.Now()
 		write := func(event string) {
 			var memory runtime.MemStats
 			runtime.ReadMemStats(&memory)
-			free, _ := diskFree(baseDir)
+			free, diskErr := diskFree(baseDir)
+			if diskErr != nil {
+				notifyOperationalError(errorsChannel, diskErr)
+			}
 			record := OperationalRecord{Time: time.Now(), Event: event, Component: component, Version: version, UptimeSeconds: int64(time.Since(started).Seconds()), MemoryBytes: memory.Alloc, Goroutines: runtime.NumGoroutine(), DiskFreeBytes: free}
 			if status != nil {
 				record.Status = status()
 			}
 			payload, err := json.Marshal(record)
-			if err == nil {
-				_, _ = writer.Write(append(payload, '\n'))
+			if err != nil {
+				notifyOperationalError(errorsChannel, err)
+				return
+			}
+			if _, err := writer.Write(append(payload, '\n')); err != nil {
+				notifyOperationalError(errorsChannel, err)
 			}
 		}
 		write("started")
@@ -57,6 +66,14 @@ func StartOperationalRecorder(ctx context.Context, baseDir, component, version s
 			}
 		}
 	}()
+	return errorsChannel
+}
+
+func notifyOperationalError(target chan<- error, err error) {
+	select {
+	case target <- err:
+	default:
+	}
 }
 
 // OperationalFiles lists only bounded safe logs used by diagnostic archives.

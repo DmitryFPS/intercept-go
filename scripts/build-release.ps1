@@ -160,6 +160,24 @@ try {
     New-Item -ItemType Directory -Path $stationTemplate | Out-Null
     Copy-Item -LiteralPath (Join-Path $clientRoot 'EAVC Connect Station.exe') -Destination (Join-Path $stationTemplate 'EAVC Connect Station.exe')
     Copy-Item -LiteralPath $updaterBuild -Destination (Join-Path $stationTemplate 'EAVC Connect Updater.exe')
+    $stationFiles = @('EAVC Connect Station.exe', 'EAVC Connect Updater.exe') | ForEach-Object {
+        $path = Join-Path $stationTemplate $_
+        [ordered]@{
+            path = $_
+            size = (Get-Item -LiteralPath $path).Length
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+        }
+    }
+    $stationManifest = [ordered]@{
+        schema = 1
+        product = 'eavc-connect-station-template'
+        version = $Version
+        files = @($stationFiles)
+    } | ConvertTo-Json -Depth 5
+    $stationManifestPath = Join-Path $stationTemplate 'manifest.json'
+    [System.IO.File]::WriteAllText($stationManifestPath, $stationManifest, [System.Text.UTF8Encoding]::new($false))
+    go run ./cmd/update-packager sign -input $stationManifestPath -output (Join-Path $stationTemplate 'manifest.sig') -key $UpdateSigningKeyPath
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось подписать комплект рабочей точки.' }
     New-Item -ItemType Directory -Path (Join-Path $clientRoot 'data'), (Join-Path $clientRoot 'logs'), (Join-Path $serverRoot 'data'), (Join-Path $serverRoot 'logs') | Out-Null
 
     $clientArchive = Join-Path $distRoot 'EAVC-Connect-Station-portable.zip'

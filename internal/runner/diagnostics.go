@@ -56,9 +56,19 @@ func addDiagnosticLogs(archive *zip.Writer, baseDir, primary string) error {
 	return nil
 }
 
-var diagnosticRedactedKeys = map[string]bool{
-	"invite_link": true, "source_uuid": true, "source_id": true,
-	"position": true, "eavc_path": true, "client_id": true,
+var diagnosticAllowedKeys = map[string]bool{
+	"time": true, "level": true, "msg": true, "event": true, "component": true,
+	"version": true, "from": true, "to": true, "updated_at": true,
+	"uptime_seconds": true, "memory_bytes": true, "goroutines": true, "disk_free_bytes": true,
+	"status": true, "state": true, "configured": true, "transport_ok": true,
+	"database_ok": true, "telegram_ok": true, "processing": true,
+	"queue": true, "stats": true, "pending": true, "uploaded": true,
+	"acknowledged": true, "delivered": true, "expired": true, "rejected": true,
+	"clients": true, "clients_online": true, "clients_degraded": true,
+	"clients_offline": true, "events": true, "attempt": true, "attempts": true,
+	"last_received": true, "last_delivery": true, "last_database_read": true,
+	"last_upload": true, "last_acknowledged": true, "last_transport_check": true,
+	"next_attempt_at": true, "accepted_at": true, "expires_at": true,
 }
 
 // copyRedactedDiagnosticLog preserves technical events and counters, but
@@ -77,7 +87,7 @@ func copyRedactedDiagnosticLog(target io.Writer, source io.Reader) error {
 		if json.Unmarshal(scanner.Bytes(), &record) != nil {
 			record = map[string]any{"event": "строка журнала скрыта: неизвестный формат"}
 		} else {
-			redactDiagnosticValue(record)
+			allowDiagnosticValue(record)
 		}
 		payload, err := json.Marshal(record)
 		if err != nil {
@@ -90,19 +100,19 @@ func copyRedactedDiagnosticLog(target io.Writer, source io.Reader) error {
 	return scanner.Err()
 }
 
-func redactDiagnosticValue(value any) {
+func allowDiagnosticValue(value any) {
 	switch item := value.(type) {
 	case map[string]any:
 		for key, nested := range item {
-			if diagnosticRedactedKeys[strings.ToLower(key)] {
+			if !diagnosticAllowedKeys[strings.ToLower(key)] {
 				delete(item, key)
 				continue
 			}
-			redactDiagnosticValue(nested)
+			allowDiagnosticValue(nested)
 		}
 	case []any:
 		for _, nested := range item {
-			redactDiagnosticValue(nested)
+			allowDiagnosticValue(nested)
 		}
 	}
 }

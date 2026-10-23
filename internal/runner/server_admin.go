@@ -4,7 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -405,16 +409,12 @@ func (server *Server) ClientPackage(ctx context.Context, clientID string) ([]byt
 	if err != nil {
 		return nil, "", application.RegisteredClient{}, err
 	}
-	executablePath := filepath.Join(server.BaseDir, "station-template", "EAVC Connect Station.exe")
-	executable, err := os.ReadFile(executablePath)
+	template, err := server.verifiedStationTemplate()
 	if err != nil {
-		return nil, "", application.RegisteredClient{}, fmt.Errorf("шаблон программы рабочей точки не найден: %w", err)
+		return nil, "", application.RegisteredClient{}, err
 	}
-	updaterPath := filepath.Join(server.BaseDir, "station-template", "EAVC Connect Updater.exe")
-	updater, err := os.ReadFile(updaterPath)
-	if err != nil {
-		return nil, "", application.RegisteredClient{}, fmt.Errorf("помощник обновления рабочей точки не найден: %w", err)
-	}
+	executable := template["EAVC Connect Station.exe"]
+	updater := template["EAVC Connect Updater.exe"]
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
 	folder := "EAVC Connect Station-" + safePackageName(client.Number) + "/"
@@ -442,6 +442,62 @@ func (server *Server) ClientPackage(ctx context.Context, clientID string) ([]byt
 		return nil, "", application.RegisteredClient{}, fmt.Errorf("завершить комплект точки: %w", err)
 	}
 	return output.Bytes(), activationCode, client, nil
+}
+
+type stationTemplateManifest struct {
+	Schema  int    `json:"schema"`
+	Product string `json:"product"`
+	Version string `json:"version"`
+	Files   []struct {
+		Path   string `json:"path"`
+		Size   int64  `json:"size"`
+		SHA256 string `json:"sha256"`
+	} `json:"files"`
+}
+
+func (server *Server) verifiedStationTemplate() (map[string][]byte, error) {
+	root := filepath.Join(server.BaseDir, "station-template")
+	manifestPayload, err := os.ReadFile(filepath.Join(root, "manifest.json"))
+	if err != nil {
+		return nil, fmt.Errorf("манифест комплекта рабочей точки не найден: %w", err)
+	}
+	signatureText, err := os.ReadFile(filepath.Join(root, "manifest.sig"))
+	if err != nil {
+		return nil, fmt.Errorf("подпись комплекта рабочей точки не найдена: %w", err)
+	}
+	publicKey, keyErr := base64.StdEncoding.DecodeString(strings.TrimSpace(server.UpdatePublicKey))
+	signature, signatureErr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(signatureText)))
+	if keyErr != nil || signatureErr != nil || len(publicKey) != ed25519.PublicKeySize ||
+		!ed25519.Verify(ed25519.PublicKey(publicKey), manifestPayload, signature) {
+		return nil, errors.New("подпись комплекта рабочей точки недействительна")
+	}
+	var manifest stationTemplateManifest
+	if err := json.Unmarshal(manifestPayload, &manifest); err != nil {
+		return nil, fmt.Errorf("прочитать манифест комплекта рабочей точки: %w", err)
+	}
+	if manifest.Schema != 1 || manifest.Product != "eavc-connect-station-template" || manifest.Version != server.Version {
+		return nil, errors.New("комплект рабочей точки выпущен для другой версии")
+	}
+	expected := map[string]bool{"EAVC Connect Station.exe": true, "EAVC Connect Updater.exe": true}
+	verified := make(map[string][]byte, len(expected))
+	for _, item := range manifest.Files {
+		if !expected[item.Path] || verified[item.Path] != nil {
+			return nil, errors.New("манифест комплекта рабочей точки содержит посторонний или повторный файл")
+		}
+		payload, err := os.ReadFile(filepath.Join(root, item.Path))
+		if err != nil {
+			return nil, fmt.Errorf("файл комплекта рабочей точки не найден: %s: %w", item.Path, err)
+		}
+		hash := sha256.Sum256(payload)
+		if int64(len(payload)) != item.Size || !strings.EqualFold(hex.EncodeToString(hash[:]), item.SHA256) {
+			return nil, fmt.Errorf("целостность файла комплекта рабочей точки нарушена: %s", item.Path)
+		}
+		verified[item.Path] = payload
+	}
+	if len(verified) != len(expected) {
+		return nil, errors.New("комплект рабочей точки неполон")
+	}
+	return verified, nil
 }
 
 func safePackageName(value string) string {

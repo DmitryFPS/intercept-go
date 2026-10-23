@@ -6,11 +6,15 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +57,7 @@ func TestClientPackageContainsRunnableStation(t *testing.T) {
 	if err := os.WriteFile(updaterTemplate, updater, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	publicKey := writeSignedStationTemplate(t, filepath.Dir(stationTemplate), "test")
 
 	ctx := context.Background()
 	server, err := NewServer(ctx, baseDir, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -60,6 +65,7 @@ func TestClientPackageContainsRunnableStation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close()
+	server.UpdatePublicKey = publicKey
 
 	cfg, err := config.GenerateClient(config.ClientRequest{
 		Number: "01", Name: "Текстиль", BotToken: "123456789:abcdefghijklmnopqrstuvwxyzABCDE",
@@ -145,4 +151,59 @@ func TestClientPackageContainsRunnableStation(t *testing.T) {
 	if len(entries[folder+"ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt"]) == 0 {
 		t.Fatal("в комплекте отсутствует памятка оператору")
 	}
+}
+
+func TestClientPackageRejectsTamperedStationTemplate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "station-template")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"EAVC Connect Station.exe": "station", "EAVC Connect Updater.exe": "updater",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publicKey := writeSignedStationTemplate(t, root, "test")
+	if err := os.WriteFile(filepath.Join(root, "EAVC Connect Station.exe"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{BaseDir: filepath.Dir(root), Version: "test", UpdatePublicKey: publicKey}
+	if _, err := server.verifiedStationTemplate(); err == nil || !strings.Contains(err.Error(), "целостность") {
+		t.Fatalf("tampered station template must be rejected: %v", err)
+	}
+}
+
+func writeSignedStationTemplate(t *testing.T, root, version string) string {
+	t.Helper()
+	manifest := stationTemplateManifest{Schema: 1, Product: "eavc-connect-station-template", Version: version}
+	for _, name := range []string{"EAVC Connect Station.exe", "EAVC Connect Updater.exe"} {
+		payload, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := sha256.Sum256(payload)
+		manifest.Files = append(manifest.Files, struct {
+			Path   string `json:"path"`
+			Size   int64  `json:"size"`
+			SHA256 string `json:"sha256"`
+		}{Path: name, Size: int64(len(payload)), SHA256: hex.EncodeToString(hash[:])})
+	}
+	payload, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	if err := os.WriteFile(filepath.Join(root, "manifest.sig"), []byte(signature), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(publicKey)
 }

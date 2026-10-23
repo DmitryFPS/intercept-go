@@ -23,12 +23,16 @@ func OpenState(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("создать папку базы: %w", err)
 	}
 	dsn := "file:" + filepath.ToSlash(abs) +
-		"?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)"
+		"?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("открыть SQLite: %w", err)
 	}
-	db.SetMaxOpenConns(1)
+	// WAL позволяет коротким рабочим операциям продолжаться, пока локальный
+	// интерфейс читает историю. Одно соединение превращало большой поиск в
+	// остановку приёма и доставки.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

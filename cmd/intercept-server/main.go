@@ -81,6 +81,7 @@ func main() {
 		logger.Error("не удалось запустить сервер", "error", err)
 		return
 	}
+	application.UpdatePublicKey = updatePublicKey
 	defer application.Close()
 	if hasArgument("--update-validation") {
 		if err := application.ValidateForUpdate(); err != nil {
@@ -89,7 +90,12 @@ func main() {
 	} else {
 		application.Start(ctx)
 	}
-	observability.StartOperationalRecorder(ctx, baseDir, "center", buildVersion(), func() any { return application.OperationalStatus() })
+	operationalErrors := observability.StartOperationalRecorder(ctx, baseDir, "center", buildVersion(), func() any { return application.OperationalStatus() })
+	go func() {
+		for err := range operationalErrors {
+			logger.Error("не удалось записать эксплуатационный журнал", "error", err)
+		}
+	}()
 	updater := selfupdate.NewManager(selfupdate.Configuration{
 		BaseDir: baseDir, Product: "eavc-connect-center", Version: buildVersion(),
 		PublicKey: updatePublicKey, Application: filepath.Base(executable), Helper: "EAVC Connect Updater.exe",

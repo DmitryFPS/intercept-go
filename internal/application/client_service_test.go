@@ -114,6 +114,30 @@ func TestClientServiceUsesStableInitialBaseline(t *testing.T) {
 	}
 }
 
+func TestClientServiceSkipsInvalidRowAndQueuesFollowingRecord(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	queue := newMemoryClientState()
+	service := ClientService{
+		ClientID: "textile", Source: &memorySource{items: []SourceItem{
+			{Record: domain.SourceRecord{ID: 1, UUID: "broken", UpdatedAt: "2026-10-23 12:00:00"}, Content: "нет подразделения", Mode: domain.SourceModeNormal, ObservedAt: now},
+			{Record: domain.SourceRecord{ID: 2, UUID: "valid", UpdatedAt: "2026-10-23 12:00:01"}, Position: domain.Position{UnitName: "1 мб 155 омбр"}, Content: "корректная запись", Mode: domain.SourceModeNormal, ObservedAt: now},
+		}},
+		Queue: queue, State: queue, Sender: &memorySender{}, KeyID: "key", Key: make([]byte, 32),
+		BatchSize: 10, CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	queued, err := service.CollectOnce(context.Background())
+	if err != nil || queued != 1 {
+		t.Fatalf("invalid row blocked collection: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 1 || queue.events[0].Source.ID != 2 {
+		t.Fatalf("following valid record was lost: %#v", queue.events)
+	}
+	if cursor := queue.cursors[eavcCursorName]; cursor.ID != 2 {
+		t.Fatalf("source cursor did not advance: %+v", cursor)
+	}
+}
+
 // Ответ на проверку связи сохраняется отдельно и не пытается подтвердить
 // отсутствующее рабочее событие в очереди.
 func TestClientServiceStoresTransportProbeSeparately(t *testing.T) {

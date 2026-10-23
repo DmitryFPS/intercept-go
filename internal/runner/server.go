@@ -104,10 +104,11 @@ type TemplateDefaults struct {
 // находятся в application/domain, а здесь остаются только сборка и координация.
 // Server координирует жизненный цикл, не реализуя правила предметной области.
 type Server struct {
-	BaseDir string
-	Version string
-	Logger  *slog.Logger
-	Store   *stateDB.ServerStore
+	BaseDir         string
+	Version         string
+	UpdatePublicKey string
+	Logger          *slog.Logger
+	Store           *stateDB.ServerStore
 
 	mu          sync.RWMutex
 	adminMu     sync.Mutex

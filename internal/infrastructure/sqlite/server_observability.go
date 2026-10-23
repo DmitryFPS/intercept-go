@@ -12,6 +12,8 @@ import (
 	"intercept/internal/domain"
 )
 
+const maxHistorySearchRows = 10000
+
 const (
 	clientOfflineReason = "Нет контрольного пакета или данных более 5 минут"
 	historyPrefix       = "history_clear_"
@@ -356,6 +358,9 @@ func (store *ServerStore) connectionIncidents(ctx context.Context, limit, offset
 	if searchQuery == "" {
 		query += " LIMIT ? OFFSET ?"
 		queryArgs = append(queryArgs, limit, offset)
+	} else {
+		query += " LIMIT ?"
+		queryArgs = append(queryArgs, maxHistorySearchRows+1)
 	}
 	rows, err := store.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
@@ -363,7 +368,12 @@ func (store *ServerStore) connectionIncidents(ctx context.Context, limit, offset
 	}
 	defer rows.Close()
 	var result []ConnectionIncident
+	scanned := 0
 	for rows.Next() {
+		scanned++
+		if scanned > maxHistorySearchRows {
+			return nil, 0, errors.New("поиск охватывает слишком много записей; выберите рабочую точку или уточните запрос")
+		}
 		var item ConnectionIncident
 		var started string
 		var recovered sql.NullString
@@ -437,6 +447,9 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 	if searchQuery == "" {
 		query += " LIMIT ? OFFSET ?"
 		queryArgs = append(queryArgs, limit, offset)
+	} else {
+		query += " LIMIT ?"
+		queryArgs = append(queryArgs, maxHistorySearchRows+1)
 	}
 	rows, err := store.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
@@ -444,7 +457,12 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 	}
 	defer rows.Close()
 	var result []ServerHistoryItem
+	scanned := 0
 	for rows.Next() {
+		scanned++
+		if scanned > maxHistorySearchRows {
+			return nil, 0, errors.New("поиск охватывает слишком много записей; выберите рабочую точку, получателя или уточните запрос")
+		}
 		item, scanErr := scanServerHistoryItem(rows)
 		if scanErr != nil {
 			return nil, 0, scanErr
@@ -530,6 +548,9 @@ func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int
 	if searchQuery == "" {
 		query += " LIMIT ? OFFSET ?"
 		queryArgs = append(queryArgs, limit, offset)
+	} else {
+		query += " LIMIT ?"
+		queryArgs = append(queryArgs, maxHistorySearchRows+1)
 	}
 	rows, err := store.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
@@ -537,7 +558,12 @@ func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int
 	}
 	defer rows.Close()
 	var result []ServerHistoryItem
+	scanned := 0
 	for rows.Next() {
+		scanned++
+		if scanned > maxHistorySearchRows {
+			return nil, 0, errors.New("поиск охватывает слишком много записей; уточните запрос")
+		}
 		var id int64
 		var sender string
 		var thread int64

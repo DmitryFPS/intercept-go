@@ -54,11 +54,20 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	if !acquired {
 		return errDestinationBusy
 	}
-	defer unlock()
-	// Файловые вызовы выполняются в текущей рабочей операции. Так сервер не
-	// объявит доставку завершённой или просроченной, пока скрытая горутина ещё
-	// способна перезаписать документ в сетевой папке.
-	return settings.deliver(ctx, event)
+	completed := make(chan error, 1)
+	go func() {
+		defer unlock()
+		completed <- settings.deliver(ctx, event)
+	}()
+	select {
+	case err := <-completed:
+		return err
+	case <-ctx.Done():
+		// Некоторые Windows/SMB-вызовы не умеют отменяться. Блокировка остаётся
+		// у фоновой операции до её фактического завершения, поэтому повторная
+		// доставка не сможет одновременно перезаписать тот же документ.
+		return ctx.Err()
+	}
 }
 
 func (destination Destination) deliver(ctx context.Context, event domain.Event) error {

@@ -108,7 +108,16 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 	for _, item := range items {
 		event, err := service.newEvent(item)
 		if err != nil {
-			return queued, err
+			// Одна повреждённая строка внешней БД не должна навсегда закрывать
+			// последующие корректные перехваты. Источник повторно отдаёт граничную
+			// секунду, поэтому исправленная оператором запись будет принята позже.
+			if service.Logger != nil {
+				service.Logger.Warn("запись EAVC отклонена до постановки в очередь",
+					"source_id", item.Record.ID, "source_uuid", item.Record.UUID,
+					"updated_at", item.Record.UpdatedAt, "error", err,
+				)
+			}
+			continue
 		}
 		if err := service.Queue.Enqueue(ctx, event); err != nil {
 			return queued, err

@@ -85,7 +85,12 @@ func main() {
 	} else {
 		application.Start(ctx)
 	}
-	observability.StartOperationalRecorder(ctx, baseDir, "station", buildVersion(), func() any { return application.OperationalStatus() })
+	operationalErrors := observability.StartOperationalRecorder(ctx, baseDir, "station", buildVersion(), func() any { return application.OperationalStatus() })
+	go func() {
+		for err := range operationalErrors {
+			logger.Error("не удалось записать эксплуатационный журнал", "error", err)
+		}
+	}()
 	updater := selfupdate.NewManager(selfupdate.Configuration{
 		BaseDir: baseDir, Product: "eavc-connect-station", Version: buildVersion(),
 		PublicKey: updatePublicKey, Application: filepath.Base(executable), Helper: "EAVC Connect Updater.exe",

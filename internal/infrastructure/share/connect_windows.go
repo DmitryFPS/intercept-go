@@ -4,8 +4,10 @@ package share
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -31,6 +33,13 @@ var (
 	mprDLL              = windows.NewLazySystemDLL("mpr.dll")
 	wnetAddConnection2W = mprDLL.NewProc("WNetAddConnection2W")
 )
+
+var connectionLocks = struct {
+	sync.Mutex
+	items map[string]*sync.Mutex
+}{items: make(map[string]*sync.Mutex)}
+
+var errConnectionBusy = errors.New("предыдущая попытка подключения сетевой папки ещё выполняется")
 
 // Connect подключает только корень UNC-шары через Windows Network Provider.
 // Пароль передаётся прямо WinAPI и не появляется в командной строке процесса.
@@ -62,7 +71,27 @@ func Connect(ctx context.Context, path, username, password string) error {
 		)
 		return windows.Errno(result)
 	}
-	result := connect()
+	connectionLocks.Lock()
+	lock := connectionLocks.items[strings.ToLower(root)]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		connectionLocks.items[strings.ToLower(root)] = lock
+	}
+	connectionLocks.Unlock()
+	if !lock.TryLock() {
+		return errConnectionBusy
+	}
+	completed := make(chan windows.Errno, 1)
+	go func() {
+		defer lock.Unlock()
+		completed <- connect()
+	}()
+	var result windows.Errno
+	select {
+	case result = <-completed:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	if result == errorSessionCredentialConflict {
 		return fmt.Errorf("к %s уже подключена другая учётная запись Windows; отключите её вручную после завершения операций других программ: %w", root, result)
 	}

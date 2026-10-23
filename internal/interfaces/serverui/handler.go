@@ -403,11 +403,9 @@ func (handler Handler) publishRules(writer http.ResponseWriter, request *http.Re
 		handler.publicError(writer, http.StatusBadRequest, "Проверьте настройки маршрутов.", err)
 		return
 	}
-	author := strings.TrimSpace(request.Header.Get("X-Operator"))
-	if author == "" {
-		author = "Локальный администратор"
-	}
-	if err := handler.Server.PublishRules(request.Context(), rules, author); err != nil {
+	// Локальная панель не аутентифицирует персоналии, поэтому произвольный
+	// заголовок браузера нельзя выдавать за подтверждённое имя автора.
+	if err := handler.Server.PublishRules(request.Context(), rules, "Локальный администратор"); err != nil {
 		handler.publicError(writer, http.StatusBadRequest, "Не удалось опубликовать маршруты.", err)
 		return
 	}
