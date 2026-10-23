@@ -407,72 +407,96 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 		conditions = append(conditions, "j.destination_id=?")
 		args = append(args, filter.DestinationID)
 	}
-	if query := strings.TrimSpace(filter.Query); query != "" {
-		pattern := "%" + query + "%"
-		search := "(c.name LIKE ? OR e.event_id LIKE ?)"
-		args = append(args, pattern, pattern)
-		if kind != "received" {
-			search = "(c.name LIKE ? OR e.event_id LIKE ? OR j.destination_id LIKE ? OR j.last_error LIKE ?)"
-			args = append(args, pattern, pattern)
-		}
-		conditions = append(conditions, search)
-	}
 	where := " WHERE " + strings.Join(conditions, " AND ")
-	var total int
-	countQuery := "SELECT COUNT(*) FROM received_events e JOIN server_clients c ON c.client_id=e.client_id" + join + where
-	if err := store.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
-		return nil, 0, err
+	searchQuery := strings.ToLower(strings.TrimSpace(filter.Query))
+	total := 0
+	if searchQuery == "" {
+		countQuery := "SELECT COUNT(*) FROM received_events e JOIN server_clients c ON c.client_id=e.client_id" + join + where
+		if err := store.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
 	columns := "e.event_id,e.client_id,c.name,e.payload_json,'' AS destination_id,NULL AS delivery_json,'received' AS state,e.received_at,0 AS attempts,NULL AS next_attempt_at,'' AS last_error"
 	if kind != "received" {
 		columns = "e.event_id,e.client_id,c.name,e.payload_json,j.destination_id,j.delivery_json,j.state," + timeColumn + ",j.attempts,j.next_attempt_at,j.last_error"
 	}
-	query := "SELECT " + columns + " FROM received_events e JOIN server_clients c ON c.client_id=e.client_id" + join + where + " ORDER BY " + timeColumn + " DESC LIMIT ? OFFSET ?"
-	rows, err := store.db.QueryContext(ctx, query, append(args, limit, offset)...)
+	query := "SELECT " + columns + " FROM received_events e JOIN server_clients c ON c.client_id=e.client_id" + join + where + " ORDER BY " + timeColumn + " DESC"
+	queryArgs := args
+	if searchQuery == "" {
+		query += " LIMIT ? OFFSET ?"
+		queryArgs = append(queryArgs, limit, offset)
+	}
+	rows, err := store.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
 	var result []ServerHistoryItem
 	for rows.Next() {
-		var item ServerHistoryItem
-		var eventPayload, deliveryPayload []byte
-		var occurred string
-		var next sql.NullString
-		if err := rows.Scan(&item.ID, &item.ClientID, &item.ClientName, &eventPayload,
-			&item.DestinationID, &deliveryPayload, &item.State, &occurred, &item.Attempts, &next, &item.Reason); err != nil {
-			return nil, 0, err
+		item, scanErr := scanServerHistoryItem(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
 		}
-		item.OccurredAt, _ = time.Parse(time.RFC3339Nano, occurred)
-		item.NextAttemptAt = parseNullableTime(next)
-		plain, err := unprotectDatabaseValue(eventPayload)
-		if err == nil {
-			var event domain.Event
-			if json.Unmarshal(plain, &event) == nil {
-				item.UnitName = event.Position.UnitName
-				item.SourceRecord = event.Source.ID
-				item.SourceMode = string(event.Mode)
-				sourceAt := event.SourceAt
-				if sourceAt.IsZero() {
-					sourceAt = event.ObservedAt
-				}
-				if !sourceAt.IsZero() {
-					item.SourceAt = &sourceAt
-				}
+		if searchQuery != "" {
+			if !serverHistoryItemMatches(item, searchQuery) {
+				continue
 			}
-		}
-		if len(deliveryPayload) > 0 {
-			plain, err := unprotectDatabaseValue(deliveryPayload)
-			if err == nil {
-				var delivery domain.PlannedDelivery
-				if json.Unmarshal(plain, &delivery) == nil {
-					item.Destination = delivery.Destination.Name
-				}
+			total++
+			if total <= offset || len(result) >= limit {
+				continue
 			}
 		}
 		result = append(result, item)
 	}
 	return result, total, rows.Err()
+}
+
+func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
+	var item ServerHistoryItem
+	var eventPayload, deliveryPayload []byte
+	var occurred string
+	var next sql.NullString
+	if err := rows.Scan(&item.ID, &item.ClientID, &item.ClientName, &eventPayload,
+		&item.DestinationID, &deliveryPayload, &item.State, &occurred, &item.Attempts, &next, &item.Reason); err != nil {
+		return ServerHistoryItem{}, err
+	}
+	item.OccurredAt, _ = time.Parse(time.RFC3339Nano, occurred)
+	item.NextAttemptAt = parseNullableTime(next)
+	plain, err := unprotectDatabaseValue(eventPayload)
+	if err == nil {
+		var event domain.Event
+		if json.Unmarshal(plain, &event) == nil {
+			item.UnitName = event.Position.UnitName
+			item.SourceRecord = event.Source.ID
+			item.SourceMode = string(event.Mode)
+			sourceAt := event.SourceAt
+			if sourceAt.IsZero() {
+				sourceAt = event.ObservedAt
+			}
+			if !sourceAt.IsZero() {
+				item.SourceAt = &sourceAt
+			}
+		}
+	}
+	if len(deliveryPayload) > 0 {
+		plain, err := unprotectDatabaseValue(deliveryPayload)
+		if err == nil {
+			var delivery domain.PlannedDelivery
+			if json.Unmarshal(plain, &delivery) == nil {
+				item.Destination = delivery.Destination.Name
+			}
+		}
+	}
+	return item, nil
+}
+
+func serverHistoryItemMatches(item ServerHistoryItem, query string) bool {
+	searchable := strings.ToLower(strings.Join([]string{
+		item.ID, item.ClientID, item.ClientName, item.UnitName,
+		item.DestinationID, item.Destination, item.Reason,
+		fmt.Sprintf("%d", item.SourceRecord),
+	}, " "))
+	return strings.Contains(searchable, query)
 }
 
 func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int, filter HistoryFilter) ([]ServerHistoryItem, int, error) {

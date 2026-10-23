@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -194,6 +195,130 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 	pending, err = store.HistoryPage(ctx, "pending", 30, 0, time.Now().UTC().Add(2*time.Second))
 	if err != nil || pending.Total != 1 {
 		t.Fatalf("очистка истории затронула очередь: %+v err=%v", pending, err)
+	}
+}
+
+func TestAllDashboardHistoryFilters(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	rules := serverTestRules()
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	event := serverTestEvent()
+	plan, err := rules.Resolve(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+		t.Fatalf("accept=%v err=%v", accepted, acceptErr)
+	}
+	pendingEvent := serverTestEvent()
+	pendingEvent.ID = "event-pending"
+	pendingEvent.Source.UUID = "source-pending"
+	pendingPlan, err := rules.Resolve(pendingEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted, acceptErr := store.Accept(ctx, pendingEvent, pendingPlan); acceptErr != nil || !accepted {
+		t.Fatalf("accept pending=%v err=%v", accepted, acceptErr)
+	}
+	now := time.Now().UTC()
+	if err := store.RecordClientSignalByTransport(ctx, 12, -1001, 10, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDelivered(ctx, event.ID, "a", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDeliveryExpired(ctx, event.ID, "w", now, "older_than_delivery_window"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Quarantine(ctx, application.IncomingPacket{
+		SenderBotID: 999, SenderBotUsername: "foreign_bot", ChatID: -1001, ThreadID: 77, Payload: []byte("rejected"),
+	}, "unknown_client"); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		kind   string
+		filter HistoryFilter
+		count  func(ServerHistoryPage) int
+	}{
+		{name: "рабочие точки", kind: "clients", filter: HistoryFilter{Query: "Текстиль", ClientID: "textile", Quality: "good"}, count: func(page ServerHistoryPage) int { return len(page.Clients) }},
+		{name: "получено", kind: "received", filter: HistoryFilter{Query: "event-1", ClientID: "textile"}, count: func(page ServerHistoryPage) int { return len(page.Items) }},
+		{name: "ожидает отправки", kind: "pending", filter: HistoryFilter{Query: "event-pending", ClientID: "textile", DestinationID: "w"}, count: func(page ServerHistoryPage) int { return len(page.Items) }},
+		{name: "доставлено", kind: "delivered", filter: HistoryFilter{Query: "Текстиль", ClientID: "textile", DestinationID: "a"}, count: func(page ServerHistoryPage) int { return len(page.Items) }},
+		{name: "просрочено", kind: "expired", filter: HistoryFilter{Query: "Текстиль", ClientID: "textile", DestinationID: "w"}, count: func(page ServerHistoryPage) int { return len(page.Items) }},
+		{name: "отклонено", kind: "rejected", filter: HistoryFilter{Query: "foreign_bot"}, count: func(page ServerHistoryPage) int { return len(page.Items) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			page, pageErr := store.HistoryPage(ctx, test.kind, 30, 0, now.Add(time.Second), test.filter)
+			if pageErr != nil || test.count(page) != 1 {
+				t.Fatalf("фильтр карточки %q: page=%+v err=%v", test.kind, page, pageErr)
+			}
+		})
+	}
+	operatorSearches := []struct {
+		kind  string
+		query string
+		want  int
+	}{
+		{kind: "received", query: "1 МБ 155 ОМБР", want: 2},
+		{kind: "pending", query: "39-ка", want: 1},
+		{kind: "delivered", query: "Аэродром", want: 1},
+		{kind: "expired", query: "39-КА", want: 1},
+		{kind: "rejected", query: "unknown_client", want: 1},
+	}
+	for _, search := range operatorSearches {
+		page, pageErr := store.HistoryPage(ctx, search.kind, 30, 0, now.Add(time.Second), HistoryFilter{Query: search.query})
+		if pageErr != nil || len(page.Items) != search.want || page.Total != search.want {
+			t.Errorf("поиск по видимым данным карточки %q: items=%d total=%d want=%d err=%v", search.kind, len(page.Items), page.Total, search.want, pageErr)
+		}
+	}
+
+	for _, kind := range []string{"clients", "received", "pending", "delivered", "expired"} {
+		page, pageErr := store.HistoryPage(ctx, kind, 30, 0, now.Add(time.Second), HistoryFilter{ClientID: "missing"})
+		if pageErr != nil || (len(page.Items)+len(page.Clients)) != 0 {
+			t.Fatalf("карточка %q игнорирует отсутствующую рабочую точку: %+v err=%v", kind, page, pageErr)
+		}
+	}
+	for _, kind := range []string{"pending", "delivered", "expired"} {
+		page, pageErr := store.HistoryPage(ctx, kind, 30, 0, now.Add(time.Second), HistoryFilter{DestinationID: "missing"})
+		if pageErr != nil || len(page.Items) != 0 {
+			t.Fatalf("карточка %q игнорирует отсутствующего получателя: %+v err=%v", kind, page, pageErr)
+		}
+	}
+	rejected, err := store.HistoryPage(ctx, "rejected", 30, 0, now.Add(time.Second), HistoryFilter{Query: "нет такого значения"})
+	if err != nil || len(rejected.Items) != 0 {
+		t.Fatalf("поиск карточки отклонений проигнорирован: %+v err=%v", rejected, err)
+	}
+}
+
+func TestProtectedHistorySearchKeepsExactPagination(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	rules := serverTestRules()
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 35; index++ {
+		event := serverTestEvent()
+		event.ID = fmt.Sprintf("search-event-%02d", index)
+		event.Source.ID = int64(index)
+		event.Source.UUID = fmt.Sprintf("search-source-%02d", index)
+		plan, err := rules.Resolve(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+			t.Fatalf("accept %d=%v err=%v", index, accepted, acceptErr)
+		}
+	}
+	page, err := store.HistoryPage(ctx, "received", 10, 10, time.Now().UTC(), HistoryFilter{Query: "1 МБ 155 ОМБР"})
+	if err != nil || page.Total != 35 || len(page.Items) != 10 || page.Offset != 10 || page.Limit != 10 {
+		t.Fatalf("постраничный поиск по защищённым данным: %+v err=%v", page, err)
 	}
 }
 

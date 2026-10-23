@@ -252,11 +252,13 @@ function resetHistoryFilters() {
 
 function prepareHistoryFilters(kind) {
   $('historyClientFilter').innerHTML = '<option value="">Все точки</option>' + clients.map(client =>
-    `<option value="${escapeHTML(client.id)}">${escapeHTML(client.number)} · ${escapeHTML(client.name)}</option>`
+    `<option value="${escapeHTML(client.id)}" ${client.id === historyFilters.client ? 'selected' : ''}>${escapeHTML(client.number)} · ${escapeHTML(client.name)}</option>`
   ).join('');
   $('historyDestinationFilter').innerHTML = '<option value="">Все получатели</option>' + Object.values(destinations).map(destination =>
-    `<option value="${escapeHTML(destination.id)}">${escapeHTML(destination.name)}</option>`
+    `<option value="${escapeHTML(destination.id)}" ${destination.id === historyFilters.destination ? 'selected' : ''}>${escapeHTML(destination.name)}</option>`
   ).join('');
+  $('historySearch').value = historyFilters.q;
+  $('historyQualityFilter').value = historyFilters.quality;
   $('historyClientField').classList.toggle('hidden', kind === 'rejected');
   $('historyDestinationField').classList.toggle('hidden', !['pending', 'delivered', 'expired'].includes(kind));
   $('historyQualityField').classList.toggle('hidden', kind !== 'clients');

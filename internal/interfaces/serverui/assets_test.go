@@ -68,6 +68,29 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	if strings.Contains(javascript, "`ID: ${item.id}`") {
 		t.Error("операторский экран не должен подставлять технический UUID вместо полезных сведений")
 	}
+	for _, fragment := range []string{
+		"client.id === historyFilters.client ? 'selected' : ''",
+		"destination.id === historyFilters.destination ? 'selected' : ''",
+		"$('historySearch').value = historyFilters.q",
+		"$('historyQualityFilter').value = historyFilters.quality",
+	} {
+		if !strings.Contains(javascript, fragment) {
+			t.Errorf("повторное открытие истории сбрасывает применённый фильтр: нет %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"kind === 'rejected'",
+		"['pending', 'delivered', 'expired'].includes(kind)",
+		"kind !== 'clients'",
+		"if (historyFilters.q) query.set('q', historyFilters.q)",
+		"if (historyFilters.client) query.set('client', historyFilters.client)",
+		"if (historyFilters.destination) query.set('destination', historyFilters.destination)",
+		"if (historyFilters.quality) query.set('quality', historyFilters.quality)",
+	} {
+		if !strings.Contains(javascript, fragment) {
+			t.Errorf("набор фильтров шести карточек неполон: нет %q", fragment)
+		}
+	}
 	for _, fragment := range []string{"Запись EAVC №", "время перехвата", "Данные старше разрешённого срока доставки"} {
 		if !strings.Contains(javascript, fragment) {
 			t.Errorf("в истории отсутствует понятное оператору поле %q", fragment)
