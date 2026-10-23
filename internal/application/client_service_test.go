@@ -94,6 +94,43 @@ func TestClientServiceDoesNotCountBoundaryReplayAsNewEvent(t *testing.T) {
 	}
 }
 
+// EAVC сохраняет новую карточку и её текст разными запросами. Пустой
+// промежуточный черновик нельзя считать отдельным перехватом: заполненная
+// версия той же записи будет найдена при повторном чтении граничной секунды.
+func TestClientServiceWaitsForDraftContent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 24, 0, 12, 7, 0, time.UTC)
+	item := SourceItem{
+		Record: domain.SourceRecord{
+			ID: 1431, UUID: "source-1431", UpdatedAt: "2026-10-24 00:12:07",
+		},
+		Position: domain.Position{UnitName: "управление 25 овдбр"},
+		Mode:     domain.SourceModeNormal, ObservedAt: now,
+	}
+	source := &replaySource{item: item}
+	queue := newMemoryClientState()
+	service := ClientService{
+		ClientID: "selidovo", Source: source, Queue: queue, State: queue,
+		Sender: &memorySender{}, KeyID: "key", Key: make([]byte, 32), BatchSize: 10,
+		CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+		t.Fatalf("пустой черновик попал в очередь: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 0 {
+		t.Fatalf("пустой черновик сохранён как событие: %#v", queue.events)
+	}
+
+	source.item.Content = "00.12\n-Готовый текст перехвата"
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("заполненная версия не попала в очередь: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 1 || queue.events[0].Source.ID != 1431 {
+		t.Fatalf("ожидалась одна заполненная версия: %#v", queue.events)
+	}
+}
+
 // При первом запуске клиент запоминает старые записи EAVC и отправляет только появившиеся после запуска.
 func TestClientServiceSkipsExistingRowsOnFirstStart(t *testing.T) {
 	t.Parallel()

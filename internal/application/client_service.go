@@ -322,6 +322,15 @@ func (service *ClientService) LastTransportProbe(ctx context.Context) (string, t
 
 func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 	now := service.Now().UTC()
+	content := normalizeContent(item.Content)
+	// EAVC сначала создаёт карточку перехвата, а затем отдельным запросом
+	// записывает её текст. При высокой нагрузке клиент может увидеть этот
+	// промежуточный пустой черновик. Он не является сообщением и не должен
+	// уходить в Telegram, Word и центр; граничная секунда источника будет
+	// перечитана, поэтому заполненная версия попадёт в очередь позднее.
+	if content == "" {
+		return domain.Event{}, errors.New("перехват ещё не содержит текста")
+	}
 	maxAge := service.MaxEventAge
 	if maxAge <= 0 {
 		maxAge = 30 * time.Minute
@@ -334,14 +343,14 @@ func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 		return domain.Event{}, err
 	}
 	digest := sha256.Sum256([]byte(strings.Join([]string{
-		normalizeContent(item.Content), domain.NormalizeUnitName(item.Position.UnitName),
+		content, domain.NormalizeUnitName(item.Position.UnitName),
 		strings.TrimSpace(item.Position.Frequency), strings.TrimSpace(item.Position.GroupCode),
 	}, "\x01")))
 	event := domain.Event{
 		ID: id, ClientID: service.ClientID, CreatedAt: now, ObservedAt: item.ObservedAt,
 		SourceAt: sourceAt, ExpiresAt: expiresAt, FreshnessIssue: freshnessIssue,
 		Source: item.Record, Position: item.Position, Mode: item.Mode,
-		Content: normalizeContent(item.Content), Blocks: item.Blocks, UpdatedBy: item.UpdatedBy,
+		Content: content, Blocks: item.Blocks, UpdatedBy: item.UpdatedBy,
 		ContentDigest: hex.EncodeToString(digest[:]),
 	}
 	return event, event.Validate()
