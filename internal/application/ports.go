@@ -13,6 +13,13 @@ type EventSource interface {
 	Scan(ctx context.Context, after Cursor, limit int) ([]SourceItem, Cursor, error)
 }
 
+// EventSourceHead фиксирует верхнюю границу существующих данных. Она нужна,
+// чтобы первый запуск без догрузки старого не пропустил строки, появившиеся
+// одновременно с построением базовой линии.
+type EventSourceHead interface {
+	Head(ctx context.Context) (Cursor, error)
+}
+
 // Cursor задаёт воспроизводимую позицию чтения источника.
 type Cursor struct {
 	UpdatedAt string `json:"updated_at"`

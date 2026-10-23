@@ -85,6 +85,31 @@ func TestClientServiceSkipsExistingRowsOnFirstStart(t *testing.T) {
 	}
 }
 
+func TestClientServiceUsesStableInitialBaseline(t *testing.T) {
+	t.Parallel()
+	queue := newMemoryClientState()
+	source := &baselineSource{
+		head: Cursor{UpdatedAt: "2026-10-23 10:00:00", ID: 1},
+		newItem: SourceItem{
+			Record:   domain.SourceRecord{ID: 2, UUID: "new", UpdatedAt: "2026-10-23 10:00:01"},
+			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal, Content: "новая запись",
+		},
+	}
+	service := ClientService{
+		ClientID: "textile", Source: source, Queue: queue, State: queue, Sender: &memorySender{},
+		KeyID: "key", Key: make([]byte, 32), BatchSize: 10, CatchUpExisting: false, Now: time.Now,
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+		t.Fatalf("базовая линия не создана: queued=%d err=%v", queued, err)
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("запись после базовой линии потеряна: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 1 || queue.events[0].Source.ID != 2 {
+		t.Fatalf("в очередь попали неверные данные: %#v", queue.events)
+	}
+}
+
 // Ответ на проверку связи сохраняется отдельно и не пытается подтвердить
 // отсутствующее рабочее событие в очереди.
 func TestClientServiceStoresTransportProbeSeparately(t *testing.T) {
@@ -123,6 +148,23 @@ func TestClientServiceKeepsEveryProbeAcknowledgementInOneBatch(t *testing.T) {
 
 type memorySource struct {
 	items []SourceItem
+}
+
+type baselineSource struct {
+	head    Cursor
+	newItem SourceItem
+}
+
+func (source *baselineSource) Head(context.Context) (Cursor, error) {
+	return source.head, nil
+}
+
+func (source *baselineSource) Scan(_ context.Context, after Cursor, _ int) ([]SourceItem, Cursor, error) {
+	if after != source.head {
+		return nil, after, nil
+	}
+	next := Cursor{UpdatedAt: source.newItem.Record.UpdatedAt, ID: source.newItem.Record.ID}
+	return []SourceItem{source.newItem}, next, nil
 }
 
 func (source *memorySource) Scan(_ context.Context, _ Cursor, limit int) ([]SourceItem, Cursor, error) {

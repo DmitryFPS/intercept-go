@@ -31,6 +31,44 @@ type Source struct {
 	hasArchive      bool
 }
 
+func (source *Source) allItemsQuery() string {
+	catalogExpression := "''"
+	if source.hasCatalogUUID {
+		catalogExpression = "COALESCE(catalog_uuid, '')"
+	}
+	modeExpression := "'unknown'"
+	if source.hasSourceMode {
+		modeExpression = "COALESCE(source_mode, 'unknown')"
+	}
+	query := fmt.Sprintf(`
+		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
+			uuid, content, updated_by, updated_at, %s AS catalog_uuid, %s AS source_mode
+		FROM intercept_items`, catalogExpression, modeExpression)
+	if source.hasArchive {
+		query += ` UNION ALL
+		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
+			uuid, content, updated_by, updated_at, '' AS catalog_uuid, 'unknown' AS source_mode
+		FROM intercept_items_archive`
+	}
+	return query
+}
+
+// Head возвращает неизменяемую верхнюю границу для безопасного первого запуска.
+func (source *Source) Head(ctx context.Context) (application.Cursor, error) {
+	query := fmt.Sprintf(`
+		SELECT updated_at, id FROM (%s)
+		ORDER BY julianday(updated_at) DESC, id DESC LIMIT 1`, source.allItemsQuery())
+	var cursor application.Cursor
+	err := source.db.QueryRowContext(ctx, query).Scan(&cursor.UpdatedAt, &cursor.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return application.Cursor{}, nil
+	}
+	if err != nil {
+		return application.Cursor{}, fmt.Errorf("определить верхнюю границу EAVC: %w", err)
+	}
+	return cursor, nil
+}
+
 // Open проверяет файл и схему до запуска фонового чтения.
 func Open(ctx context.Context, path string) (*Source, error) {
 	abs, err := filepath.Abs(path)
@@ -115,36 +153,26 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 	if limit <= 0 || limit > 1000 {
 		return nil, after, errors.New("лимит чтения EAVC должен быть от 1 до 1000")
 	}
-	catalogExpression := "''"
-	if source.hasCatalogUUID {
-		catalogExpression = "COALESCE(catalog_uuid, '')"
-	}
-	modeExpression := "'unknown'"
-	if source.hasSourceMode {
-		modeExpression = "COALESCE(source_mode, 'unknown')"
-	}
-	activeQuery := fmt.Sprintf(`
-		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
-			uuid, content, updated_by, updated_at, %s AS catalog_uuid, %s AS source_mode
-		FROM intercept_items`, catalogExpression, modeExpression)
-	allItemsQuery := activeQuery
-	if source.hasArchive {
-		allItemsQuery += ` UNION ALL
-		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
-			uuid, content, updated_by, updated_at, '' AS catalog_uuid, 'unknown' AS source_mode
-		FROM intercept_items_archive`
-	}
+	allItemsQuery := source.allItemsQuery()
 	query := fmt.Sprintf(`
+		WITH all_items AS (%s),
+		newer AS (
+			SELECT * FROM all_items
+			WHERE ? = '' OR julianday(updated_at) > julianday(?)
+			ORDER BY julianday(updated_at), id
+			LIMIT ?
+		),
+		boundary AS (
+			SELECT * FROM all_items
+			WHERE ? <> '' AND julianday(updated_at) = julianday(?)
+		)
 		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
 			uuid, content, updated_by, updated_at, catalog_uuid, source_mode
-		FROM (%s)
-		WHERE ? = ''
-			OR julianday(updated_at) > julianday(?)
-			OR (julianday(updated_at) = julianday(?) AND id > ?)
+		FROM (SELECT * FROM newer UNION SELECT * FROM boundary)
 		ORDER BY julianday(updated_at), id
-		LIMIT ?`, allItemsQuery)
+		`, allItemsQuery)
 	rows, err := source.db.QueryContext(
-		ctx, query, after.UpdatedAt, after.UpdatedAt, after.UpdatedAt, after.ID, limit,
+		ctx, query, after.UpdatedAt, after.UpdatedAt, limit, after.UpdatedAt, after.UpdatedAt,
 	)
 	if err != nil {
 		return nil, after, fmt.Errorf("прочитать изменения EAVC: %w", err)

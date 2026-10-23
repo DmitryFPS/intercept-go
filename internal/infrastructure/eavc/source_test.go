@@ -219,7 +219,7 @@ func TestSourceCursorComparesMixedTimestampFormatsAsTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second scan: %v", err)
 	}
-	if len(items) != 1 || items[0].Record.ID != 2 {
+	if len(items) != 2 || items[len(items)-1].Record.ID != 2 {
 		t.Fatalf("новая строка SQLite пропущена: %#v", items)
 	}
 	if next.UpdatedAt != "2026-10-18 10:01:00" || next.ID != 2 {
@@ -300,5 +300,59 @@ func TestSourceReadsUnseenArchivedItems(t *testing.T) {
 	}
 	if next.ID != 11 {
 		t.Fatalf("неожиданный курсор: %#v", next)
+	}
+}
+
+// SQLite в EAVC хранит время с точностью до секунды. Повторное чтение всей
+// граничной секунды не даёт потерять вторую правку той же строки.
+func TestSourceReadsSecondEditWithSameTimestamp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE intercept_items (
+			id INTEGER PRIMARY KEY, session_id INTEGER, session_uuid TEXT,
+			unit_name TEXT, frequency TEXT, group_code TEXT, uuid TEXT,
+			content TEXT, updated_by TEXT, updated_at TEXT
+		);
+		INSERT INTO intercept_items VALUES(
+			1, 1, 'session', 'Позиция', '100.0', 'A', 'source-1',
+			'10.00\n-Первая редакция', 'Иванов', '2026-10-23 10:00:00'
+		);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	source, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cursor, err := source.Scan(context.Background(), application.Cursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Close()
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("UPDATE intercept_items SET content=? WHERE id=1", "10.00\n-Вторая редакция")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	source, err = Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	items, _, err := source.Scan(context.Background(), cursor, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Content != "10.00\n-Вторая редакция" {
+		t.Fatalf("быстрая редакция потеряна: %#v", items)
 	}
 }

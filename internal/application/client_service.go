@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 const (
 	eavcCursorName         = "eavc"
 	eavcInitializedName    = "eavc_initialized"
+	eavcBaselineName       = "eavc_initial_baseline"
 	transportOffsetName    = "transport_offset"
 	lastTransportProbeName = "last_transport_probe"
 	lastTransportProbeID   = "last_transport_probe_id"
@@ -54,6 +56,21 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 	_, initialized, err := service.State.Value(ctx, eavcInitializedName)
 	if err != nil {
 		return 0, err
+	}
+	if !initialized && !service.CatchUpExisting {
+		if headSource, supported := service.Source.(EventSourceHead); supported {
+			baseline, err := service.initialBaseline(ctx, headSource)
+			if err != nil {
+				return 0, err
+			}
+			if err := service.State.SaveCursor(ctx, eavcCursorName, baseline); err != nil {
+				return 0, err
+			}
+			if err := service.State.SaveValue(ctx, eavcInitializedName, "true"); err != nil {
+				return 0, err
+			}
+			return 0, nil
+		}
 	}
 	items, next, err := service.Source.Scan(ctx, cursor, service.BatchSize)
 	if err != nil {
@@ -105,6 +122,30 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 		}
 	}
 	return queued, nil
+}
+
+func (service *ClientService) initialBaseline(ctx context.Context, source EventSourceHead) (Cursor, error) {
+	if raw, exists, err := service.State.Value(ctx, eavcBaselineName); err != nil {
+		return Cursor{}, err
+	} else if exists {
+		var baseline Cursor
+		if err := json.Unmarshal([]byte(raw), &baseline); err != nil {
+			return Cursor{}, fmt.Errorf("прочитать сохранённую базовую линию EAVC: %w", err)
+		}
+		return baseline, nil
+	}
+	baseline, err := source.Head(ctx)
+	if err != nil {
+		return Cursor{}, err
+	}
+	payload, err := json.Marshal(baseline)
+	if err != nil {
+		return Cursor{}, err
+	}
+	if err := service.State.SaveValue(ctx, eavcBaselineName, string(payload)); err != nil {
+		return Cursor{}, err
+	}
+	return baseline, nil
 }
 
 // DispatchOnce загружает ожидающие события. Подтверждение обрабатывается отдельно.
