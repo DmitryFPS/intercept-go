@@ -33,6 +33,11 @@ func TestClientPackageContainsRunnableStation(t *testing.T) {
 	if err := os.WriteFile(stationTemplate, executable, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	updaterTemplate := filepath.Join(baseDir, "station-template", "EAVC Connect Updater.exe")
+	updater := []byte("test-updater-executable")
+	if err := os.WriteFile(updaterTemplate, updater, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx := context.Background()
 	server, err := NewServer(ctx, baseDir, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -107,6 +112,9 @@ func TestClientPackageContainsRunnableStation(t *testing.T) {
 	folder := "EAVC Connect Station-01/"
 	if !bytes.Equal(entries[folder+"EAVC Connect Station.exe"], executable) {
 		t.Fatal("в комплекте отсутствует исполняемый файл рабочей точки")
+	}
+	if !bytes.Equal(entries[folder+"EAVC Connect Updater.exe"], updater) {
+		t.Fatal("в комплекте отсутствует помощник безопасного обновления")
 	}
 	sealed := entries[folder+provisionedClientActivationName]
 	if bytes.Contains(sealed, []byte(cfg.Transport.BotToken)) {

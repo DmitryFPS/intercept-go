@@ -376,6 +376,11 @@ func (server *Server) ClientPackage(ctx context.Context, clientID string) ([]byt
 	if err != nil {
 		return nil, "", application.RegisteredClient{}, fmt.Errorf("шаблон программы рабочей точки не найден: %w", err)
 	}
+	updaterPath := filepath.Join(server.BaseDir, "station-template", "EAVC Connect Updater.exe")
+	updater, err := os.ReadFile(updaterPath)
+	if err != nil {
+		return nil, "", application.RegisteredClient{}, fmt.Errorf("помощник обновления рабочей точки не найден: %w", err)
+	}
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
 	folder := "EAVC Connect Station-" + safePackageName(client.Number) + "/"
@@ -384,6 +389,7 @@ func (server *Server) ClientPackage(ctx context.Context, clientID string) ([]byt
 		data []byte
 	}{
 		{folder + "EAVC Connect Station.exe", executable},
+		{folder + "EAVC Connect Updater.exe", updater},
 		{folder + provisionedClientActivationName, sealedConfig},
 		{folder + "ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt", []byte(clientPackageReadme)},
 	}
