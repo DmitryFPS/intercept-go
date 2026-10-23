@@ -14,6 +14,8 @@ import (
 	"intercept/internal/domain"
 )
 
+const uploadedRetryInterval = 2 * time.Minute
+
 // ClientQueue хранит события независимо от процесса и состояния сети.
 type ClientQueue struct {
 	db *sql.DB
@@ -234,7 +236,7 @@ func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time)
 					AND (earlier.created_at < client_events.created_at OR
 						(earlier.created_at = client_events.created_at AND earlier.event_id < client_events.event_id))
 			)
-		ORDER BY created_at, event_id
+		ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END, created_at, event_id
 		LIMIT ?`, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, fmt.Errorf("прочитать очередь: %w", err)
@@ -277,7 +279,7 @@ func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, tele
 			last_error = '', next_attempt_at = ?, attempts = attempts + 1
 		WHERE event_id = ? AND state IN ('pending', 'uploaded')`,
 		telegramMessageID, time.Now().UTC().Format(time.RFC3339Nano),
-		time.Now().UTC().Add(30*time.Second).Format(time.RFC3339Nano), eventID,
+		time.Now().UTC().Add(uploadedRetryInterval).Format(time.RFC3339Nano), eventID,
 	)
 	// Центр может подтвердить маленький пакет быстрее, чем Send вернёт
 	// управление этому потоку. Поздняя промежуточная отметка загрузки не должна

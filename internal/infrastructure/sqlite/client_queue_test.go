@@ -183,6 +183,90 @@ func TestClientQueueDoesNotBlockAnotherPosition(t *testing.T) {
 	}
 }
 
+// Новые события независимых подразделений важнее профилактического повтора
+// уже загруженного пакета. Иначе короткий интервал повтора забивает Telegram
+// дубликатами и вытесняет свежую очередь при большом потоке.
+func TestClientQueuePrioritizesPendingOverUploadedRetry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploaded := domain.Event{
+		ID: "uploaded", ClientID: "point", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source:   domain.SourceRecord{UUID: "source-uploaded"},
+		Position: domain.Position{UnitName: "первое подразделение"}, Mode: domain.SourceModeNormal,
+		Content: "загружено", ContentDigest: "digest-uploaded",
+	}
+	pending := uploaded
+	pending.ID = "pending"
+	pending.Source.UUID = "source-pending"
+	pending.Position.UnitName = "второе подразделение"
+	pending.Content = "ожидает"
+	pending.ContentDigest = "digest-pending"
+	pending.CreatedAt = now.Add(time.Second)
+	if err := queue.Enqueue(ctx, uploaded); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Enqueue(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkUploaded(ctx, uploaded.ID, 77); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := queue.Pending(ctx, 1, time.Now().UTC().Add(uploadedRetryInterval+time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Event.ID != pending.ID {
+		t.Fatalf("свежая очередь вытеснена повтором: %#v", jobs)
+	}
+}
+
+func TestClientQueueDoesNotRetryUploadedTooFrequently(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "uploaded", ClientID: "point", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source: domain.SourceRecord{UUID: "source-uploaded"}, Position: domain.Position{UnitName: "позиция"},
+		Mode: domain.SourceModeNormal, Content: "данные", ContentDigest: "digest-uploaded",
+	}
+	if err := queue.Enqueue(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkUploaded(ctx, event.ID, 77); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := queue.Pending(ctx, 10, time.Now().UTC().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("загруженное событие повторено раньше срока: %#v", jobs)
+	}
+	jobs, err = queue.Pending(ctx, 10, time.Now().UTC().Add(uploadedRetryInterval+time.Minute))
+	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != event.ID {
+		t.Fatalf("событие не вернулось для страховочного повтора: %#v, %v", jobs, err)
+	}
+}
+
 // Обновление ранней тестовой сборки пересчитывает неверные UUID-потоки из
 // содержимого событий и восстанавливает порядок одного подразделения.
 func TestClientQueueRepairsLegacyStreamKeys(t *testing.T) {
