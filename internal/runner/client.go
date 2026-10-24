@@ -123,7 +123,7 @@ func (client *Client) StartProcessing() error {
 	if _, err := os.Stat(client.configPath()); err != nil {
 		return errors.New("сначала загрузите настройки рабочей точки")
 	}
-	return client.restartWorker(client.applicationContext())
+	return client.restartWorker(client.ensureRootLifecycle(context.Background()))
 }
 
 // StopProcessing безопасно останавливает обработку, не удаляя настройки и очередь.
@@ -177,11 +177,7 @@ func NewClient(baseDir, version string, logger *slog.Logger) *Client {
 // Start загружает сохранённые настройки и поддерживает рабочий процесс до
 // отмены переданного контекста.
 func (client *Client) Start(ctx context.Context) {
-	rootContext, rootStop := context.WithCancel(ctx)
-	client.mu.Lock()
-	client.rootContext = rootContext
-	client.rootStop = rootStop
-	client.mu.Unlock()
+	rootContext := client.ensureRootLifecycle(ctx)
 	if _, err := os.Stat(client.configPath()); errors.Is(err, os.ErrNotExist) {
 		if _, activationErr := os.Stat(filepath.Join(client.BaseDir, provisionedClientActivationName)); activationErr == nil {
 			client.update(func(status *ClientStatus) {
@@ -200,12 +196,30 @@ func (client *Client) Start(ctx context.Context) {
 			)
 		}
 	}
+}
+
+// ensureRootLifecycle создаёт корневой контекст ровно один раз. Обычный запуск
+// вызывает его из Start, а проверенная новая версия — из ручной команды Start,
+// которой helper завершает транзакционное обновление.
+func (client *Client) ensureRootLifecycle(parent context.Context) context.Context {
+	client.mu.Lock()
+	if client.rootContext != nil && client.rootContext.Err() == nil {
+		rootContext := client.rootContext
+		client.mu.Unlock()
+		return rootContext
+	}
+	rootContext, rootStop := context.WithCancel(parent)
+	client.rootContext = rootContext
+	client.rootStop = rootStop
 	client.background.Add(1)
+	client.mu.Unlock()
+
 	go func() {
 		defer client.background.Done()
 		<-rootContext.Done()
 		client.stopWorker()
 	}()
+	return rootContext
 }
 
 // ValidateForUpdate проверяет защищённые настройки, доверие, базу EAVC и

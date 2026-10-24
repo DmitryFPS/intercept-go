@@ -52,6 +52,32 @@ func TestServerUpdateValidationDoesNotStartProcessing(t *testing.T) {
 	}
 }
 
+func TestServerUpdateActivationStartsBackgroundLoops(t *testing.T) {
+	server, err := NewServer(context.Background(), t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	if err := server.Store.SaveClient(context.Background(), application.RegisteredClient{
+		ID: "point-01", Number: "01", Name: "Текстиль", SenderBotID: 101,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 2,
+		KeyID: "key-01", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	root := server.ensureRootLifecycle(context.Background())
+	if repeated := server.ensureRootLifecycle(context.Background()); repeated != root {
+		t.Fatal("повторная активация создала второй корневой жизненный цикл")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for server.Status().Stats.Clients != 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if clients := server.Status().Stats.Clients; clients != 1 {
+		t.Fatalf("фоновая статистика после активации не запустилась: clients=%d", clients)
+	}
+}
+
 // Готовый комплект точки должен содержать исполняемый файл, подписанные
 // настройки и памятку. Этот тест защищает сценарий скачивания из интерфейса
 // центра от неполной сборки или установки station-template.

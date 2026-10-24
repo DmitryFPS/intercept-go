@@ -31,6 +31,20 @@ func TestClientUpdateValidationDoesNotStartProcessing(t *testing.T) {
 	}
 }
 
+func TestClientUpdateActivationCreatesManagedRootLifecycle(t *testing.T) {
+	client := NewClient(t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	root := client.ensureRootLifecycle(context.Background())
+	if repeated := client.ensureRootLifecycle(context.Background()); repeated != root {
+		t.Fatal("повторная активация создала второй корневой жизненный цикл")
+	}
+	client.Close()
+	select {
+	case <-root.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Close не остановил жизненный цикл, созданный после обновления")
+	}
+}
+
 func TestClientUpdateValidationExposesFailureToHealthCheck(t *testing.T) {
 	client := NewClient(t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer client.Close()

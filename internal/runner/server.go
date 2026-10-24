@@ -48,7 +48,7 @@ func (server *Server) StartProcessing() error {
 	if _, err := os.Stat(server.configPath()); err != nil {
 		return errors.New("сначала настройте связь с рабочими точками")
 	}
-	return server.restartWorker(server.applicationContext())
+	return server.restartWorker(server.ensureRootLifecycle(context.Background()))
 }
 
 // StopProcessing безопасно останавливает приём и доставку, сохраняя очереди.
@@ -180,11 +180,7 @@ func isLegacyBuiltInRules(rules domain.RuleSet) bool {
 
 // Start запускает приём, доставку и обслуживание до отмены контекста.
 func (server *Server) Start(ctx context.Context) {
-	rootContext, rootStop := context.WithCancel(ctx)
-	server.mu.Lock()
-	server.rootContext = rootContext
-	server.rootStop = rootStop
-	server.mu.Unlock()
+	rootContext := server.ensureRootLifecycle(ctx)
 	if _, err := os.Stat(server.configPath()); err == nil {
 		if err := server.restartWorker(rootContext); err != nil {
 			server.fail(
@@ -194,7 +190,24 @@ func (server *Server) Start(ctx context.Context) {
 			)
 		}
 	}
+}
+
+// ensureRootLifecycle запускает фоновые циклы ровно один раз. Это особенно
+// важно после изолированной проверки обновления: команда активации должна
+// превратить уже проверенный процесс в полноценный рабочий процесс.
+func (server *Server) ensureRootLifecycle(parent context.Context) context.Context {
+	server.mu.Lock()
+	if server.rootContext != nil && server.rootContext.Err() == nil {
+		rootContext := server.rootContext
+		server.mu.Unlock()
+		return rootContext
+	}
+	rootContext, rootStop := context.WithCancel(parent)
+	server.rootContext = rootContext
+	server.rootStop = rootStop
 	server.background.Add(2)
+	server.mu.Unlock()
+
 	go func() {
 		defer server.background.Done()
 		server.statusLoop(rootContext)
@@ -203,6 +216,7 @@ func (server *Server) Start(ctx context.Context) {
 		defer server.background.Done()
 		server.serverMaintenanceLoop(rootContext)
 	}()
+	return rootContext
 }
 
 // ValidateForUpdate открывает и мигрирует внутреннее хранилище (это уже
