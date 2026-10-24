@@ -10,56 +10,86 @@
   <header class="guide-hero">
     <p class="eyebrow">EAVC CONNECT · ЛОКАЛЬНАЯ ИНСТРУКЦИЯ</p>
     <h1>Полная установка и настройка EAVC Connect</h1>
-    <p>Центр, рабочие точки, Telegram, получатели, маршруты, обновление и диагностика — по фактически проверенным шагам и снимкам.</p>
+    <p>Как устроена система и как пошагово настроить Центр, Telegram, получателей, маршруты и рабочие точки.</p>
   </header>
   <section class="visual-overview">
-    <div class="visual-card">
-      <p class="visual-kicker">СХЕМА РАБОТЫ</p>
-      <h2>Как данные проходят через EAVC Connect</h2>
-      <div class="architecture-row">
-        <div class="node-stack">
-          <div class="diagram-node source"><b>EAVC Текстиль</b><span>локальная база</span></div>
-          <div class="diagram-node source"><b>EAVC Селидово</b><span>локальная база</span></div>
-          <div class="diagram-node source"><b>EAVC Весёлое</b><span>локальная база</span></div>
+    <div class="visual-card system-card">
+      <p class="visual-kicker">ГЛАВНАЯ СХЕМА</p>
+      <h2>Кто с кем взаимодействует и зачем</h2>
+      <p class="visual-summary">Боты рабочих точек доставляют зашифрованные пакеты только в техническую группу. Центр принимает их через Ту-96-Тест, выбирает маршрут и отправляет уже готовый результат получателям.</p>
+      <div class="system-map" role="img" aria-label="Схема взаимодействия баз EAVC, программ рабочих точек, ботов, транспортных топиков, Центра и получателей">
+        <p class="map-caption">1 · КАЖДАЯ ТОЧКА ИМЕЕТ СВОЮ БАЗУ, ПРОГРАММУ И БОТА</p>
+        <div class="station-grid">
+          <div class="station-chain">
+            <div class="diagram-node source"><b>База EAVC</b><span>Текстиль</span></div><i>→</i>
+            <div class="diagram-node station"><b>Station 01</b><span>Текстиль</span></div><i>→</i>
+            <div class="diagram-node point-bot"><b>Текстиль-Тест</b><span>бот точки</span></div>
+          </div>
+          <div class="station-chain">
+            <div class="diagram-node source"><b>База EAVC</b><span>Селидово</span></div><i>→</i>
+            <div class="diagram-node station"><b>Station 02</b><span>Селидово</span></div><i>→</i>
+            <div class="diagram-node point-bot"><b>Селидово-Тест</b><span>бот точки</span></div>
+          </div>
+          <div class="station-chain">
+            <div class="diagram-node source"><b>База EAVC</b><span>Весёлое</span></div><i>→</i>
+            <div class="diagram-node station"><b>Station 03</b><span>Весёлое</span></div><i>→</i>
+            <div class="diagram-node point-bot"><b>Весёлое-Тест</b><span>бот точки</span></div>
+          </div>
         </div>
-        <div class="diagram-arrow">→</div>
-        <div class="diagram-node station"><b>Рабочие точки</b><span>читают EAVC только для чтения<br>и отправляют через Telegram</span></div>
-        <div class="diagram-arrow">→</div>
-        <div class="diagram-node transport"><b>Закрытая группа обмена</b><span>отдельная тема каждой точки</span></div>
-        <div class="diagram-arrow">→</div>
-        <div class="diagram-node center"><b>EAVC Connect Center</b><span>проверка, подтверждение<br>и маршрутизация</span></div>
+        <div class="exchange-arrows" aria-hidden="true"><span>↓ пакет · ↑ подтверждение</span><span>↓ пакет · ↑ подтверждение</span><span>↓ пакет · ↑ подтверждение</span></div>
+        <div class="transport-box">
+          <b>EAVC-Обмен-Тест</b>
+          <span>закрытая техническая группа — не группа получателей</span>
+          <div class="topic-grid">
+            <div><b>Топик Текстиль</b><span>только точка 01</span></div>
+            <div><b>Топик Селидово</b><span>только точка 02</span></div>
+            <div><b>Топик Весёлое</b><span>только точка 03</span></div>
+          </div>
+        </div>
+        <div class="center-arrow">↓ все три топика читает центральный бот · подтверждения возвращаются обратно ↑</div>
+        <div class="center-chain">
+          <div class="diagram-node central-bot"><b>Ту-96-Тест</b><span>один центральный Telegram-бот</span></div>
+          <i>⇄</i>
+          <div class="diagram-node center"><b>EAVC Connect Center</b><span>проверяет пакет и выбирает маршрут</span></div>
+        </div>
+        <p class="map-caption">2 · ЦЕНТР ДОСТАВЛЯЕТ ГОТОВЫЙ РЕЗУЛЬТАТ</p>
+        <div class="delivery-grid">
+          <div class="diagram-node aero"><b>Аэродром-Тест</b><span>Ту-96-Тест → топик нужной позиции<br>и, если включено, DOCX для 39-ки</span></div>
+          <div class="diagram-node shab"><b>Шабашка-Тест</b><span>Ту-96-Тест → топик известной позиции</span></div>
+          <div class="diagram-node unknown"><b>Шабашка-Тест · General</b><span>новая или неизвестная позиция → на проверку</span></div>
+          <div class="diagram-node word"><b>39-ка</b><span>Центр → DOCX в сетевую папку<br>без Telegram-бота</span></div>
+        </div>
       </div>
-      <div class="outputs-row">
-        <div class="diagram-node output aero"><b>Аэродром</b><span>Telegram · темы позиций</span></div>
-        <div class="diagram-node output shab"><b>Шабашка</b><span>Telegram · темы и General</span></div>
-        <div class="diagram-node output word"><b>39-ка</b><span>DOCX · сетевая папка</span></div>
+      <div class="map-rules">
+        <p><b>Важно:</b> боты точек никогда не отправляют данные прямо в Аэродром или Шабашку.</p>
+        <p><b>Ан-22-Антей-Тест</b> — только аккаунт администратора для создания объектов; в обработке перехватов он не участвует.</p>
+        <p><b>Топики группы обмена</b> разделяют компьютеры, а топики групп получателей — позиции.</p>
       </div>
     </div>
     <div class="visual-card">
-      <p class="visual-kicker">ПОРЯДОК РАЗВЁРТЫВАНИЯ</p>
-      <h2>От чистого компьютера до контрольной доставки</h2>
-      <div class="step-flow">
-        <div><b>01</b><span>Запустить Центр</span></div>
-        <i>→</i>
-        <div><b>02</b><span>Создать ботов и группы</span></div>
-        <i>→</i>
-        <div><b>03</b><span>Настроить получателей и точки</span></div>
-        <i>→</i>
-        <div><b>04</b><span>Опубликовать маршруты</span></div>
-        <i>→</i>
-        <div><b>05</b><span>Активировать рабочие точки</span></div>
-        <i>→</i>
-        <div><b>06</b><span>Проверить полный маршрут</span></div>
+      <p class="visual-kicker">ПУТЬ ОДНОГО ПЕРЕХВАТА</p>
+      <h2>От базы EAVC до получателя и обратно</h2>
+      <div class="packet-flow" role="img" aria-label="Семь шагов передачи перехвата и возврата подтверждения">
+        <div><b>1</b><span>В базе EAVC появилась запись</span></div><i>→</i>
+        <div><b>2</b><span>Station читает её и шифрует</span></div><i>→</i>
+        <div><b>3</b><span>Бот точки отправляет пакет в свой топик</span></div><i>→</i>
+        <div><b>4</b><span>Ту-96-Тест передаёт пакет Центру</span></div><i>→</i>
+        <div><b>5</b><span>Центр выбирает маршрут</span></div><i>→</i>
+        <div><b>6</b><span>Результат уходит получателю</span></div><i>→</i>
+        <div><b>7</b><span>Подтверждение возвращается точке</span></div>
       </div>
     </div>
-    <div class="visual-card route-visual">
-      <p class="visual-kicker">ЛОГИКА МАРШРУТИЗАЦИИ</p>
+    <div class="visual-card">
+      <p class="visual-kicker">ВЫБОР МАРШРУТА</p>
       <h2>Куда Центр отправляет результат</h2>
-      <div class="route-grid">
-        <div class="route-input"><b>Название позиции из EAVC</b><span>сравнивается с опубликованными правилами</span></div>
-        <div class="route-branch aero"><b>Известная позиция Аэродрома</b><span>Telegram-тема + DOCX для 39-ки</span></div>
-        <div class="route-branch shab"><b>Известная позиция Шабашки</b><span>только назначенная Telegram-тема</span></div>
-        <div class="route-branch unknown"><b>Новая или неизвестная</b><span>General группы Шабашка · на проверку</span></div>
+      <div class="route-map" role="img" aria-label="Три варианта маршрутизации известной аэродромной, известной шабашной и неизвестной позиции">
+        <div class="route-start"><b>Название позиции из EAVC</b><span>Центр ищет точное совпадение в опубликованных маршрутах</span></div>
+        <div class="route-arrow">↓</div>
+        <div class="route-options">
+          <div class="diagram-node aero"><b>Известная позиция Аэродрома</b><span>топик позиции в Аэродром-Тест<br>+ DOCX для 39-ки, если включён</span></div>
+          <div class="diagram-node shab"><b>Известная позиция Шабашки</b><span>топик позиции в Шабашка-Тест<br>без DOCX</span></div>
+          <div class="diagram-node unknown"><b>Позиция не найдена</b><span>General группы Шабашка-Тест<br>со статусом «На проверку»</span></div>
+        </div>
       </div>
     </div>
   </section>
