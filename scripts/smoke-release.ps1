@@ -85,11 +85,22 @@ try {
             if ($imageReferences.Count -eq 0) {
                 throw "Полная инструкция не содержит ссылок на снимки: $guide"
             }
+            if ($imageReferences.Count -lt 117) {
+                throw "В полной инструкции найдено только $($imageReferences.Count) снимков; ожидается не менее 117"
+            }
+            $referencedImageNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($match in $imageReferences) {
                 $relativeImage = $match.Groups[1].Value.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
                 $imagePath = Join-Path (Split-Path -Parent $guide) $relativeImage
                 if (-not (Test-Path -LiteralPath $imagePath -PathType Leaf)) {
                     throw "В архиве $archive отсутствует снимок из инструкции: $relativeImage"
+                }
+                $null = $referencedImageNames.Add([System.IO.Path]::GetFileName($imagePath))
+            }
+            $guideImageRoot = Join-Path (Split-Path -Parent $guide) 'full-installation-guide\images'
+            foreach ($imageFile in Get-ChildItem -LiteralPath $guideImageRoot -File) {
+                if (-not $referencedImageNames.Contains($imageFile.Name)) {
+                    throw "Снимок присутствует в комплекте, но не показан в полной инструкции: $($imageFile.Name)"
                 }
             }
         }
