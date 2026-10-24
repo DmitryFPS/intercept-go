@@ -149,6 +149,12 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 		if expiresAt.IsZero() {
 			expiresAt = sourceAt.Add(30 * time.Minute)
 		}
+		// Корректирующая очистка удаляет уже опубликованный результат и не
+		// может просрочиться как обычная первая доставка. Иначе после длительного
+		// сбоя старый Telegram/DOCX остался бы в запрещённом маршруте.
+		if delivery.RuleLevel == "cleanup" {
+			expiresAt = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO delivery_jobs(
 				event_id, destination_id, delivery_json, stream_key, source_at,
@@ -326,6 +332,20 @@ func (store *ServerStore) PendingDestinationCount(ctx context.Context, destinati
 		destinationID,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("посчитать очередь получателя: %w", err)
+	}
+	return count, nil
+}
+
+// DestinationDeliveryCount нужен для защиты идентичности получателя. После первой
+// доставки один ID нельзя переназначать другому Telegram-чату или Word-папке:
+// иначе ранее созданные результаты станут неуправляемыми.
+func (store *ServerStore) DestinationDeliveryCount(ctx context.Context, destinationID string) (int, error) {
+	var count int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM delivery_jobs WHERE destination_id=?",
+		destinationID,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("посчитать историю получателя: %w", err)
 	}
 	return count, nil
 }

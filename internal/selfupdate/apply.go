@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +33,9 @@ type ApplyOptions struct {
 func Apply(options ApplyOptions) error {
 	if options.OldPID <= 0 || options.BaseDir == "" || options.Package == "" || options.WorkRoot == "" || options.ReadyFile == "" {
 		return errors.New("неполные параметры обновления")
+	}
+	if err := validateApplyPaths(options); err != nil {
+		return err
 	}
 	// Помощник запускается из WorkRoot, поэтому Windows не позволит удалить сам
 	// исполняемый файл до завершения процесса. При любом исходе немедленно
@@ -125,6 +130,35 @@ func Apply(options ApplyOptions) error {
 		}
 	}
 	return finishApply(options, Result{State: state, FromVersion: options.FromVersion, ToVersion: options.ToVersion, Message: message, UpdatedAt: time.Now()}, errors.Join(activationErr, rollbackErr, restartErr))
+}
+
+// validateApplyPaths не позволяет запустить подписанный helper как средство
+// удаления произвольных каталогов. Рабочий каталог всегда создаёт Manager
+// непосредственно в системном TEMP с фиксированными именами артефактов.
+func validateApplyPaths(options ApplyOptions) error {
+	workRoot, err := filepath.Abs(options.WorkRoot)
+	if err != nil {
+		return errors.New("некорректная папка обновления")
+	}
+	tempRoot, err := filepath.Abs(os.TempDir())
+	if err != nil || !strings.EqualFold(filepath.Clean(filepath.Dir(workRoot)), filepath.Clean(tempRoot)) ||
+		!strings.HasPrefix(filepath.Base(workRoot), "EAVC-Connect-Update-") {
+		return errors.New("папка обновления не принадлежит EAVC Connect")
+	}
+	workInfo, err := os.Lstat(workRoot)
+	if err != nil || workInfo.Mode()&os.ModeSymlink != 0 || !workInfo.IsDir() {
+		return errors.New("папка обновления не должна быть ссылкой или точкой повторного разбора")
+	}
+	expectedPackage := filepath.Join(workRoot, "update.zip")
+	expectedReady := filepath.Join(workRoot, "helper-ready")
+	packagePath, packageErr := filepath.Abs(options.Package)
+	readyPath, readyErr := filepath.Abs(options.ReadyFile)
+	if packageErr != nil || readyErr != nil ||
+		!strings.EqualFold(filepath.Clean(packagePath), filepath.Clean(expectedPackage)) ||
+		!strings.EqualFold(filepath.Clean(readyPath), filepath.Clean(expectedReady)) {
+		return errors.New("пути артефактов обновления не прошли проверку")
+	}
+	return nil
 }
 
 func stopCheckedProcess(process *os.Process) {
@@ -324,6 +358,9 @@ func activateApplication(options ApplyOptions, expectedVersion string) (bool, er
 	request.Header.Set("Origin", "http://"+options.Address)
 	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
 	if err != nil {
+		if activationRequestDefinitelyNotSent(err) {
+			return false, err
+		}
 		// Запрос мог быть обработан до потери ответа. Проверяем фактическое
 		// состояние, но больше не считаем безопасным возврат снимка данных.
 		if statusErr := waitForActivatedApplication(options, expectedVersion, 45*time.Second); statusErr == nil {
@@ -360,6 +397,18 @@ func activateApplication(options ApplyOptions, expectedVersion string) (bool, er
 		return true, fmt.Errorf("обработка не запущена: состояние %q", status.State)
 	}
 	return true, nil
+}
+
+// activationRequestDefinitelyNotSent отличает отказ ещё до установки TCP-соединения
+// от неоднозначной потери ответа. В первом случае команда Start точно не
+// могла быть принята, поэтому откат безопасен.
+func activationRequestDefinitelyNotSent(err error) bool {
+	var urlError *url.Error
+	if !errors.As(err, &urlError) {
+		return false
+	}
+	var operationError *net.OpError
+	return errors.As(urlError.Err, &operationError) && strings.EqualFold(operationError.Op, "dial")
 }
 
 func waitForActivatedApplication(options ApplyOptions, expectedVersion string, timeout time.Duration) error {

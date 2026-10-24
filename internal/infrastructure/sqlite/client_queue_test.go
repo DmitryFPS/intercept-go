@@ -85,7 +85,8 @@ func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	}
 }
 
-// Пока ранний перехват ждёт повторной отправки, более поздний перехват того же топика не должен его обогнать.
+// Пока ранняя версия записи ждёт повтора, более поздняя версия той же записи
+// не должна её обогнать, в том числе после исправления названия подразделения.
 func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {
 	t.Parallel()
 
@@ -108,7 +109,7 @@ func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {
 	}
 	second := first
 	second.ID = "event-2"
-	second.Source.UUID = "source-2"
+	second.Position.UnitName = "исправленная позиция"
 	second.Content = "второе"
 	second.ContentDigest = "digest-2"
 	second.CreatedAt = now.Add(time.Second)
@@ -267,8 +268,8 @@ func TestClientQueueDoesNotRetryUploadedTooFrequently(t *testing.T) {
 	}
 }
 
-// Обновление ранней тестовой сборки пересчитывает неверные UUID-потоки из
-// содержимого событий и восстанавливает порядок одного подразделения.
+// Обновление ранней сборки пересчитывает потоки из содержимого событий и восстанавливает
+// порядок версий одной записи даже при изменении её названия.
 func TestClientQueueRepairsLegacyStreamKeys(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -288,7 +289,8 @@ func TestClientQueueRepairsLegacyStreamKeys(t *testing.T) {
 		Mode: domain.SourceModeNormal, Content: "первое", ContentDigest: "digest-1",
 	}
 	second := first
-	second.ID, second.Source.UUID, second.ContentDigest = "legacy-2", "source-2", "digest-2"
+	second.ID, second.ContentDigest = "legacy-2", "digest-2"
+	second.Position.UnitName = "исправленное подразделение"
 	second.CreatedAt = now.Add(time.Second)
 	if _, err := queue.Enqueue(ctx, first); err != nil {
 		t.Fatal(err)
@@ -296,10 +298,10 @@ func TestClientQueueRepairsLegacyStreamKeys(t *testing.T) {
 	if _, err := queue.Enqueue(ctx, second); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, "UPDATE client_events SET stream_key=source_uuid"); err != nil {
+	if _, err := db.ExecContext(ctx, "UPDATE client_events SET stream_key='name:legacy'"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version=5"); err != nil {
+	if _, err := db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version=6"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()

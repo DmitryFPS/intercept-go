@@ -79,6 +79,10 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	if err != nil || pending != 0 {
 		t.Fatalf("завершённая доставка осталась в очереди: %d, %v", pending, err)
 	}
+	history, err := store.DestinationDeliveryCount(ctx, "a")
+	if err != nil || history != 1 {
+		t.Fatalf("история адреса получателя потеряна после доставки: %d, %v", history, err)
+	}
 	event.ContentDigest = "changed"
 	if _, err := store.KnownEvent(ctx, event.ID, event.ContentDigest); err == nil {
 		t.Fatal("проверка известного UUID должна обнаруживать другое содержимое")
@@ -187,6 +191,13 @@ func TestServerStoreQueuesCleanupWhenEditedRecordLeavesWordRoute(t *testing.T) {
 	}
 	if !foundCleanup {
 		t.Fatalf("задание очистки прежнего Word-маршрута не создано: %#v", jobs)
+	}
+	jobs, err = store.PendingDeliveries(ctx, 10, time.Now().Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Delivery.RuleLevel != "cleanup" || jobs[0].Delivery.Destination.ID != "w" {
+		t.Fatalf("очистка не должна просрочиться вместе с обычной доставкой: %#v", jobs)
 	}
 }
 

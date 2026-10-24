@@ -162,25 +162,8 @@ func (client *Client) stopWorkerLocked() {
 }
 
 func (client *Client) run(ctx context.Context, cfg config.Client) {
-	eavcPath, err := client.resolveEAVCPath(ctx, cfg)
-	if err != nil {
-		client.sourceTransientFailure(
-			"Ожидаем базу EAVC",
-			"Программа продолжит попытки автоматически. При необходимости укажите путь вручную.",
-			err,
-		)
-		return
-	}
-	source, err := eavc.Open(ctx, eavcPath)
-	if err != nil {
-		client.sourceTransientFailure(
-			"База EAVC временно недоступна",
-			"Программа повторит подключение автоматически; сохранённая очередь не потеряна.",
-			err,
-		)
-		return
-	}
-	defer source.Close()
+	// Локальная очередь и транспорт открываются до EAVC. Так сохранённые пакеты
+	// продолжают уходить в центр даже при холодном запуске без доступной базы EAVC.
 	storage, err := client.waitForLocalQueue(ctx, filepath.Join(client.BaseDir, "data", "client.db"))
 	if err != nil {
 		if ctx.Err() != nil {
@@ -207,10 +190,6 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		)
 		return
 	}
-	client.update(func(status *ClientStatus) {
-		status.DatabaseOK = true
-		status.EAVCPath = eavcPath
-	})
 	for {
 		if err := api.DeleteWebhook(ctx, false); err == nil {
 			break
@@ -242,7 +221,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		Key:               key,
 	}
 	service := &application.ClientService{
-		ClientID: cfg.ClientID, Source: source, Queue: queue, State: queue,
+		ClientID: cfg.ClientID, Queue: queue, State: queue,
 		Sender: transport,
 		KeyID:  cfg.Cryptography.KeyID, Key: key, BatchSize: cfg.Polling.BatchSize,
 		CatchUpExisting: cfg.Polling.CatchUpExisting,
@@ -252,14 +231,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		Logger:          client.Logger,
 		Now:             time.Now,
 	}
-	client.update(func(status *ClientStatus) {
-		status.State = "running"
-		status.Title = "Программа работает"
-		status.Detail = "EAVC подключён."
-		status.DatabaseOK = true
-		status.TelegramOK = true
-		status.EAVCPath = eavcPath
-	})
+	client.update(func(status *ClientStatus) { status.TelegramOK = true })
 
 	var background sync.WaitGroup
 	background.Add(3)
@@ -269,14 +241,75 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 	defer background.Wait()
 	ticker := time.NewTicker(time.Duration(cfg.Polling.EAVCSeconds) * time.Second)
 	defer ticker.Stop()
+	var source *eavc.Source
+	defer func() {
+		if source != nil {
+			_ = source.Close()
+		}
+	}()
 	for {
-		client.collectAndDispatch(ctx, service, queue)
+		if source == nil {
+			eavcPath, pathErr := client.resolveEAVCPath(ctx, cfg)
+			if pathErr != nil {
+				client.sourceTransientFailure(
+					"Ожидаем базу EAVC",
+					"Сохранённая очередь продолжает отправляться; путь EAVC будет проверен снова.",
+					pathErr,
+				)
+			} else {
+				opened, openErr := eavc.Open(ctx, eavcPath)
+				if openErr != nil {
+					client.sourceTransientFailure(
+						"База EAVC временно недоступна",
+						"Сохранённая очередь продолжает отправляться; подключение будет повторено.",
+						openErr,
+					)
+				} else {
+					source = opened
+					service.Source = source
+					client.update(func(status *ClientStatus) {
+						status.State = "running"
+						status.Title = "Программа работает"
+						status.Detail = "EAVC подключён."
+						status.DatabaseOK = true
+						status.TelegramOK = true
+						status.EAVCPath = eavcPath
+					})
+				}
+			}
+		}
+		if source == nil {
+			client.dispatchSavedQueue(ctx, service, queue)
+		} else {
+			client.collectAndDispatch(ctx, service, queue)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+func (client *Client) dispatchSavedQueue(ctx context.Context, service *application.ClientService, queue *stateDB.ClientQueue) {
+	now := time.Now().UTC()
+	count, err := service.DispatchOnce(ctx)
+	if err != nil {
+		client.transientFailure(
+			"Telegram временно недоступен",
+			"Данные сохранены на компьютере. Программа повторит отправку автоматически.",
+			err,
+		)
+	} else {
+		client.transportRecovered("Сохранённая очередь передаётся; ожидаем EAVC.")
+	}
+	if err == nil && count > 0 {
+		client.update(func(status *ClientStatus) {
+			status.TelegramOK = true
+			status.LastUpload = &now
+		})
+	}
+	client.refreshStats(ctx, queue)
 }
 
 // heartbeatLoop отправляет редкий служебный пакет, чтобы центр различал

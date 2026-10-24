@@ -116,6 +116,13 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 		return errors.New("не задано обозначение защиты")
 	}
 	existingDestination, destinationExists := cfg.Destinations[id]
+	previousDeliveries, err := server.Store.DestinationDeliveryCount(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !destinationExists && previousDeliveries > 0 {
+		return errors.New("этот ID получателя уже использовался; создайте новый ID, чтобы сохранить связь с историей")
+	}
 	if destinationExists && existingDestination.Kind == destination.Kind {
 		if destination.Kind == domain.DestinationTelegram && strings.TrimSpace(destination.BotToken) == "" {
 			destination.BotToken = existingDestination.BotToken
@@ -173,6 +180,9 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 		if pending > 0 {
 			return fmt.Errorf("нельзя изменить адрес получателя: сначала дождитесь завершения %d заданий в его очереди", pending)
 		}
+		if previousDeliveries > 0 {
+			return errors.New("нельзя изменить тип или адрес получателя с историей; создайте новый получатель")
+		}
 	}
 	if cfg.Destinations == nil {
 		cfg.Destinations = make(map[string]config.DestinationConfig)
@@ -184,7 +194,7 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 	}
 	rules, err := server.Store.ActiveRules(ctx)
 	if err != nil {
-		return err
+		return errors.Join(err, server.saveConfig(previousConfig))
 	}
 	if rules.Destinations == nil {
 		rules.Destinations = make(map[string]domain.Destination)
@@ -638,8 +648,12 @@ func (server *Server) validateRuleDestinations(rules domain.RuleSet) error {
 	configured := cloneDestinations(server.config.Destinations)
 	server.mu.RUnlock()
 	for id := range rules.Destinations {
-		if _, exists := configured[id]; !exists {
+		actual, exists := configured[id]
+		if !exists {
 			return fmt.Errorf("получатель %q отсутствует в текущей конфигурации", id)
+		}
+		if rules.Destinations[id].Kind != actual.Kind {
+			return fmt.Errorf("тип получателя %q в маршрутах не совпадает с его настройкой", id)
 		}
 	}
 	for id := range configured {

@@ -6,8 +6,8 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -45,7 +45,7 @@ func Protect(plain []byte) ([]byte, error) {
 	input := dataBlob(plain)
 	var output windows.DataBlob
 	if err := windows.CryptProtectData(&input, nil, nil, 0, nil, cryptprotectUIForbidden, &output); err != nil {
-		if isTestProcess() {
+		if isGoTestBinary() {
 			return protectTestValue(plain)
 		}
 		return nil, fmt.Errorf("защитить настройки Windows DPAPI: %w", err)
@@ -59,8 +59,8 @@ func Unprotect(protected []byte) ([]byte, error) {
 	if len(protected) == 0 {
 		return nil, errors.New("защищённый файл пуст")
 	}
-	if strings.HasPrefix(string(protected), "INTERCEPT-TEST-AES1:") {
-		if !isTestProcess() {
+	if strings.HasPrefix(string(protected), "INTERCEPT-TEST-AES2:") {
+		if !isGoTestBinary() {
 			return nil, errors.New("тестовый формат секрета запрещён в рабочей программе")
 		}
 		return unprotectTestValue(protected)
@@ -74,35 +74,40 @@ func Unprotect(protected []byte) ([]byte, error) {
 	return blobBytes(output), nil
 }
 
-func isTestProcess() bool {
-	return strings.HasSuffix(strings.ToLower(os.Args[0]), ".test.exe")
+// isGoTestBinary проверяет не только имя, но и флаг, который регистрируется
+// внутренним пакетом testing. Простое переименование рабочего EXE не включит fallback.
+func isGoTestBinary() bool {
+	return strings.HasSuffix(strings.ToLower(os.Args[0]), ".test.exe") && flag.Lookup("test.v") != nil
 }
 
+var processTestProtectionKey = func() []byte {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		panic("cannot initialize ephemeral test protection key: " + err.Error())
+	}
+	return key
+}()
+
 func protectTestValue(plain []byte) ([]byte, error) {
-	block, _ := aes.NewCipher(testProtectionKey())
+	block, _ := aes.NewCipher(processTestProtectionKey)
 	aead, _ := cipher.NewGCM(block)
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
-	result := append([]byte("INTERCEPT-TEST-AES1:"), nonce...)
+	result := append([]byte("INTERCEPT-TEST-AES2:"), nonce...)
 	return aead.Seal(result, nonce, plain, nil), nil
 }
 
 func unprotectTestValue(protected []byte) ([]byte, error) {
-	const prefix = "INTERCEPT-TEST-AES1:"
-	block, _ := aes.NewCipher(testProtectionKey())
+	const prefix = "INTERCEPT-TEST-AES2:"
+	block, _ := aes.NewCipher(processTestProtectionKey)
 	aead, _ := cipher.NewGCM(block)
 	payload := protected[len(prefix):]
 	if len(payload) < aead.NonceSize() {
 		return nil, errors.New("тестовое защищённое значение повреждено")
 	}
 	return aead.Open(nil, payload[:aead.NonceSize()], payload[aead.NonceSize():], nil)
-}
-
-func testProtectionKey() []byte {
-	sum := sha256.Sum256([]byte("intercept tests only; production rejects this format"))
-	return sum[:]
 }
 
 func dataBlob(data []byte) windows.DataBlob {

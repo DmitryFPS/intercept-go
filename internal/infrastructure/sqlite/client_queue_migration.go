@@ -13,7 +13,7 @@ import (
 func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
 	if err := Migrate(ctx, db, []string{
 		clientMigration, clientExpiryMigration, clientSourceVersionMigration,
-		clientStreamMigration, clientStreamRepairMigration,
+		clientStreamMigration, clientStreamRepairMigration, clientSourceStreamMigration,
 	}); err != nil {
 		return nil, err
 	}

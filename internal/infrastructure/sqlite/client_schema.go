@@ -109,3 +109,10 @@ CREATE INDEX client_events_pending_idx
 const clientStreamRepairMigration = `
 UPDATE client_events SET stream_key='';
 `
+
+// Ранняя схема группировала очередь по названию подразделения. При его
+// исправлении две версии одной записи могли обогнать друг друга. Миграция запускает
+// повторный расчёт по стабильному UUID/ID исходной записи.
+const clientSourceStreamMigration = `
+UPDATE client_events SET stream_key='';
+`

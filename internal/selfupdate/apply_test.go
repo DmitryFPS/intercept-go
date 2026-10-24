@@ -2,14 +2,49 @@ package selfupdate
 
 import (
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"intercept/internal/infrastructure/secrets"
 )
+
+func TestActivationDialFailureAllowsRollback(t *testing.T) {
+	err := &url.Error{Op: "Post", URL: "http://127.0.0.1:1/api/control/start", Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}}
+	if !activationRequestDefinitelyNotSent(err) {
+		t.Fatal("отказ до TCP-соединения должен разрешать автоматический откат")
+	}
+	if activationRequestDefinitelyNotSent(&url.Error{Op: "Post", Err: errors.New("response body interrupted")}) {
+		t.Fatal("потерю ответа после отправки нельзя считать безусловно безопасной для отката")
+	}
+}
+
+func TestApplyPathsAreConfinedToManagedTempDirectory(t *testing.T) {
+	workRoot, err := os.MkdirTemp("", "EAVC-Connect-Update-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workRoot)
+	valid := ApplyOptions{
+		WorkRoot:  workRoot,
+		Package:   filepath.Join(workRoot, "update.zip"),
+		ReadyFile: filepath.Join(workRoot, "helper-ready"),
+	}
+	if err := validateApplyPaths(valid); err != nil {
+		t.Fatalf("штатные пути Manager отклонены: %v", err)
+	}
+	malicious := valid
+	malicious.Package = t.TempDir()
+	if err := validateApplyPaths(malicious); err == nil {
+		t.Fatal("произвольный путь удаления не должен приниматься helper-ом")
+	}
+}
 
 func TestActivateApplicationStartsValidatedProcess(t *testing.T) {
 	baseDir := t.TempDir()

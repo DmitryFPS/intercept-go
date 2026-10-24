@@ -107,12 +107,6 @@ func (rules RuleSet) Validate() error {
 		return err
 	}
 	activeUnknown := 0
-	enabledTelegram := 0
-	for _, destination := range rules.Destinations {
-		if destination.Enabled && destination.Kind == DestinationTelegram {
-			enabledTelegram++
-		}
-	}
 	for id, decision := range rules.Unknown {
 		if decision.Action == RouteSkip {
 			continue
@@ -124,7 +118,7 @@ func (rules RuleSet) Validate() error {
 		}
 		activeUnknown++
 	}
-	if enabledTelegram > 0 && activeUnknown != 1 {
+	if activeUnknown != 1 {
 		return errors.New("для новых и ошибочных подразделений должен быть выбран ровно один Telegram General")
 	}
 	return nil

@@ -290,6 +290,8 @@ func (client *Client) Status() ClientStatus {
 func (client *Client) OperationalStatus() ClientStatus {
 	status := client.Status()
 	status.ClientID = ""
+	status.ClientName = ""
+	status.ClientNumber = ""
 	if status.EAVCPath != "" {
 		status.EAVCPath = filepath.Base(status.EAVCPath)
 	}

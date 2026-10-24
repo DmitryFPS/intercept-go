@@ -84,6 +84,20 @@ func TestRuleSetRejectsUnsafeUnknownRoutes(t *testing.T) {
 	}
 }
 
+func TestRuleSetRejectsWorkingMatrixWithoutTelegramGeneral(t *testing.T) {
+	t.Parallel()
+	rules := RuleSet{
+		Version: 1,
+		Destinations: map[string]Destination{
+			"word-39": {ID: "word-39", Name: "39-ка", Kind: DestinationWord, Enabled: true},
+		},
+		Unknown: map[string]RouteDecision{"word-39": {Action: RouteSkip}},
+	}
+	if err := rules.Validate(); err == nil {
+		t.Fatal("рабочая матрица без Telegram General не должна публиковаться")
+	}
+}
+
 // Перехват, назначенный только в Шабашку, не должен создавать документ для удалённой точки.
 func TestRuleSetDoesNotCreateWordForShabashkaPosition(t *testing.T) {
 	t.Parallel()

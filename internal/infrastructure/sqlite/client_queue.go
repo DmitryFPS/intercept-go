@@ -265,14 +265,14 @@ func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time)
 	return events, rows.Err()
 }
 
-// clientStreamKey ограничивает строгий порядок одним подразделением. Если в
-// будущей EAVC появится стабильный каталог, переименование позиции не разделит
-// её очередь; в текущей EAVC используется нормализованное точное название.
+// clientStreamKey сохраняет строгий порядок всех редакций одной записи EAVC.
+// Название подразделения нельзя использовать: оператор может исправить его, но
+// более ранняя версия всё равно должна быть передана первой.
 func clientStreamKey(event domain.Event) string {
-	if catalogUUID := strings.TrimSpace(event.Position.CatalogUUID); catalogUUID != "" {
-		return "catalog:" + strings.ToLower(catalogUUID)
+	if sourceUUID := strings.TrimSpace(event.Source.UUID); sourceUUID != "" {
+		return "source:" + strings.ToLower(sourceUUID)
 	}
-	return "name:" + domain.NormalizeUnitName(domain.RoutingUnitName(event.Position.UnitName))
+	return fmt.Sprintf("source-id:%d", event.Source.ID)
 }
 
 // MarkUploaded запоминает загрузку в транспорт, не считая её приёмом сервером.

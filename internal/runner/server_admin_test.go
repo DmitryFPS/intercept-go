@@ -20,9 +20,22 @@ import (
 
 	"intercept/internal/application"
 	"intercept/internal/config"
+	"intercept/internal/domain"
 	"intercept/internal/infrastructure/secrets"
 	"intercept/internal/provisioning"
 )
+
+func TestRuleDestinationKindMustMatchConfiguredTransport(t *testing.T) {
+	server := &Server{config: config.Server{Destinations: map[string]config.DestinationConfig{
+		"word-39": {Kind: domain.DestinationWord},
+	}}}
+	rules := domain.RuleSet{Destinations: map[string]domain.Destination{
+		"word-39": {ID: "word-39", Name: "39-ка", Kind: domain.DestinationTelegram, Enabled: true},
+	}}
+	if err := server.validateRuleDestinations(rules); err == nil {
+		t.Fatal("маршрут не должен выдавать Word-получателя за Telegram General")
+	}
+}
 
 func TestServerUpdateValidationDoesNotStartProcessing(t *testing.T) {
 	server, err := NewServer(context.Background(), t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
