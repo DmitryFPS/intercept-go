@@ -4,6 +4,8 @@
 /.idea/
 /.gocache/
 /.gocache-race/
+/.gocache-storage-diagnostic/
+/.gocache-test/
 /.gomodcache/
 /.gopath/
 /.gotmp/
@@ -17,7 +19,9 @@
 /.toolchains/
 /.qa/
 /.tmp/
+/.tmp-go-cache/
 /.build-cache/
+/.visual-check/
 *.log
 *.local.json
 *.secret.json
