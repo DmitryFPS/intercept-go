@@ -91,7 +91,7 @@ async function refresh() {
     element('clientId').textContent = status.client_id || '—';
     element('dbDot').classList.toggle('ok', status.database_ok);
     element('tgDot').classList.toggle('ok', status.telegram_ok);
-    element('ackDot').classList.toggle('ok', Boolean(status.last_acknowledged));
+    element('ackDot').classList.toggle('ok', Boolean(status.last_acknowledged || status.last_transport_check));
     element('dbText').textContent = status.database_ok ? 'Последнее чтение: ' + formatTime(status.last_database_read) : 'Нет подключения';
     element('tgText').textContent = status.telegram_ok ? 'Последняя загрузка: ' + formatTime(status.last_upload) : 'Нет подключения';
     element('ackText').textContent = status.last_acknowledged ? 'Последнее: ' + formatTime(status.last_acknowledged) : 'Ещё не получено';

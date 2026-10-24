@@ -45,3 +45,14 @@ func TestOperatorActionsFollowProcessingState(t *testing.T) {
 		t.Error("заблокированная кнопка должна визуально отличаться от доступной")
 	}
 }
+
+func TestCenterConfirmationIndicatorAcceptsTransportCheck(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(application)
+	if !strings.Contains(content, "Boolean(status.last_acknowledged || status.last_transport_check)") {
+		t.Error("индикатор подтверждения центра должен загораться после успешной проверки связи")
+	}
+}
