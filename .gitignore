@@ -7,8 +7,10 @@
 /.gocache-storage-diagnostic/
 /.gocache-test/
 /.gomodcache/
+/.review-gomodcache/
 /.gopath/
 /.gotmp/
+/.gotmp-test/
 /.cache/
 /.cache-local/
 /.review-cache/
@@ -20,6 +22,7 @@
 /.qa/
 /.tmp/
 /.tmp-go-cache/
+/.tmp-gocache/
 /.build-cache/
 /.visual-check/
 *.log
