@@ -61,6 +61,7 @@ try {
             Exe = 'EAVC Connect Center.exe'
             Uri = 'http://127.0.0.1:17632/api/status'
             Guide = 'EAVC Connect Center\Документация\Полная установка и настройка EAVC Connect.md'
+            GuidePage = 'http://127.0.0.1:17632/installation-guide/index.html'
         }
     )
     foreach ($case in $cases) {
@@ -102,6 +103,17 @@ try {
         }
         if ([string]::IsNullOrWhiteSpace([string]$status.version)) {
             throw "Приложение $($case.Exe) вернуло статус без версии"
+        }
+        if ($case.ContainsKey('GuidePage')) {
+            $guidePage = Invoke-WebRequest -Uri $case.GuidePage -Headers $headers -UseBasicParsing -TimeoutSec 5
+            if ($guidePage.StatusCode -ne 200 -or $guidePage.Content -notlike '*full-guide.js*') {
+                throw "Полная инструкция не открылась через интерфейс Центра: $($case.GuidePage)"
+            }
+            $guideImageUri = $case.GuidePage.Replace('index.html', 'full-installation-guide/images/02-extracted-center-folder.png')
+            $guideImage = Invoke-WebRequest -Uri $guideImageUri -Headers $headers -UseBasicParsing -TimeoutSec 5
+            if ($guideImage.StatusCode -ne 200 -or $guideImage.RawContentLength -lt 100) {
+                throw "Снимок полной инструкции не открылся через интерфейс Центра: $guideImageUri"
+            }
         }
         $diagnosticsUri = $case.Uri.Replace('/api/status', '/api/diagnostics')
         $diagnostics = Invoke-WebRequest -Uri $diagnosticsUri -Headers $headers -UseBasicParsing -TimeoutSec 5

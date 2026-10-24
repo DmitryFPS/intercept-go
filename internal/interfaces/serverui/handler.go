@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,11 @@ func (handler Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(assets, "assets")
 	mux.Handle("GET /", http.FileServer(http.FS(static)))
+	if executable, err := os.Executable(); err == nil {
+		guideRoot := filepath.Join(filepath.Dir(executable), "Документация")
+		guideFiles := http.StripPrefix("/installation-guide/", http.FileServer(http.Dir(guideRoot)))
+		mux.Handle("GET /installation-guide/", guideFiles)
+	}
 	mux.HandleFunc("GET /api/status", func(writer http.ResponseWriter, _ *http.Request) {
 		localui.WriteJSON(writer, http.StatusOK, handler.Server.Status())
 	})

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Полная установка и настройка EAVC Connect</title>
+  <link rel="stylesheet" href="/full-guide.css">
+</head>
+<body>
+  <header class="guide-hero">
+    <p class="eyebrow">EAVC CONNECT · ЛОКАЛЬНАЯ ИНСТРУКЦИЯ</p>
+    <h1>Полная установка и настройка EAVC Connect</h1>
+    <p>Центр, рабочие точки, Telegram, получатели, маршруты, обновление и диагностика — по фактически проверенным шагам и снимкам.</p>
+  </header>
+  <section class="visual-overview">
+    <div class="visual-card">
+      <p class="visual-kicker">СХЕМА РАБОТЫ</p>
+      <h2>Как данные проходят через EAVC Connect</h2>
+      <div class="architecture-row">
+        <div class="node-stack">
+          <div class="diagram-node source"><b>EAVC Текстиль</b><span>локальная база</span></div>
+          <div class="diagram-node source"><b>EAVC Селидово</b><span>локальная база</span></div>
+          <div class="diagram-node source"><b>EAVC Весёлое</b><span>локальная база</span></div>
+        </div>
+        <div class="diagram-arrow">→</div>
+        <div class="diagram-node station"><b>Рабочие точки</b><span>читают EAVC только для чтения<br>и отправляют через Telegram</span></div>
+        <div class="diagram-arrow">→</div>
+        <div class="diagram-node transport"><b>Закрытая группа обмена</b><span>отдельная тема каждой точки</span></div>
+        <div class="diagram-arrow">→</div>
+        <div class="diagram-node center"><b>EAVC Connect Center</b><span>проверка, подтверждение<br>и маршрутизация</span></div>
+      </div>
+      <div class="outputs-row">
+        <div class="diagram-node output aero"><b>Аэродром</b><span>Telegram · темы позиций</span></div>
+        <div class="diagram-node output shab"><b>Шабашка</b><span>Telegram · темы и General</span></div>
+        <div class="diagram-node output word"><b>39-ка</b><span>DOCX · сетевая папка</span></div>
+      </div>
+    </div>
+    <div class="visual-card">
+      <p class="visual-kicker">ПОРЯДОК РАЗВЁРТЫВАНИЯ</p>
+      <h2>От чистого компьютера до контрольной доставки</h2>
+      <div class="step-flow">
+        <div><b>01</b><span>Запустить Центр</span></div>
+        <i>→</i>
+        <div><b>02</b><span>Создать ботов и группы</span></div>
+        <i>→</i>
+        <div><b>03</b><span>Настроить получателей и точки</span></div>
+        <i>→</i>
+        <div><b>04</b><span>Опубликовать маршруты</span></div>
+        <i>→</i>
+        <div><b>05</b><span>Активировать рабочие точки</span></div>
+        <i>→</i>
+        <div><b>06</b><span>Проверить полный маршрут</span></div>
+      </div>
+    </div>
+    <div class="visual-card route-visual">
+      <p class="visual-kicker">ЛОГИКА МАРШРУТИЗАЦИИ</p>
+      <h2>Куда Центр отправляет результат</h2>
+      <div class="route-grid">
+        <div class="route-input"><b>Название позиции из EAVC</b><span>сравнивается с опубликованными правилами</span></div>
+        <div class="route-branch aero"><b>Известная позиция Аэродрома</b><span>Telegram-тема + DOCX для 39-ки</span></div>
+        <div class="route-branch shab"><b>Известная позиция Шабашки</b><span>только назначенная Telegram-тема</span></div>
+        <div class="route-branch unknown"><b>Новая или неизвестная</b><span>General группы Шабашка · на проверку</span></div>
+      </div>
+    </div>
+  </section>
+  <main id="guide" data-source="./Полная установка и настройка EAVC Connect.md">
+    <section><p>Загрузка инструкции…</p></section>
+  </main>
+  <noscript>Для отображения локальной инструкции необходимо разрешить JavaScript в браузере.</noscript>
+  <script src="/full-guide.js"></script>
+</body>
+</html>

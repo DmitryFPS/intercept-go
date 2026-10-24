@@ -159,6 +159,7 @@ try {
     $guideRoot = Join-Path $serverRoot 'Документация'
     $guideImagesRoot = Join-Path $guideRoot 'full-installation-guide\images'
     New-Item -ItemType Directory -Path $guideImagesRoot -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\full-installation-guide.html') -Destination (Join-Path $guideRoot 'index.html')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\11-full-installation-guide.md') -Destination (Join-Path $guideRoot 'Полная установка и настройка EAVC Connect.md')
     Get-ChildItem -LiteralPath (Join-Path $repoRoot 'docs\full-installation-guide\images') -File |
         Copy-Item -Destination $guideImagesRoot

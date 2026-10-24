@@ -200,47 +200,28 @@ func TestHistoryColumnLabelsMatchOperatorScreens(t *testing.T) {
 	}
 }
 
-func TestTelegramGuideStaysAvailableAndComplete(t *testing.T) {
+func TestFullInstallationGuideReplacesTelegramGuideOnConnectionPage(t *testing.T) {
 	index, err := assets.ReadFile("assets/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	guide, err := assets.ReadFile("assets/telegram-guide.html")
-	if err != nil {
-		t.Fatal(err)
+	page := string(index)
+	if !strings.Contains(page, "Полная установка и настройка EAVC Connect") {
+		t.Error("на странице связи отсутствует название полной инструкции")
 	}
-	if _, err := assets.ReadFile("assets/telegram-guide.css"); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(page, `href="/installation-guide/index.html"`) {
+		t.Error("на странице связи отсутствует ссылка на полную инструкцию")
 	}
-	for _, name := range []string{
-		"assets/telegram-guide/transport-topics.png",
-		"assets/telegram-guide/aero-topics.png",
-		"assets/telegram-guide/aero-general-wide.png",
-		"assets/telegram-guide/sample-message.png",
-		"assets/telegram-guide/botfather-create.png",
-	} {
+	if strings.Contains(page, "Настройка Telegram с нуля") || strings.Contains(page, `href="/telegram-guide.html"`) {
+		t.Error("старая отдельная Telegram-инструкция не должна оставаться в карточке раздела связи")
+	}
+	for _, name := range []string{"assets/full-guide.js", "assets/full-guide.css"} {
 		content, err := assets.ReadFile(name)
 		if err != nil {
-			t.Fatalf("read telegram guide image %s: %v", name, err)
+			t.Fatalf("read full guide asset %s: %v", name, err)
 		}
 		if len(content) == 0 {
-			t.Fatalf("telegram guide image %s is empty", name)
-		}
-	}
-	if !strings.Contains(string(index), `href="/telegram-guide.html"`) {
-		t.Error("на странице связи отсутствует ссылка на полную Telegram-инструкцию")
-	}
-	content := string(guide)
-	for _, fragment := range []string{
-		"Bot-to-Bot Communication",
-		"Group Privacy",
-		"ID группы",
-		"ID темы",
-		"Ограничения Telegram",
-		"https://core.telegram.org/bots/tutorial",
-	} {
-		if !strings.Contains(content, fragment) {
-			t.Errorf("в Telegram-инструкции отсутствует обязательный раздел %q", fragment)
+			t.Fatalf("full guide asset %s is empty", name)
 		}
 	}
 }
