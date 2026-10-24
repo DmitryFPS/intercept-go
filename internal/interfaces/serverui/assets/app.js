@@ -1029,6 +1029,8 @@ function showPositionDialog(key = '') {
   const decisions = unknown ? rules.unknown : (rules.positions[key] || {});
   form.elements.original_key.value = key;
   form.elements.name.value = unknown ? '' : positionName(key);
+  form.elements.name.disabled = unknown;
+  form.elements.name.required = !unknown;
   form.elements.name.closest('label').classList.toggle('hidden', unknown);
   $('positionDialogTitle').textContent = unknown ? 'Новые и неопознанные позиции' : (key ? 'Изменить позицию' : 'Новая позиция');
   const destinationList = sortedRuleDestinations();

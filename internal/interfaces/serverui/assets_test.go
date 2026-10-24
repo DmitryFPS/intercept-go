@@ -155,6 +155,22 @@ func TestServiceActionsFollowProcessingState(t *testing.T) {
 	}
 }
 
+func TestUnknownRouteDialogDoesNotRequireHiddenPositionName(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	javascript := string(application)
+	for _, expected := range []string{
+		"form.elements.name.disabled = unknown",
+		"form.elements.name.required = !unknown",
+	} {
+		if !strings.Contains(javascript, expected) {
+			t.Errorf("форма неопознанного маршрута оставляет скрытое обязательное поле: нет %q", expected)
+		}
+	}
+}
+
 func TestHistoryColumnLabelsMatchOperatorScreens(t *testing.T) {
 	application, err := assets.ReadFile("assets/app.js")
 	if err != nil {
