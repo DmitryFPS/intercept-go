@@ -31,6 +31,7 @@ func (store *ServerStore) RuleDraft(ctx context.Context) (domain.RuleSet, bool, 
 	if err := json.Unmarshal([]byte(value), &rules); err != nil {
 		return domain.RuleSet{}, false, errors.New("черновик маршрутов повреждён")
 	}
+	migrateLegacyUnknownReview(&rules)
 	if err := rules.Validate(); err != nil {
 		return domain.RuleSet{}, false, fmt.Errorf("черновик маршрутов некорректен: %w", err)
 	}
@@ -68,6 +69,7 @@ func (store *ServerStore) ActiveRules(ctx context.Context) (domain.RuleSet, erro
 	if err := json.Unmarshal(payload, &rules); err != nil {
 		return domain.RuleSet{}, errors.New("опубликованные маршруты повреждены")
 	}
+	migrateLegacyUnknownReview(&rules)
 	if err := rules.Validate(); err != nil {
 		return domain.RuleSet{}, fmt.Errorf("опубликованные маршруты некорректны: %w", err)
 	}
@@ -112,7 +114,23 @@ func (store *ServerStore) RulesByVersion(ctx context.Context, version int64) (do
 	if err := json.Unmarshal(payload, &rules); err != nil {
 		return domain.RuleSet{}, errors.New("версия маршрутов повреждена")
 	}
+	migrateLegacyUnknownReview(&rules)
 	return rules, nil
+}
+
+// migrateLegacyUnknownReview сохраняет обновляемость сборок, где General
+// ещё записывался как deliver. Миграция меняет только безопасно эквивалентный
+// маршрут: включённый Telegram, thread_id=0. Word и темы не изменяются.
+func migrateLegacyUnknownReview(rules *domain.RuleSet) {
+	for destinationID, decision := range rules.Unknown {
+		destination, exists := rules.Destinations[destinationID]
+		if !exists || !destination.Enabled || destination.Kind != domain.DestinationTelegram ||
+			decision.Action != domain.RouteDeliver || decision.ThreadID != 0 {
+			continue
+		}
+		decision.Action = domain.RouteReview
+		rules.Unknown[destinationID] = decision
+	}
 }
 
 // NextRuleVersion выдаёт следующий последовательный номер публикации.
