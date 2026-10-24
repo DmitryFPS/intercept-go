@@ -156,6 +156,12 @@ try {
     Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\client-readme.txt') -Destination (Join-Path $clientRoot 'ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\server-readme.txt') -Destination (Join-Path $serverRoot 'ПРОЧИТАТЬ ПЕРЕД ЗАПУСКОМ.txt')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'assets\word_template.docx') -Destination (Join-Path $serverRoot 'word_template.docx')
+    $guideRoot = Join-Path $serverRoot 'Документация'
+    $guideImagesRoot = Join-Path $guideRoot 'full-installation-guide\images'
+    New-Item -ItemType Directory -Path $guideImagesRoot -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\11-full-installation-guide.md') -Destination (Join-Path $guideRoot 'Полная установка и настройка EAVC Connect.md')
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'docs\full-installation-guide\images') -File |
+        Copy-Item -Destination $guideImagesRoot
     $stationTemplate = Join-Path $serverRoot 'station-template'
     New-Item -ItemType Directory -Path $stationTemplate | Out-Null
     Copy-Item -LiteralPath (Join-Path $clientRoot 'EAVC Connect Station.exe') -Destination (Join-Path $stationTemplate 'EAVC Connect Station.exe')

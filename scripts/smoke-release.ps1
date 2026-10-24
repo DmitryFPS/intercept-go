@@ -55,7 +55,13 @@ try {
     New-Item -ItemType Directory -Path $smokeRoot | Out-Null
     $cases = @(
         @{ Archive = 'EAVC-Connect-Station-portable.zip'; Folder = 'Рабочая точка Тест'; Exe = 'EAVC Connect Station.exe'; Uri = 'http://127.0.0.1:17631/api/status' },
-        @{ Archive = 'EAVC-Connect-Center-portable.zip'; Folder = 'Центр Тест'; Exe = 'EAVC Connect Center.exe'; Uri = 'http://127.0.0.1:17632/api/status' }
+        @{
+            Archive = 'EAVC-Connect-Center-portable.zip'
+            Folder = 'Центр Тест'
+            Exe = 'EAVC Connect Center.exe'
+            Uri = 'http://127.0.0.1:17632/api/status'
+            Guide = 'EAVC Connect Center\Документация\Полная установка и настройка EAVC Connect.md'
+        }
     )
     foreach ($case in $cases) {
         if (Test-TcpPort -Uri ([uri]$case.Uri)) {
@@ -67,6 +73,24 @@ try {
         $executable = Get-ChildItem -LiteralPath $target -Filter $case.Exe -Recurse | Select-Object -First 1
         if ($null -eq $executable) {
             throw "В архиве $archive не найден $($case.Exe)"
+        }
+        if ($case.ContainsKey('Guide')) {
+            $guide = Join-Path $target $case.Guide
+            if (-not (Test-Path -LiteralPath $guide -PathType Leaf)) {
+                throw "В архиве $archive не найдена полная инструкция: $($case.Guide)"
+            }
+            $guideText = Get-Content -LiteralPath $guide -Raw
+            $imageReferences = [regex]::Matches($guideText, '!\[[^\]]*\]\(([^)]+)\)')
+            if ($imageReferences.Count -eq 0) {
+                throw "Полная инструкция не содержит ссылок на снимки: $guide"
+            }
+            foreach ($match in $imageReferences) {
+                $relativeImage = $match.Groups[1].Value.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+                $imagePath = Join-Path (Split-Path -Parent $guide) $relativeImage
+                if (-not (Test-Path -LiteralPath $imagePath -PathType Leaf)) {
+                    throw "В архиве $archive отсутствует снимок из инструкции: $relativeImage"
+                }
+            }
         }
         $accessToken = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))
         $process = Start-Process -FilePath $executable.FullName -ArgumentList @('--no-browser', "--access-token=$accessToken") -WorkingDirectory $executable.DirectoryName -WindowStyle Hidden -PassThru
