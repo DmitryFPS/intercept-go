@@ -107,7 +107,7 @@ func TestServerStoreKeepsRuleHistoryForRestore(t *testing.T) {
 	}
 	second := serverTestRules()
 	second.Version = 2
-	second.Unknown["a"] = domain.RouteDecision{Action: domain.RouteSkip}
+	second.Unknown["a"] = domain.RouteDecision{Action: domain.RouteReview, Note: "обновлено"}
 	if err := store.PublishRules(ctx, second, "второй"); err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +122,71 @@ func TestServerStoreKeepsRuleHistoryForRestore(t *testing.T) {
 	next, err := store.NextRuleVersion(ctx)
 	if err != nil || next != 3 {
 		t.Fatalf("следующая версия: %d err=%v", next, err)
+	}
+}
+
+func TestServerStoreQueuesCleanupWhenEditedRecordLeavesWordRoute(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Текстиль", SenderBotID: 12,
+		SenderBotUsername: "textile_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key", Key: make([]byte, 32), Active: true,
+	}
+	if err := store.SaveClient(ctx, client); err != nil {
+		t.Fatal(err)
+	}
+	rules := serverTestRules()
+	first := serverTestEvent()
+	first.SourceAt = time.Now().UTC()
+	first.ExpiresAt = first.SourceAt.Add(time.Hour)
+	firstPlan, err := rules.Resolve(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted, err := store.Accept(ctx, first, firstPlan); err != nil || !accepted {
+		t.Fatalf("первая версия: accepted=%v err=%v", accepted, err)
+	}
+	for _, delivery := range firstPlan.Deliveries {
+		if err := store.MarkDelivered(ctx, first.ID, delivery.Destination.ID, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second := first
+	second.ID = "event-2"
+	second.ContentDigest = "digest-2"
+	second.Position.UnitName = "1мб 155 омбр"
+	secondPlan, err := rules.Resolve(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted, err := store.Accept(ctx, second, secondPlan); err != nil || !accepted {
+		t.Fatalf("исправленная версия: accepted=%v err=%v", accepted, err)
+	}
+	jobs, err := store.PendingDeliveries(ctx, 10, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("ожидались General и очистка Word, получено: %#v", jobs)
+	}
+	foundCleanup := false
+	for _, job := range jobs {
+		if job.Delivery.Destination.ID == "w" {
+			foundCleanup = job.Delivery.Decision.Action == domain.RouteSkip && job.Delivery.RuleLevel == "cleanup"
+		}
+	}
+	if !foundCleanup {
+		t.Fatalf("задание очистки прежнего Word-маршрута не создано: %#v", jobs)
 	}
 }
 

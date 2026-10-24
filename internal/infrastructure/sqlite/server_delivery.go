@@ -119,6 +119,10 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 	if !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("проверить повтор события: %w", err)
 	}
+	plan, err = addRemovedRouteCleanup(ctx, tx, event, plan)
+	if err != nil {
+		return false, err
+	}
 	nowTime := time.Now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `
@@ -159,6 +163,62 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 		return false, fmt.Errorf("завершить приём события: %w", err)
 	}
 	return true, nil
+}
+
+// addRemovedRouteCleanup добавляет задания удаления для направлений, которые
+// были у предыдущей версии той же записи EAVC, но исчезли после исправления
+// подразделения или маршрута. Так переход корректной позиции в ошибочную не
+// оставляет старый DOCX или сообщение в прежней теме.
+func addRemovedRouteCleanup(
+	ctx context.Context, tx *sql.Tx, event domain.Event, plan domain.DeliveryPlan,
+) (domain.DeliveryPlan, error) {
+	sourceUUID := strings.TrimSpace(event.Source.UUID)
+	if sourceUUID == "" {
+		return plan, nil
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT j.delivery_json
+		FROM delivery_jobs j
+		JOIN received_events e ON e.event_id=j.event_id
+		WHERE e.client_id=? AND e.source_uuid=?
+			AND e.rowid=(
+				SELECT MAX(previous.rowid) FROM received_events previous
+				WHERE previous.client_id=? AND previous.source_uuid=?
+			)
+		ORDER BY j.destination_id`, event.ClientID, sourceUUID, event.ClientID, sourceUUID)
+	if err != nil {
+		return plan, fmt.Errorf("прочитать предыдущий маршрут записи: %w", err)
+	}
+	defer rows.Close()
+	current := make(map[string]bool, len(plan.Deliveries))
+	for _, delivery := range plan.Deliveries {
+		current[delivery.Destination.ID] = true
+	}
+	for rows.Next() {
+		var protected []byte
+		if err := rows.Scan(&protected); err != nil {
+			return plan, fmt.Errorf("прочитать предыдущее направление: %w", err)
+		}
+		plain, err := unprotectDatabaseValue(protected)
+		if err != nil {
+			return plan, err
+		}
+		var previous domain.PlannedDelivery
+		if err := json.Unmarshal(plain, &previous); err != nil {
+			return plan, errors.New("предыдущее задание доставки повреждено")
+		}
+		if current[previous.Destination.ID] {
+			continue
+		}
+		previous.Decision = domain.RouteDecision{Action: domain.RouteSkip}
+		previous.RuleLevel = "cleanup"
+		plan.Deliveries = append(plan.Deliveries, previous)
+		current[previous.Destination.ID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return plan, fmt.Errorf("прочитать предыдущий маршрут записи: %w", err)
+	}
+	return plan, nil
 }
 
 // PendingDeliveries выбирает головы независимых очередей конечных получателей.

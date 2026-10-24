@@ -47,6 +47,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			continue
 		}
 		packet := application.IncomingPacket{
+			UpdateID:    update.UpdateID,
 			SenderBotID: message.From.ID, SenderBotUsername: message.From.Username,
 			ChatID: message.Chat.ID, ThreadID: message.MessageThreadID,
 			MessageID: message.MessageID,

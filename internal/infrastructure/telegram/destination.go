@@ -68,6 +68,18 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	if item.Blocks == nil {
 		item.Blocks = make(map[string]destinationBlock)
 	}
+	if delivery.Decision.Action == domain.RouteSkip {
+		if err := destination.deleteAll(ctx, item.Blocks); err != nil {
+			return err
+		}
+		if err := destination.saveItem(itemKey, destinationItem{}, true); err != nil {
+			return err
+		}
+		if migratedLegacy {
+			return destination.saveItem(legacyItemKey, destinationItem{}, true)
+		}
+		return nil
+	}
 	threadID := delivery.Decision.ThreadID
 	if item.ThreadID != 0 && item.ThreadID != threadID {
 		if err := destination.deleteAll(ctx, item.Blocks); err != nil {

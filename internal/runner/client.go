@@ -327,6 +327,19 @@ func (client *Client) transientFailure(title, detail string, err error) {
 	})
 }
 
+func (client *Client) sourceTransientFailure(title, detail string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	client.Logger.Warn(title, "error", err)
+	client.update(func(status *ClientStatus) {
+		status.State = "waiting"
+		status.Title = title
+		status.Detail = detail
+		status.DatabaseOK = false
+	})
+}
+
 func (client *Client) update(change func(*ClientStatus)) {
 	client.mu.Lock()
 	defer client.mu.Unlock()

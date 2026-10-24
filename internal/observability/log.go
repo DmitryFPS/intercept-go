@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -87,11 +88,17 @@ func (writer *RotatingWriter) rotate() error {
 		}
 		writer.file = nil
 	}
+	oldest := fmt.Sprintf("%s.%d", writer.Path, writer.Backups)
+	if err := os.Remove(oldest); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("удалить старый журнал: %w", err)
+	}
 	for index := writer.Backups - 1; index >= 1; index-- {
 		oldPath := fmt.Sprintf("%s.%d", writer.Path, index)
 		newPath := fmt.Sprintf("%s.%d", writer.Path, index+1)
 		if _, err := os.Stat(oldPath); err == nil {
-			_ = os.Rename(oldPath, newPath)
+			if err := os.Rename(oldPath, newPath); err != nil {
+				return fmt.Errorf("переместить журнал %s: %w", oldPath, err)
+			}
 		}
 	}
 	if _, err := os.Stat(writer.Path); err == nil {
@@ -155,6 +162,16 @@ func redactAttribute(attribute slog.Attr) slog.Attr {
 		}
 		return slog.Group(attribute.Key, clean...)
 	}
+	if attribute.Value.Kind() == slog.KindAny {
+		switch value := attribute.Value.Any().(type) {
+		case error:
+			return slog.String(attribute.Key, redact(value.Error()))
+		case fmt.Stringer:
+			return slog.String(attribute.Key, redact(value.String()))
+		case []byte:
+			return slog.String(attribute.Key, redact(string(value)))
+		}
+	}
 	return attribute
 }
 
@@ -181,4 +198,10 @@ func redact(value string) string {
 		}
 	}
 	return strings.Join(fields, " ")
+}
+
+// SafeText removes credentials from operator-visible diagnostics while keeping
+// the surrounding error or status text useful for troubleshooting.
+func SafeText(value string) string {
+	return redact(value)
 }

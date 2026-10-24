@@ -41,11 +41,10 @@ type RouteDecision struct {
 
 // RuleSet — атомарно публикуемая версия матрицы маршрутов.
 type RuleSet struct {
-	Version      int64                                   `json:"version"`
-	Destinations map[string]Destination                  `json:"destinations"`
-	Positions    map[string]map[string]RouteDecision     `json:"positions"`
-	Modes        map[SourceMode]map[string]RouteDecision `json:"modes,omitempty"`
-	Unknown      map[string]RouteDecision                `json:"unknown"`
+	Version      int64                               `json:"version"`
+	Destinations map[string]Destination              `json:"destinations"`
+	Positions    map[string]map[string]RouteDecision `json:"positions"`
+	Unknown      map[string]RouteDecision            `json:"unknown"`
 }
 
 // PlannedDelivery — одно независимое задание для внешнего получателя.
@@ -78,11 +77,6 @@ func (rules RuleSet) Validate() error {
 				return fmt.Errorf("позиция %q ссылается на отсутствующих получателей", key)
 			}
 		}
-		for mode, decisions := range rules.Modes {
-			if len(decisions) != 0 {
-				return fmt.Errorf("режим %q ссылается на отсутствующих получателей", mode)
-			}
-		}
 		return nil
 	}
 	if len(rules.Unknown) == 0 {
@@ -109,17 +103,31 @@ func (rules RuleSet) Validate() error {
 			return err
 		}
 	}
-	for mode, decisions := range rules.Modes {
-		switch mode {
-		case SourceModeNormal, SourceModeDeferred, SourceModeUnknown:
-		default:
-			return fmt.Errorf("неизвестный режим %q", mode)
-		}
-		if err := rules.validateDecisions("режим "+string(mode), decisions); err != nil {
-			return err
+	if err := rules.validateDecisions("неопознанные события", rules.Unknown); err != nil {
+		return err
+	}
+	activeUnknown := 0
+	enabledTelegram := 0
+	for _, destination := range rules.Destinations {
+		if destination.Enabled && destination.Kind == DestinationTelegram {
+			enabledTelegram++
 		}
 	}
-	return rules.validateDecisions("неопознанные события", rules.Unknown)
+	for id, decision := range rules.Unknown {
+		if decision.Action == RouteSkip {
+			continue
+		}
+		destination := rules.Destinations[id]
+		if !destination.Enabled || destination.Kind != DestinationTelegram ||
+			decision.Action != RouteReview || decision.ThreadID != 0 {
+			return errors.New("новые и ошибочные подразделения должны отправляться только на проверку в Telegram General")
+		}
+		activeUnknown++
+	}
+	if enabledTelegram > 0 && activeUnknown != 1 {
+		return errors.New("для новых и ошибочных подразделений должен быть выбран ровно один Telegram General")
+	}
+	return nil
 }
 
 func (rules RuleSet) validateDecisions(owner string, decisions map[string]RouteDecision) error {

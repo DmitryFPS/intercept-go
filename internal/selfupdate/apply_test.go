@@ -59,7 +59,7 @@ func TestActivateApplicationRejectsPausedConfiguredProcess(t *testing.T) {
 	committed, err := activateApplication(ApplyOptions{
 		BaseDir: baseDir, TokenFile: "access.dat", Address: strings.TrimPrefix(server.URL, "http://"),
 	}, "0.2.0-rc46")
-	if err == nil || !committed || !strings.Contains(err.Error(), "код 503") {
+	if err == nil || committed || !strings.Contains(err.Error(), "код 503") {
 		t.Fatalf("paused configured application must fail activation: %v", err)
 	}
 }

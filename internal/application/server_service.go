@@ -17,6 +17,7 @@ import (
 
 // IncomingPacket описывает Telegram-метаданные до расшифрования.
 type IncomingPacket struct {
+	UpdateID          int64
 	SenderBotID       int64
 	SenderBotUsername string
 	ChatID            int64
@@ -28,6 +29,29 @@ type IncomingPacket struct {
 	ProbeClientID     string
 	ProbeSentAt       time.Time
 	ProbeMAC          string
+}
+
+// ErrClientNotFound позволяет отличить неизвестную точку от временного сбоя
+// реестра. Неизвестный отправитель отклоняется окончательно, а ошибка БД
+// должна оставить транспортный пакет для следующей попытки.
+var ErrClientNotFound = errors.New("точка не найдена")
+
+// PermanentPacketError означает, что повтор того же байтового пакета никогда
+// не сделает его допустимым. Только такие ошибки можно помещать в карантин и
+// окончательно подтверждать транспортному каналу.
+type PermanentPacketError struct{ Err error }
+
+func (err *PermanentPacketError) Error() string { return err.Err.Error() }
+func (err *PermanentPacketError) Unwrap() error { return err.Err }
+
+func permanentPacketError(message string) error {
+	return &PermanentPacketError{Err: errors.New(message)}
+}
+
+// IsPermanentPacketError сообщает приёмнику, можно ли безопасно удалить пакет.
+func IsPermanentPacketError(err error) bool {
+	var permanent *PermanentPacketError
+	return errors.As(err, &permanent)
 }
 
 // PacketResult нужен приёмнику для безопасного подтверждения клиенту.
@@ -52,41 +76,44 @@ type ServerService struct {
 // сохраняет событие вместе с рассчитанными маршрутами.
 func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket) (PacketResult, error) {
 	if len(packet.Payload) == 0 || len(packet.Payload) > 4*1024*1024 {
-		return PacketResult{}, errors.New("недопустимый размер транспортного пакета")
+		return PacketResult{}, permanentPacketError("недопустимый размер транспортного пакета")
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(packet.Payload)))
 	decoder.DisallowUnknownFields()
 	var envelope protocol.Envelope
 	if err := decoder.Decode(&envelope); err != nil {
-		return PacketResult{}, errors.New("транспортный пакет повреждён")
+		return PacketResult{}, permanentPacketError("транспортный пакет повреждён")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return PacketResult{}, errors.New("после транспортного пакета найдены лишние данные")
+		return PacketResult{}, permanentPacketError("после транспортного пакета найдены лишние данные")
 	}
 	client, err := service.Clients.Client(ctx, envelope.ClientID)
 	if err != nil {
-		return PacketResult{}, errors.New("точка не зарегистрирована")
+		if errors.Is(err, ErrClientNotFound) {
+			return PacketResult{}, permanentPacketError("точка не зарегистрирована")
+		}
+		return PacketResult{}, fmt.Errorf("прочитать регистрацию точки: %w", err)
 	}
 	if !client.Active {
-		return PacketResult{}, errors.New("точка отключена")
+		return PacketResult{}, permanentPacketError("точка отключена")
 	}
 	if client.SenderBotID != packet.SenderBotID ||
 		!sameUsername(client.SenderBotUsername, packet.SenderBotUsername) {
-		return PacketResult{}, errors.New("telegram-бот не принадлежит указанной точке")
+		return PacketResult{}, permanentPacketError("telegram-бот не принадлежит указанной точке")
 	}
 	if client.ChatID != packet.ChatID || client.ThreadID != packet.ThreadID {
-		return PacketResult{}, errors.New("пакет поступил не из темы зарегистрированной точки")
+		return PacketResult{}, permanentPacketError("пакет поступил не из темы зарегистрированной точки")
 	}
 	if client.KeyID != envelope.KeyID {
-		return PacketResult{}, errors.New("ключ пакета не зарегистрирован")
+		return PacketResult{}, permanentPacketError("ключ пакета не зарегистрирован")
 	}
 	event, err := protocol.Open(envelope, client.Key)
 	if err != nil {
-		return PacketResult{}, err
+		return PacketResult{}, &PermanentPacketError{Err: err}
 	}
 	if event.ClientID != client.ID {
-		return PacketResult{}, errors.New("ID точки внутри события не совпадает с регистрацией")
+		return PacketResult{}, permanentPacketError("ID точки внутри события не совпадает с регистрацией")
 	}
 	if service.Now == nil {
 		service.Now = time.Now

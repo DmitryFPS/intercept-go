@@ -43,7 +43,14 @@ func addDiagnosticLogs(archive *zip.Writer, baseDir, primary string) error {
 		}
 		part, err := archive.Create(filepath.Join("logs", filepath.Base(clean)))
 		if err == nil {
-			err = copyRedactedDiagnosticLog(part, file)
+			switch filepath.Base(clean) {
+			case "latest-update.json":
+				err = copyRedactedDiagnosticJSON(part, file, true)
+			case "updates.log":
+				err = copyRedactedDiagnosticLogWithUpdates(part, file, true)
+			default:
+				err = copyRedactedDiagnosticLog(part, file)
+			}
 		}
 		closeErr := file.Close()
 		if err != nil {
@@ -69,12 +76,17 @@ var diagnosticAllowedKeys = map[string]bool{
 	"last_received": true, "last_delivery": true, "last_database_read": true,
 	"last_upload": true, "last_acknowledged": true, "last_transport_check": true,
 	"next_attempt_at": true, "accepted_at": true, "expires_at": true,
+	"from_version": true, "to_version": true,
 }
 
 // copyRedactedDiagnosticLog preserves technical events and counters, but
 // removes operational identifiers from structured JSON logs before export.
 // A malformed line is replaced with a marker instead of copying unknown text.
 func copyRedactedDiagnosticLog(target io.Writer, source io.Reader) error {
+	return copyRedactedDiagnosticLogWithUpdates(target, source, false)
+}
+
+func copyRedactedDiagnosticLogWithUpdates(target io.Writer, source io.Reader, updateDetails bool) error {
 	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	var copied int64
@@ -87,7 +99,7 @@ func copyRedactedDiagnosticLog(target io.Writer, source io.Reader) error {
 		if json.Unmarshal(scanner.Bytes(), &record) != nil {
 			record = map[string]any{"event": "строка журнала скрыта: неизвестный формат"}
 		} else {
-			allowDiagnosticValue(record)
+			allowDiagnosticValue(record, updateDetails)
 		}
 		payload, err := json.Marshal(record)
 		if err != nil {
@@ -100,19 +112,48 @@ func copyRedactedDiagnosticLog(target io.Writer, source io.Reader) error {
 	return scanner.Err()
 }
 
-func allowDiagnosticValue(value any) {
+func copyRedactedDiagnosticJSON(target io.Writer, source io.Reader, updateDetails bool) error {
+	payload, err := io.ReadAll(io.LimitReader(source, 10*1024*1024))
+	if err != nil {
+		return err
+	}
+	var record any
+	if err := json.Unmarshal(payload, &record); err != nil {
+		record = map[string]any{"event": "документ диагностики скрыт: неизвестный формат"}
+	} else {
+		allowDiagnosticValue(record, updateDetails)
+	}
+	clean, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = target.Write(append(clean, '\n'))
+	return err
+}
+
+func allowDiagnosticValue(value any, updateDetails bool) {
 	switch item := value.(type) {
 	case map[string]any:
 		for key, nested := range item {
-			if !diagnosticAllowedKeys[strings.ToLower(key)] {
+			lower := strings.ToLower(key)
+			allowed := diagnosticAllowedKeys[lower] || (updateDetails && (lower == "message" || lower == "error"))
+			if !allowed {
 				delete(item, key)
 				continue
 			}
-			allowDiagnosticValue(nested)
+			if text, ok := nested.(string); ok {
+				item[key] = observability.SafeText(text)
+				continue
+			}
+			allowDiagnosticValue(nested, updateDetails)
 		}
 	case []any:
-		for _, nested := range item {
-			allowDiagnosticValue(nested)
+		for index, nested := range item {
+			if text, ok := nested.(string); ok {
+				item[index] = observability.SafeText(text)
+				continue
+			}
+			allowDiagnosticValue(nested, updateDetails)
 		}
 	}
 }

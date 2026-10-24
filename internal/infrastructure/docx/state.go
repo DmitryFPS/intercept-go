@@ -50,14 +50,10 @@ func loadState(path string) (state, error) {
 	if info, statErr := os.Stat(path); statErr == nil {
 		legacyTime = info.ModTime().UTC()
 	}
-	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	for key, record := range current.Blocks {
 		if record.UpdatedAt.IsZero() {
 			record.UpdatedAt = legacyTime
 			current.Blocks[key] = record
-		}
-		if record.UpdatedAt.Before(cutoff) {
-			delete(current.Blocks, key)
 		}
 	}
 	return current, nil

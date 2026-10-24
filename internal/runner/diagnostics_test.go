@@ -32,3 +32,32 @@ func TestDiagnosticLogDoesNotCopyUnknownPlainText(t *testing.T) {
 		t.Fatalf("неструктурированная строка попала в диагностику: %s", output.String())
 	}
 }
+
+func TestUpdateDiagnosticsKeepUsefulResultAndRedactToken(t *testing.T) {
+	t.Parallel()
+	token := "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcd"
+	var logOutput bytes.Buffer
+	updateLog := `{"time":"2026-10-24T10:00:00Z","state":"rollback","from":"rc54","to":"rc55","message":"Версия восстановлена","error":"bot ` + token + ` rejected"}` + "\n"
+	if err := copyRedactedDiagnosticLogWithUpdates(&logOutput, strings.NewReader(updateLog), true); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"message":"Версия восстановлена"`, `"error":"bot *** rejected"`} {
+		if !strings.Contains(logOutput.String(), expected) {
+			t.Fatalf("в журнале обновления нет %s: %s", expected, logOutput.String())
+		}
+	}
+	if strings.Contains(logOutput.String(), token) {
+		t.Fatal("токен остался в журнале обновления")
+	}
+
+	var resultOutput bytes.Buffer
+	result := "{\n  \"state\": \"success\",\n  \"from_version\": \"rc54\",\n  \"to_version\": \"rc55\",\n  \"message\": \"Обновление установлено\"\n}"
+	if err := copyRedactedDiagnosticJSON(&resultOutput, strings.NewReader(result), true); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"from_version", "to_version", "Обновление установлено"} {
+		if !strings.Contains(resultOutput.String(), expected) {
+			t.Fatalf("результат обновления потерял %q: %s", expected, resultOutput.String())
+		}
+	}
+}

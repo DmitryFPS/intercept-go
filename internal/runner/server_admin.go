@@ -197,6 +197,19 @@ func (server *Server) AddDestination(ctx context.Context, setup DestinationSetup
 	if _, exists := rules.Unknown[id]; !exists {
 		rules.Unknown[id] = domain.RouteDecision{Action: domain.RouteSkip}
 	}
+	if setup.Kind == domain.DestinationTelegram {
+		hasGeneral := false
+		for destinationID, decision := range rules.Unknown {
+			destination := rules.Destinations[destinationID]
+			if destination.Enabled && destination.Kind == domain.DestinationTelegram && decision.Action != domain.RouteSkip {
+				hasGeneral = true
+				break
+			}
+		}
+		if !hasGeneral {
+			rules.Unknown[id] = domain.RouteDecision{Action: domain.RouteReview, ThreadID: 0}
+		}
+	}
 	if ruleExists && existingRule.Kind != setup.Kind && setup.Kind != domain.DestinationTelegram {
 		clearDestinationThreads(rules, id)
 	}
@@ -239,9 +252,6 @@ func (server *Server) DeleteDestination(ctx context.Context, id string) error {
 	for _, decisions := range rules.Positions {
 		delete(decisions, id)
 	}
-	for _, decisions := range rules.Modes {
-		delete(decisions, id)
-	}
 	rules.Version++
 	if err := rules.Validate(); err != nil {
 		return err
@@ -267,13 +277,13 @@ func clearDestinationThreads(rules domain.RuleSet, id string) {
 	for _, decisions := range rules.Positions {
 		clear(decisions)
 	}
-	for _, decisions := range rules.Modes {
-		clear(decisions)
-	}
 }
 
 // AddClient регистрирует точку и возвращает полностью готовый подписанный JSON.
 func (server *Server) AddClient(ctx context.Context, request config.ClientRequest) ([]byte, error) {
+	server.adminMu.Lock()
+	defer server.adminMu.Unlock()
+
 	server.mu.RLock()
 	cfg := server.config
 	configured := server.status.Configured

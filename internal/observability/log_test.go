@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -20,11 +21,18 @@ func TestLoggerRedactsSecretsAndRotates(t *testing.T) {
 	logger.With("password", "bound-secret").Info("проверка",
 		slog.Group("transport", "api_key", "nested-secret"))
 	logger.Info(strings.Repeat("x", 120))
+	logger.Error("ошибка транспорта", "error", errors.New("123456789:abcdefghijklmnopqrstuvwxyzABCDE"))
+	for range 5 {
+		logger.Info(strings.Repeat("z", 120))
+	}
 	writer.Close()
-	for _, candidate := range []string{path, path + ".1"} {
+	for _, candidate := range []string{path, path + ".1", path + ".2"} {
 		payload, _ := os.ReadFile(candidate)
 		if strings.Contains(string(payload), "abcdefghijklmnopqrstuvwxyz") || strings.Contains(string(payload), "secret") {
 			t.Fatal("секрет попал в журнал")
 		}
+	}
+	if _, err := os.Stat(path + ".3"); !os.IsNotExist(err) {
+		t.Fatal("ротация создала больше заданного числа резервных журналов")
 	}
 }

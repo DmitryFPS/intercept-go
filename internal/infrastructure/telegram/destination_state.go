@@ -46,14 +46,10 @@ func loadDestinationState(path string) (destinationState, error) {
 	if info, statErr := os.Stat(path); statErr == nil {
 		legacyTime = info.ModTime().UTC()
 	}
-	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	for key, item := range current.Items {
 		if item.UpdatedAt.IsZero() {
 			item.UpdatedAt = legacyTime
 			current.Items[key] = item
-		}
-		if item.UpdatedAt.Before(cutoff) {
-			delete(current.Items, key)
 		}
 	}
 	return current, nil

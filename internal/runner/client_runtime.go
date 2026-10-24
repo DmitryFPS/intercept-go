@@ -83,7 +83,7 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 func (client *Client) runSupervised(ctx context.Context, cfg config.Client) {
 	for {
 		client.run(ctx, cfg)
-		if ctx.Err() != nil || client.Status().State != "waiting" {
+		if !shouldRestartClientCycle(ctx.Err(), client.Status().State) {
 			return
 		}
 		if !waitForRetry(ctx, 5*time.Second) {
@@ -95,6 +95,10 @@ func (client *Client) runSupervised(ctx context.Context, cfg config.Client) {
 			status.Detail = "Автоматически восстанавливаем локальное хранилище и связь."
 		})
 	}
+}
+
+func shouldRestartClientCycle(ctxErr error, state string) bool {
+	return ctxErr == nil && state == "waiting"
 }
 
 const (
@@ -160,18 +164,18 @@ func (client *Client) stopWorkerLocked() {
 func (client *Client) run(ctx context.Context, cfg config.Client) {
 	eavcPath, err := client.resolveEAVCPath(ctx, cfg)
 	if err != nil {
-		client.fail(
-			"Не найдена база EAVC",
-			"Нажмите «Найти EAVC» или укажите путь к базе вручную.",
+		client.sourceTransientFailure(
+			"Ожидаем базу EAVC",
+			"Программа продолжит попытки автоматически. При необходимости укажите путь вручную.",
 			err,
 		)
 		return
 	}
 	source, err := eavc.Open(ctx, eavcPath)
 	if err != nil {
-		client.fail(
-			"Не удалось открыть базу EAVC",
-			"Проверьте выбранный путь и доступ к файлу базы.",
+		client.sourceTransientFailure(
+			"База EAVC временно недоступна",
+			"Программа повторит подключение автоматически; сохранённая очередь не потеряна.",
 			err,
 		)
 		return
@@ -322,18 +326,28 @@ func (client *Client) clientMaintenanceLoop(ctx context.Context, queue *stateDB.
 
 func (client *Client) collectAndDispatch(ctx context.Context, service *application.ClientService, queue *stateDB.ClientQueue) {
 	if _, err := service.CollectOnce(ctx); err != nil {
-		client.transientFailure(
-			"Не удалось прочитать EAVC",
-			"База EAVC временно недоступна. Программа повторит чтение автоматически.",
-			err,
-		)
-		return
+		if !errors.Is(err, context.Canceled) {
+			client.Logger.Warn("Не удалось прочитать EAVC", "error", err)
+			client.update(func(status *ClientStatus) {
+				status.State = "waiting"
+				status.Title = "Не удалось прочитать EAVC"
+				status.Detail = "База EAVC временно недоступна. Сохранённая очередь продолжает отправляться."
+				status.DatabaseOK = false
+			})
+		}
+	} else {
+		now := time.Now().UTC()
+		client.update(func(status *ClientStatus) {
+			status.DatabaseOK = true
+			status.LastDatabaseRead = &now
+			if status.State == "waiting" && status.Title == "Не удалось прочитать EAVC" {
+				status.State = "running"
+				status.Title = "Программа работает"
+				status.Detail = "EAVC подключён."
+			}
+		})
 	}
 	now := time.Now().UTC()
-	client.update(func(status *ClientStatus) {
-		status.DatabaseOK = true
-		status.LastDatabaseRead = &now
-	})
 	count, err := service.DispatchOnce(ctx)
 	if err != nil {
 		client.transientFailure(

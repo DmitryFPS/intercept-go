@@ -333,7 +333,9 @@ func activateApplication(options ApplyOptions, expectedVersion string) (bool, er
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return true, fmt.Errorf("включение обработки вернуло код %d", response.StatusCode)
+		// Полученный HTTP-ответ однозначно подтверждает, что команда не была
+		// принята. В отличие от сетевой ошибки здесь безопасно откатить снимок.
+		return false, fmt.Errorf("включение обработки вернуло код %d", response.StatusCode)
 	}
 	var status struct {
 		Version    string `json:"version"`

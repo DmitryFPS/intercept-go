@@ -203,6 +203,13 @@ try {
         center_authenticode = $serverSigned
         updater_authenticode = $updaterSigned
         signed_updates = $true
+		artifacts = @($hashes | ForEach-Object {
+			[ordered]@{
+				name = [System.IO.Path]::GetFileName($_.Path)
+				sha256 = $_.Hash.ToLowerInvariant()
+				size = (Get-Item -LiteralPath $_.Path).Length
+			}
+		})
         update_public_key_sha256 = $(
             $sha = [System.Security.Cryptography.SHA256]::Create()
             try {

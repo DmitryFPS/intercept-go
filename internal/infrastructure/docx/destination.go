@@ -42,7 +42,7 @@ var destinationLocks = struct {
 
 // Deliver запускает одну Word-операцию для направления. Если предыдущая
 // операция с тем же файлом состояния зависла, новая попытка сразу вернёт ошибку.
-func (destination *Destination) Deliver(ctx context.Context, event domain.Event, _ domain.PlannedDelivery) error {
+func (destination *Destination) Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
 	settings := *destination
 	if settings.Prefix == "" {
 		settings.Prefix = "СТНД"
@@ -57,7 +57,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	completed := make(chan error, 1)
 	go func() {
 		defer unlock()
-		completed <- settings.deliver(ctx, event)
+		completed <- settings.deliver(ctx, event, delivery)
 	}()
 	select {
 	case err := <-completed:
@@ -70,7 +70,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	}
 }
 
-func (destination Destination) deliver(ctx context.Context, event domain.Event) error {
+func (destination Destination) deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -100,6 +100,31 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 			current.Scope = scope
 		}
 	}
+	legacySourceKey := strings.TrimSpace(event.Source.UUID)
+	if legacySourceKey == "" {
+		legacySourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
+	}
+	sourceKey := strings.TrimSpace(event.ClientID) + "|" + legacySourceKey
+	prefix := sourceKey + "|"
+	legacyPrefix := legacySourceKey + "|"
+	if delivery.Decision.Action == domain.RouteSkip {
+		for key, record := range current.Blocks {
+			if !strings.HasPrefix(key, prefix) && !strings.HasPrefix(key, legacyPrefix) {
+				continue
+			}
+			if record.Filename != "" {
+				path, pathErr := safeDestinationPath(destination.Folder, record.Filename)
+				if pathErr != nil {
+					return pathErr
+				}
+				if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return fmt.Errorf("удалить прежний Word-документ: %w", removeErr)
+				}
+			}
+			delete(current.Blocks, key)
+		}
+		return saveState(destination.StatePath, current)
+	}
 	blocks := event.Blocks
 	if blocks == nil {
 		blocks = domain.SplitContentBlocks(event.Content)
@@ -118,13 +143,6 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event) 
 	for _, block := range blocks {
 		callsigns = append(callsigns, block.Callsigns...)
 	}
-	legacySourceKey := strings.TrimSpace(event.Source.UUID)
-	if legacySourceKey == "" {
-		legacySourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
-	}
-	sourceKey := strings.TrimSpace(event.ClientID) + "|" + legacySourceKey
-	prefix := sourceKey + "|"
-	legacyPrefix := legacySourceKey + "|"
 	key := prefix + "record"
 	record, exists := current.Blocks[key]
 	legacyMigration := false

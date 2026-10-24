@@ -357,6 +357,41 @@ func TestDeferredInterceptKeepsMarkerAndUsesLegacyDocumentLayout(t *testing.T) {
 	}
 }
 
+func TestDestinationCleanupRemovesPreviousDocumentAndState(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	destination := Destination{
+		TemplatePath: template, Folder: filepath.Join(root, "out"),
+		StatePath: filepath.Join(root, "state", "word.json"), Network: "39", Prefix: "СТНД",
+	}
+	event := domain.Event{
+		ClientID: "textile", Source: domain.SourceRecord{UUID: "source-1"},
+		Position: domain.Position{UnitName: "1 мб 155 омбр"}, Content: "12.00\n-Текст", SourceAt: time.Now(),
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{
+		Decision: domain.RouteDecision{Action: domain.RouteDeliver},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx")); len(files) != 1 {
+		t.Fatalf("исходный документ не создан: %#v", files)
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{
+		Decision: domain.RouteDecision{Action: domain.RouteSkip},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx")); len(files) != 0 {
+		t.Fatalf("прежний документ остался: %#v", files)
+	}
+	current, err := loadState(destination.StatePath)
+	if err != nil || len(current.Blocks) != 0 {
+		t.Fatalf("состояние прежнего документа осталось: %#v, %v", current.Blocks, err)
+	}
+}
+
 // Исправленный документ показывает время редакции отдельно от радиопереговоров.
 func TestEditedDocumentShowsEditTimeOutsideTranscript(t *testing.T) {
 	t.Parallel()

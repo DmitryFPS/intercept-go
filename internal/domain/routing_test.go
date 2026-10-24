@@ -58,6 +58,32 @@ func TestRuleSetRoutesUnknownOnlyByUnknownRow(t *testing.T) {
 	}
 }
 
+func TestRuleSetRejectsUnsafeUnknownRoutes(t *testing.T) {
+	t.Parallel()
+	for name, change := range map[string]func(*RuleSet){
+		"word": func(rules *RuleSet) {
+			rules.Unknown["word-39"] = RouteDecision{Action: RouteDeliver}
+		},
+		"topic": func(rules *RuleSet) {
+			rules.Unknown["shabashka"] = RouteDecision{Action: RouteReview, ThreadID: 42}
+		},
+		"two general routes": func(rules *RuleSet) {
+			rules.Unknown["aerodrom"] = RouteDecision{Action: RouteReview}
+		},
+		"ordinary delivery": func(rules *RuleSet) {
+			rules.Unknown["shabashka"] = RouteDecision{Action: RouteDeliver}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rules := testRuleSet()
+			change(&rules)
+			if err := rules.Validate(); err == nil {
+				t.Fatal("опасный маршрут неопознанной позиции принят")
+			}
+		})
+	}
+}
+
 // Перехват, назначенный только в Шабашку, не должен создавать документ для удалённой точки.
 func TestRuleSetDoesNotCreateWordForShabashkaPosition(t *testing.T) {
 	t.Parallel()

@@ -1003,14 +1003,21 @@ $('positionNext').addEventListener('click', () => {
   renderRules();
 });
 
-function routeControl(destination, decision = { action: 'skip', thread_id: 0 }) {
+function routeControl(destination, decision = { action: 'skip', thread_id: 0 }, unknown = false) {
   const presentation = routeDestinationPresentation(destination);
+  const telegramUnknown = unknown && destination.kind === 'telegram';
+  const wordUnknown = unknown && destination.kind === 'word';
   const topic = destination.kind === 'telegram' ? `
-    <label>Тема получателя<input name="thread_${escapeHTML(destination.id)}" type="number" min="0" value="${Number(decision.thread_id || 0)}"><small>0 — основная тема</small></label>` : `
+    <label>Тема получателя<input name="thread_${escapeHTML(destination.id)}" type="number" min="0" value="${telegramUnknown ? 0 : Number(decision.thread_id || 0)}"${telegramUnknown ? ' disabled' : ''}><small>${telegramUnknown ? 'Новые позиции направляются в General' : '0 — основная тема'}</small></label>` : `
     <div class="route-static-field"><span>Тема Telegram</span><strong>Не используется</strong><small>Файл сохраняется в папку</small></div>`;
+  const actionOptions = wordUnknown
+    ? '<option value="skip" selected>Не отправлять</option>'
+    : unknown
+      ? `<option value="skip"${decision.action === 'skip' ? ' selected' : ''}>Не отправлять</option><option value="review"${decision.action === 'review' ? ' selected' : ''}>Отправить на проверку</option>`
+      : `<option value="skip"${decision.action === 'skip' ? ' selected' : ''}>Не отправлять</option><option value="deliver"${decision.action === 'deliver' ? ' selected' : ''}>Отправлять</option><option value="review"${decision.action === 'review' ? ' selected' : ''}>Отправить на проверку</option>`;
   return `<div class="route-control" data-route-destination="${escapeHTML(destination.id)}">
     <div class="route-destination"><strong>${escapeHTML(destination.name)}</strong><span>${escapeHTML(presentation.type)}</span><small title="${escapeHTML(presentation.detail)}">${escapeHTML(presentation.detail)}</small></div>
-    <label>Действие<select name="action_${escapeHTML(destination.id)}"><option value="skip"${decision.action === 'skip' ? ' selected' : ''}>Не отправлять</option><option value="deliver"${decision.action === 'deliver' ? ' selected' : ''}>Отправлять</option><option value="review"${decision.action === 'review' ? ' selected' : ''}>Отправить на проверку</option></select></label>
+    <label>Действие<select name="action_${escapeHTML(destination.id)}"${wordUnknown ? ' disabled' : ''}>${actionOptions}</select></label>
     ${topic}
   </div>`;
 }
@@ -1026,7 +1033,7 @@ function showPositionDialog(key = '') {
   $('positionDialogTitle').textContent = unknown ? 'Новые и неопознанные позиции' : (key ? 'Изменить позицию' : 'Новая позиция');
   const destinationList = sortedRuleDestinations();
   $('routeEditor').innerHTML = destinationList.length
-    ? destinationList.map(destination => routeControl(destination, decisions[destination.id])).join('')
+    ? destinationList.map(destination => routeControl(destination, decisions[destination.id], unknown)).join('')
     : '<div class="route-editor-empty">Сначала добавьте получателей. Позицию можно сохранить сейчас и настроить позже.</div>';
   openDialog('positionDialog');
 }
@@ -1077,6 +1084,13 @@ $('positionForm').addEventListener('submit', async event => {
   });
 
   if (unknown) {
+    const generalRoutes = sortedRuleDestinations().filter(destination =>
+      destination.kind === 'telegram' && decisions[destination.id]?.action === 'review');
+    if (generalRoutes.length !== 1) {
+      rules = previous;
+      notify('Выберите ровно один Telegram-получатель для отправки новых подразделений в General.');
+      return;
+    }
     rules.unknown = decisions;
   } else {
     const newKey = normalizedPositionKey(data.get('name'));

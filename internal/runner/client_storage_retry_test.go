@@ -68,3 +68,16 @@ func TestClientEndsTransientStorageCycleForAutomaticRestart(t *testing.T) {
 		t.Fatalf("временное хранилище проверено только %d раз", attempts)
 	}
 }
+
+func TestClientSupervisorRestartsOnlyTransientCycle(t *testing.T) {
+	t.Parallel()
+	if !shouldRestartClientCycle(nil, "waiting") {
+		t.Fatal("временная недоступность EAVC не запускает автоматический повтор")
+	}
+	if shouldRestartClientCycle(nil, "error") {
+		t.Fatal("постоянная ошибка не должна бесконечно перезапускаться")
+	}
+	if shouldRestartClientCycle(context.Canceled, "waiting") {
+		t.Fatal("остановленный клиент не должен перезапускаться")
+	}
+}

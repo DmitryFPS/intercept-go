@@ -57,14 +57,10 @@ func TestClearDestinationThreads(t *testing.T) {
 		Positions: map[string]map[string]domain.RouteDecision{
 			"name:test": {"receiver": {Action: domain.RouteReview, ThreadID: 22}},
 		},
-		Modes: map[domain.SourceMode]map[string]domain.RouteDecision{
-			domain.SourceModeNormal: {"receiver": {Action: domain.RouteDeliver, ThreadID: 33}},
-		},
 	}
 	clearDestinationThreads(rules, "receiver")
 	if rules.Unknown["receiver"].ThreadID != 0 ||
-		rules.Positions["name:test"]["receiver"].ThreadID != 0 ||
-		rules.Modes[domain.SourceModeNormal]["receiver"].ThreadID != 0 {
+		rules.Positions["name:test"]["receiver"].ThreadID != 0 {
 		t.Fatal("ID темы остался после переключения получателя с Telegram")
 	}
 }

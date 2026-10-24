@@ -336,6 +336,45 @@ func TestDestinationDoesNotReplaceMessageAfterTerminalEditError(t *testing.T) {
 	}
 }
 
+func TestDestinationCleanupRemovesPreviousMessageAndState(t *testing.T) {
+	t.Parallel()
+	deleted := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if strings.HasSuffix(request.URL.Path, "/deleteMessage") {
+			deleted = int64(body["message_id"].(float64))
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"textile|source-1": {ThreadID: 42, Blocks: map[string]destinationBlock{
+			"__record__": {MessageIDs: []int64{101}},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	event := domain.Event{ClientID: "textile", Source: domain.SourceRecord{UUID: "source-1"}}
+	cleanup := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteSkip}}
+	if err := destination.Deliver(context.Background(), event, cleanup); err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 101 {
+		t.Fatalf("прежнее сообщение не удалено: %d", deleted)
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil || len(current.Items) != 0 {
+		t.Fatalf("состояние прежнего сообщения осталось: %#v, %v", current.Items, err)
+	}
+}
+
 // Ответ «текст не изменён» означает, что предыдущая попытка уже успела
 // исправить сообщение; такой повтор можно безопасно завершить без ожидания.
 func TestDestinationAcceptsAlreadyAppliedTelegramEdit(t *testing.T) {
@@ -379,8 +418,9 @@ func TestDestinationAcceptsAlreadyAppliedTelegramEdit(t *testing.T) {
 	}
 }
 
-// Сведения о давно отправленных сообщениях удаляются, а свежие остаются доступными для последующего редактирования.
-func TestDestinationStateDropsRecordsOlderThanRetention(t *testing.T) {
+// Компактная связь с Telegram message_id хранится без срока: EAVC допускает
+// позднюю правку, которая должна изменить прежнее сообщение, а не создать дубль.
+func TestDestinationStateKeepsOldIdentityForLateEdit(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "state.json")
 	payload, err := json.Marshal(destinationState{Items: map[string]destinationItem{
@@ -397,8 +437,11 @@ func TestDestinationStateDropsRecordsOlderThanRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(current.Items) != 1 {
-		t.Fatalf("устаревшее состояние не очищено: %#v", current.Items)
+	if len(current.Items) != 2 {
+		t.Fatalf("старая связь с сообщением потеряна: %#v", current.Items)
+	}
+	if _, exists := current.Items["old"]; !exists {
+		t.Fatal("старая связь с message_id удалена")
 	}
 	if _, exists := current.Items["recent"]; !exists {
 		t.Fatal("актуальное состояние удалено")

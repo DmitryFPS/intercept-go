@@ -96,6 +96,20 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		)
 		return
 	}
+	// Доставка уже принятых заданий не зависит от входящего Telegram polling.
+	// Запускаем очередь до проверки webhook, чтобы временная недоступность
+	// транспортного бота не блокировала Word и другие готовые направления.
+	delivery := &application.DeliveryService{
+		Queue: server.Store, Gateways: server.gateways(cfg), Now: time.Now,
+		MaxConcurrent: 4, AttemptTimeout: 2 * time.Minute, Logger: server.Logger,
+	}
+	var background sync.WaitGroup
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		server.deliveryLoop(ctx, delivery)
+	}()
+	defer background.Wait()
 	for {
 		// Накопившиеся обновления нельзя удалять: событие могло быть отправлено
 		// точкой непосредственно перед остановкой центра и к следующей попытке
@@ -125,25 +139,14 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		Clients: server.Store, Rules: server.Store, Store: server.Store,
 		DeliveryWindow: cfg.DeliveryTimeout(),
 	}
-	delivery := &application.DeliveryService{
-		Queue: server.Store, Gateways: server.gateways(cfg), Now: time.Now,
-		MaxConcurrent: 4, AttemptTimeout: 2 * time.Minute, Logger: server.Logger,
-	}
 	server.update(func(status *ServerStatus) {
 		status.State = "running"
 		status.Title = "Центр работает"
 		status.Detail = "Получаем данные точек и выполняем маршруты."
 		status.TransportOK = true
 	})
-	var background sync.WaitGroup
-	background.Add(1)
-	go func() {
-		defer background.Done()
-		server.deliveryLoop(ctx, delivery)
-	}()
 	// Перенастройка ждёт остановки старого цикла. Одновременные циклы могли бы
 	// выбрать одно задание до фиксации результата и отправить его дважды.
-	defer background.Wait()
 	offset := int64(0)
 	recentAcknowledgements := make(map[string]time.Time)
 	if raw, exists, _ := server.Store.Value(ctx, serverOffsetName); exists {
@@ -163,6 +166,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			continue
 		}
 		server.transportRecovered()
+		batchComplete := true
 		for _, packet := range packets {
 			if packet.ProbeID != "" {
 				client, clientErr := server.Store.Client(ctx, packet.ProbeClientID)
@@ -194,10 +198,17 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			}
 			result, err := reception.Receive(ctx, packet)
 			if err != nil {
+				if !application.IsPermanentPacketError(err) {
+					server.Logger.Warn("временная ошибка приёма пакета; пакет сохранён для повтора",
+						"error", err, "sender_bot_id", packet.SenderBotID)
+					batchComplete = false
+					break
+				}
 				server.Logger.Warn("пакет помещён в карантин", "error", err, "sender_bot_id", packet.SenderBotID)
 				if quarantineErr := server.Store.Quarantine(ctx, packet, err.Error()); quarantineErr != nil {
 					server.Logger.Error("не удалось сохранить пакет в карантин", "error", quarantineErr)
-					continue
+					batchComplete = false
+					break
 				}
 				server.deleteTransportPacket(ctx, receiver, packet.MessageID)
 				continue
@@ -226,11 +237,14 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			server.deleteTransportPacket(ctx, receiver, packet.MessageID)
 			now := time.Now().UTC()
 			server.update(func(status *ServerStatus) { status.LastReceived = &now })
+			if packet.UpdateID >= offset {
+				offset = packet.UpdateID + 1
+			}
 		}
-		if next > offset {
+		if batchComplete && next > offset {
 			offset = next
-			_ = server.Store.SaveValue(ctx, serverOffsetName, strconv.FormatInt(offset, 10))
 		}
+		_ = server.Store.SaveValue(ctx, serverOffsetName, strconv.FormatInt(offset, 10))
 		server.retryTransportDeletions(ctx, receiver)
 	}
 }

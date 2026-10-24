@@ -95,7 +95,7 @@ func (store *ServerStore) Client(ctx context.Context, id string) (application.Re
 		&client.ChatID, &client.ThreadID, &client.KeyID, &client.Key, &active,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return application.RegisteredClient{}, errors.New("точка не найдена")
+		return application.RegisteredClient{}, application.ErrClientNotFound
 	}
 	if err != nil {
 		return application.RegisteredClient{}, fmt.Errorf("прочитать точку: %w", err)
