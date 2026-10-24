@@ -203,13 +203,13 @@ try {
         center_authenticode = $serverSigned
         updater_authenticode = $updaterSigned
         signed_updates = $true
-		artifacts = @($hashes | ForEach-Object {
-			[ordered]@{
-				name = [System.IO.Path]::GetFileName($_.Path)
-				sha256 = $_.Hash.ToLowerInvariant()
-				size = (Get-Item -LiteralPath $_.Path).Length
-			}
-		})
+        artifacts = @($hashes | ForEach-Object {
+            [ordered]@{
+                name = [System.IO.Path]::GetFileName($_.Path)
+                sha256 = $_.Hash.ToLowerInvariant()
+                size = (Get-Item -LiteralPath $_.Path).Length
+            }
+        })
         update_public_key_sha256 = $(
             $sha = [System.Security.Cryptography.SHA256]::Create()
             try {
@@ -221,7 +221,7 @@ try {
         )
         reproducible_archives = $true
 		build_profile = $(if ($LabBuild) { 'laboratory' } else { 'production' })
-    } | ConvertTo-Json
+    } | ConvertTo-Json -Depth 5
 	$releaseManifestPath = Join-Path $distRoot 'release-manifest.json'
     [System.IO.File]::WriteAllText($releaseManifestPath, $manifest, [System.Text.UTF8Encoding]::new($false))
 	go run ./cmd/update-packager sign -input $releaseManifestPath -output (Join-Path $distRoot 'release-manifest.sig') -key $UpdateSigningKeyPath

@@ -149,6 +149,30 @@ func TestServerServiceAcknowledgesKnownEventAfterTransportDeadline(t *testing.T)
 	}
 }
 
+func TestServerServiceKeepsPacketOnTransientRegistryFailure(t *testing.T) {
+	t.Parallel()
+	key := bytes.Repeat([]byte{0x61}, 32)
+	event := serverServiceEvent()
+	envelope, err := protocol.Seal(event, "key-1", key, time.Now(), bytes.NewReader(make([]byte, 12)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(envelope)
+	service := ServerService{
+		Clients: memoryRegistry{err: errors.New("database is temporarily locked")},
+		Rules:   memoryRules{rules: serverServiceRules()}, Store: &memoryServerStore{},
+	}
+	_, err = service.Receive(context.Background(), IncomingPacket{Payload: payload})
+	if err == nil || IsPermanentPacketError(err) {
+		t.Fatalf("временная ошибка реестра ошибочно разрешает удалить пакет: %v", err)
+	}
+	service.Clients = memoryRegistry{}
+	_, err = service.Receive(context.Background(), IncomingPacket{Payload: payload})
+	if err == nil || !IsPermanentPacketError(err) {
+		t.Fatalf("неизвестная точка не классифицирована как окончательный отказ: %v", err)
+	}
+}
+
 // Ошибка одной конечной группы не должна мешать отправке того же перехвата в остальные назначенные места.
 func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 	t.Parallel()
@@ -206,11 +230,17 @@ func TestDeliveryServiceDoesNotLetSlowStreamBlockAnother(t *testing.T) {
 	}
 }
 
-type memoryRegistry struct{ client RegisteredClient }
+type memoryRegistry struct {
+	client RegisteredClient
+	err    error
+}
 
 func (registry memoryRegistry) Client(_ context.Context, id string) (RegisteredClient, error) {
+	if registry.err != nil {
+		return RegisteredClient{}, registry.err
+	}
 	if id != registry.client.ID {
-		return RegisteredClient{}, errors.New("not found")
+		return RegisteredClient{}, ErrClientNotFound
 	}
 	return registry.client, nil
 }
