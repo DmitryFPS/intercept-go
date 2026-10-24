@@ -169,7 +169,7 @@ func (rules RuleSet) Resolve(event Event) (DeliveryPlan, error) {
 		decisions = rules.Unknown
 		level = "unknown"
 		if suggestion := rules.closestPosition(event.Position.UnitName); suggestion != "" {
-			decisions = withReviewNote(decisions, "Возможно, имелось в виду: "+suggestion)
+			decisions = withReviewNote(decisions, "⚠️ Возможно, имелось в виду: "+suggestion)
 		}
 	}
 

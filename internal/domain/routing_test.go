@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,8 +54,26 @@ func TestRuleSetRoutesUnknownOnlyByUnknownRow(t *testing.T) {
 	if plan.Deliveries[0].Decision.ThreadID != 0 {
 		t.Fatal("неопознанное событие должно идти в General")
 	}
-	if plan.Deliveries[0].Decision.Note == "" {
+	if !strings.HasPrefix(plan.Deliveries[0].Decision.Note, "⚠️ Возможно, имелось в виду:") {
 		t.Fatal("для близкой опечатки должна быть подсказка, но не автоматическая маршрутизация")
+	}
+}
+
+// Если похожей позиции нет, оператор видит только обязательную пометку неизвестного
+// подразделения: случайная или вводящая в заблуждение подсказка не добавляется.
+func TestRuleSetDoesNotSuggestUnrelatedPosition(t *testing.T) {
+	t.Parallel()
+
+	rules := testRuleSet()
+	plan, err := rules.Resolve(testEvent("совершенно неизвестное подразделение"))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if plan.Recognized || len(plan.Deliveries) != 1 {
+		t.Fatalf("неожиданная схема неизвестной позиции: %#v", plan)
+	}
+	if plan.Deliveries[0].Decision.Note != "" {
+		t.Fatalf("для несвязанного названия подсказки быть не должно: %q", plan.Deliveries[0].Decision.Note)
 	}
 }
 

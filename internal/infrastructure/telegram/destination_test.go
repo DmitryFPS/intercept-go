@@ -34,6 +34,25 @@ func TestFormatReviewIsVisibleAndKeepsOriginalName(t *testing.T) {
 	}
 }
 
+func TestFormatReviewSuggestionUsesWarningIcon(t *testing.T) {
+	t.Parallel()
+
+	event := domain.Event{
+		ID: "event", ClientID: "client", CreatedAt: time.Now(),
+		Source:   domain.SourceRecord{ID: 1},
+		Position: domain.Position{UnitName: "1 мб 155 омб", Frequency: "100"},
+		Mode:     domain.SourceModeUnknown, Content: "15:03\n/1/ Проверка", ContentDigest: "digest",
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{
+		Action: domain.RouteReview,
+		Note:   "⚠️ Возможно, имелось в виду: 1 мб 155 омбр",
+	}}
+	text := formatBlock(event, combinedEventBlock(event), delivery, "", "", "", "")
+	if !strings.Contains(text, "⚠️ Возможно, имелось в виду: 1 мб 155 омбр") {
+		t.Fatalf("предупреждение о возможном совпадении не выделено: %q", text)
+	}
+}
+
 // Сообщение дословно повторяет предоставленный пользователем рабочий образец:
 // номер радиосети, карточки корреспондентов и /номер/ перед каждой репликой.
 func TestFormatEventMatchesApprovedTelegramExample(t *testing.T) {
