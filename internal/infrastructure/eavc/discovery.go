@@ -88,7 +88,7 @@ func Discover(ctx context.Context, roots []string, recursive bool) ([]Candidate,
 }
 
 func nearbyCandidates(root string) []string {
-	return []string{
+	result := []string{
 		filepath.Join(root, databaseFilename),
 		filepath.Join(root, "data-hub", databaseFilename),
 		filepath.Join(root, "EAVC", databaseFilename),
@@ -96,6 +96,19 @@ func nearbyCandidates(root string) []string {
 		filepath.Join(root, "eavc", databaseFilename),
 		filepath.Join(root, "eavc", "data-hub", databaseFilename),
 	}
+	// Переносимый Клиент может быть перемещён на уровень выше, а каталог
+	// EAVC остаться в прежней общей папке. Проверяем ровно один
+	// промежуточный каталог, не запуская дорогой рекурсивный обход.
+	for _, pattern := range []string{
+		filepath.Join(root, "*", "EAVC", databaseFilename),
+		filepath.Join(root, "*", "EAVC", "data-hub", databaseFilename),
+		filepath.Join(root, "*", "eavc", databaseFilename),
+		filepath.Join(root, "*", "eavc", "data-hub", databaseFilename),
+	} {
+		matches, _ := filepath.Glob(pattern)
+		result = append(result, matches...)
+	}
+	return result
 }
 
 func walkCandidates(ctx context.Context, root string, seen map[string]bool, result *[]Candidate) error {

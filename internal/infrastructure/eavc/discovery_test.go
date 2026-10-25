@@ -56,6 +56,27 @@ func TestDiscoverFindsProductionDataHubNextToStation(t *testing.T) {
 	}
 }
 
+func TestDiscoverFindsDataHubAfterStationMovesOneLevelUp(t *testing.T) {
+	desktop := t.TempDir()
+	stationRoot := filepath.Join(desktop, "EAVC Connect Station-01")
+	databasePath := filepath.Join(desktop, "Previous workspace", "EAVC", "data-hub", databaseFilename)
+	if err := os.MkdirAll(stationRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(databasePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	createDiscoveryDatabase(t, databasePath)
+
+	candidates, err := Discover(context.Background(), QuickRoots(stationRoot), false)
+	if err != nil {
+		t.Fatalf("быстрый поиск завершился ошибкой: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].Path != databasePath {
+		t.Fatalf("ожидалась база %q в прежней общей папке, получено %#v", databasePath, candidates)
+	}
+}
+
 // Проверяет ручной ввод как папки EAVC, так и полного пути к main.sqlite.
 func TestValidatePathAcceptsDirectoryAndFile(t *testing.T) {
 	root := t.TempDir()
