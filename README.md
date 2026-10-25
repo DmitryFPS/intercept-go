@@ -53,7 +53,8 @@
 - [Разработка и проверка](docs/07-development.md)
 - [Старая Python-версия и новая Go-версия](docs/08-old-and-go-behavior.md)
 - [Правила разработки и именования](docs/09-development-conventions.md)
-- [Отчёт полного аудита](docs/10-audit-2026-10-19.md)
+- [Актуальный аудит кандидата rc66](docs/12-audit-2026-10-25.md)
+- [Исторический аудит от 19 октября](docs/10-audit-2026-10-19.md)
 - [Почему транспортом выбрана Telegram-супергруппа](docs/adr/0001-telegram-transport.md)
 
 ## Состояние реализации
