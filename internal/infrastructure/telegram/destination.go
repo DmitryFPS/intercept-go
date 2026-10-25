@@ -136,7 +136,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		item.Blocks = map[string]destinationBlock{recordStateKey: stored}
 		return destination.saveItem(itemKey, item, false)
 	}
-	messageIDs, err := destination.upsertBlock(ctx, threadID, stored.MessageIDs, chunks, progress)
+	messageIDs, err := destination.upsertBlock(ctx, itemKey, threadID, stored.MessageIDs, chunks, progress)
 	if err != nil {
 		return fmt.Errorf("синхронизировать запись: %w", err)
 	}
@@ -240,7 +240,7 @@ func (destination *Destination) loadState() (destinationState, error) {
 }
 
 func (destination *Destination) upsertBlock(
-	ctx context.Context, threadID int64, oldIDs []int64, chunks []string,
+	ctx context.Context, itemKey string, threadID int64, oldIDs []int64, chunks []string,
 	progress func([]int64) error,
 ) ([]int64, error) {
 	ids := append([]int64(nil), oldIDs...)
@@ -253,6 +253,12 @@ func (destination *Destination) upsertBlock(
 			if unchangedEditError(err) {
 				// Telegram уже содержит нужный текст. Обычно это означает, что
 				// предыдущая попытка успела выполниться до разрыва связи.
+				if destination.Logger != nil {
+					destination.Logger.Info("Telegram-сообщение уже содержит исправление",
+						"item_key", itemKey, "chat_id", destination.ChatID,
+						"thread_id", threadID, "message_id", ids[index],
+					)
+				}
 				continue
 			}
 			if !terminalEditError(err) {
@@ -268,6 +274,12 @@ func (destination *Destination) upsertBlock(
 			// перехвата появится в топике как новое и нарушит хронологию. Ошибка
 			// остаётся видимой, а состояние не помечается синхронизированным.
 			return nil, fmt.Errorf("старое сообщение Telegram невозможно исправить: %w", err)
+		}
+		if destination.Logger != nil {
+			destination.Logger.Info("Telegram-сообщение отредактировано",
+				"item_key", itemKey, "chat_id", destination.ChatID,
+				"thread_id", threadID, "message_id", ids[index],
+			)
 		}
 	}
 	if len(ids) > len(chunks) {
@@ -290,6 +302,12 @@ func (destination *Destination) upsertBlock(
 			return nil, err
 		}
 		ids = append(ids, message.MessageID)
+		if destination.Logger != nil {
+			destination.Logger.Info("Telegram-сообщение создано",
+				"item_key", itemKey, "chat_id", destination.ChatID,
+				"thread_id", threadID, "message_id", message.MessageID,
+			)
+		}
 		// Сохраняем каждый успешно созданный фрагмент немедленно. Если связь
 		// оборвётся на следующем фрагменте, повтор продолжит с него без дубля.
 		if progress != nil {
