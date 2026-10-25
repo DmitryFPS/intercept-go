@@ -70,7 +70,7 @@ func (server *Server) ConfigureTransport(ctx context.Context, setup TransportSet
 	}
 	cfg := config.Server{
 		Schema: config.ServerSchemaV1, UpdatedAt: time.Now().UTC(), Listen: "127.0.0.1:17632",
-		DeliveryTimeoutMinutes: 30,
+		DeliveryTimeoutMinutes: 120,
 		Transport: config.ServerTransport{
 			BotToken: setup.BotToken, BotID: me.ID, BotUsername: me.Username,
 			ChatID: setup.ChatID, InviteLink: strings.TrimSpace(setup.InviteLink),

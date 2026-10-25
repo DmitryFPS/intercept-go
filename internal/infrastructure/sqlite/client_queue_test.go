@@ -222,7 +222,7 @@ func TestClientQueuePrioritizesPendingOverUploadedRetry(t *testing.T) {
 	if err := queue.MarkUploaded(ctx, uploaded.ID, 77); err != nil {
 		t.Fatal(err)
 	}
-	jobs, err := queue.Pending(ctx, 1, time.Now().UTC().Add(uploadedRetryInterval+time.Minute))
+	jobs, err := queue.Pending(ctx, 1, time.Now().UTC().Add(uploadedRetryBaseInterval+time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,9 +262,29 @@ func TestClientQueueDoesNotRetryUploadedTooFrequently(t *testing.T) {
 	if len(jobs) != 0 {
 		t.Fatalf("загруженное событие повторено раньше срока: %#v", jobs)
 	}
-	jobs, err = queue.Pending(ctx, 10, time.Now().UTC().Add(uploadedRetryInterval+time.Minute))
+	jobs, err = queue.Pending(ctx, 10, time.Now().UTC().Add(uploadedRetryBaseInterval+time.Minute))
 	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != event.ID {
 		t.Fatalf("событие не вернулось для страховочного повтора: %#v, %v", jobs, err)
+	}
+}
+
+func TestUploadedRetryDelayBacksOffAndCaps(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{attempt: 0, want: 20 * time.Minute},
+		{attempt: 1, want: 20 * time.Minute},
+		{attempt: 2, want: 40 * time.Minute},
+		{attempt: 3, want: 80 * time.Minute},
+		{attempt: 4, want: 2 * time.Hour},
+		{attempt: 20, want: 2 * time.Hour},
+	}
+	for _, test := range tests {
+		if got := uploadedRetryDelay(test.attempt); got != test.want {
+			t.Fatalf("попытка %d: получено %s, ожидалось %s", test.attempt, got, test.want)
+		}
 	}
 }
 

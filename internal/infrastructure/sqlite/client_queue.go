@@ -14,7 +14,10 @@ import (
 	"intercept/internal/domain"
 )
 
-const uploadedRetryInterval = 2 * time.Minute
+const (
+	uploadedRetryBaseInterval = 20 * time.Minute
+	uploadedRetryMaxInterval  = 2 * time.Hour
+)
 
 // ClientQueue хранит события независимо от процесса и состояния сети.
 type ClientQueue struct {
@@ -277,18 +280,41 @@ func clientStreamKey(event domain.Event) string {
 
 // MarkUploaded запоминает загрузку в транспорт, не считая её приёмом сервером.
 func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, telegramMessageID int64) error {
+	var attempts int
+	if err := queue.db.QueryRowContext(ctx, `SELECT attempts FROM client_events WHERE event_id=?`, eventID).Scan(&attempts); err != nil {
+		return fmt.Errorf("прочитать число транспортных попыток: %w", err)
+	}
+	now := time.Now().UTC()
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
 		SET state = 'uploaded', telegram_message_id = ?, uploaded_at = ?,
 			last_error = '', next_attempt_at = ?, attempts = attempts + 1
 		WHERE event_id = ? AND state IN ('pending', 'uploaded')`,
-		telegramMessageID, time.Now().UTC().Format(time.RFC3339Nano),
-		time.Now().UTC().Add(uploadedRetryInterval).Format(time.RFC3339Nano), eventID,
+		telegramMessageID, now.Format(time.RFC3339Nano),
+		now.Add(uploadedRetryDelay(attempts+1)).Format(time.RFC3339Nano), eventID,
 	)
 	// Центр может подтвердить маленький пакет быстрее, чем Send вернёт
 	// управление этому потоку. Поздняя промежуточная отметка загрузки не должна
 	// откатывать конечное состояние и не является ошибкой.
 	return terminalTransition(queue.db, ctx, result, err, eventID, "отметить загрузку")
+}
+
+// uploadedRetryDelay оставляет центру время разобрать уже принятый Telegram
+// пакет. Частые повторы больших пакетов иначе сами вытесняют свежие события из
+// транспортной группы. Первая страховочная копия ещё укладывается в 30 минут
+// свежести исходного перехвата, дальнейшие повторы разрежаются экспоненциально.
+func uploadedRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := uploadedRetryBaseInterval
+	for current := 1; current < attempt && delay < uploadedRetryMaxInterval; current++ {
+		delay *= 2
+	}
+	if delay > uploadedRetryMaxInterval {
+		return uploadedRetryMaxInterval
+	}
+	return delay
 }
 
 // ExpireDue завершает события, которые уже нельзя впервые передавать.

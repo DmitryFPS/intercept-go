@@ -59,8 +59,8 @@ func (cfg Server) Validate() error {
 	if strings.TrimSpace(cfg.Listen) == "" {
 		return errors.New("не задан локальный адрес интерфейса")
 	}
-	if cfg.DeliveryTimeoutMinutes != 0 && (cfg.DeliveryTimeoutMinutes < 1 || cfg.DeliveryTimeoutMinutes > 60) {
-		return errors.New("срок доставки сервером должен быть от 1 до 60 минут")
+	if cfg.DeliveryTimeoutMinutes != 0 && (cfg.DeliveryTimeoutMinutes < 1 || cfg.DeliveryTimeoutMinutes > 1440) {
+		return errors.New("срок доставки сервером должен быть от 1 до 1440 минут")
 	}
 	if !validBotToken(cfg.Transport.BotToken) || cfg.Transport.BotID <= 0 || cfg.Transport.ChatID == 0 {
 		return errors.New("транспортный бот или группа настроены неверно")
@@ -88,13 +88,13 @@ func (cfg Server) Validate() error {
 	return nil
 }
 
-// DeliveryTimeout гарантирует центру не менее тридцати минут на внешние
-// доставки. Старые настройки содержали 10 минут, которых недостаточно для
-// штатного всплеска от трёх точек при ограничениях Telegram.
+// DeliveryTimeout гарантирует центру два часа на внешние доставки после того,
+// как свежий перехват уже принят. Это не продлевает исходное 30-минутное окно,
+// но позволяет штатно разобрать большой хвост при ограничениях Telegram.
 func (cfg Server) DeliveryTimeout() time.Duration {
 	minutes := cfg.DeliveryTimeoutMinutes
-	if minutes < 30 {
-		minutes = 30
+	if minutes < 120 {
+		minutes = 120
 	}
 	return time.Duration(minutes) * time.Minute
 }
