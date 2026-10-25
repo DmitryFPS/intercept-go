@@ -307,6 +307,9 @@ func (client *Client) SendHTML(ctx context.Context, chatID, threadID int64, text
 
 // EditHTML исправляет ранее опубликованный временной блок без создания дубля.
 func (client *Client) EditHTML(ctx context.Context, chatID, messageID int64, text string) error {
+	if err := client.sends.wait(ctx, chatID); err != nil {
+		return err
+	}
 	return client.callJSON(ctx, "editMessageText", map[string]any{
 		"chat_id": chatID, "message_id": messageID, "text": text,
 		"parse_mode": "HTML", "disable_web_page_preview": true,
@@ -315,18 +318,25 @@ func (client *Client) EditHTML(ctx context.Context, chatID, messageID int64, tex
 
 // DeleteMessage удаляет обработанный служебный либо проверочный материал.
 func (client *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
+	if err := client.sends.wait(ctx, chatID); err != nil {
+		return err
+	}
 	return client.callJSON(ctx, "deleteMessage", map[string]any{
 		"chat_id": chatID, "message_id": messageID,
 	}, nil)
 }
 
-// TestTopic проверяет право записи и по возможности удаляет тестовое сообщение.
+// TestTopic проверяет право записи и обязательно удаляет проверочное сообщение.
+// Настройка не считается завершённой, если у бота нет права удаления: иначе
+// служебный текст останется в рабочей группе.
 func (client *Client) TestTopic(ctx context.Context, chatID, threadID int64) error {
 	message, err := client.SendText(ctx, chatID, threadID, "Проверка подключения EAVC Connect. Сообщение будет удалено автоматически.")
 	if err != nil {
 		return err
 	}
-	_ = client.DeleteMessage(ctx, chatID, message.MessageID)
+	if err := client.DeleteMessage(ctx, chatID, message.MessageID); err != nil {
+		return fmt.Errorf("проверочное сообщение отправлено, но не удалено; удалите его вручную и выдайте боту право удаления: %w", err)
+	}
 	return nil
 }
 

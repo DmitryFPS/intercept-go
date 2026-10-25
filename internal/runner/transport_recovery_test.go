@@ -28,6 +28,19 @@ func TestServerTransportRecoveryClearsTemporaryWarning(t *testing.T) {
 	}
 }
 
+func TestDeliveryWarningKeepsInboundTransportHealthy(t *testing.T) {
+	t.Parallel()
+	server := &Server{
+		Logger: slog.Default(),
+		status: ServerStatus{State: "running", Title: "Центр работает", TransportOK: true},
+	}
+	server.warnDelivery("Не удалось доставить результат", "Сохранено в очереди", errors.New("word unavailable"))
+	status := server.Status()
+	if !status.TransportOK {
+		t.Fatal("сбой отдельного получателя не должен помечать входящий Telegram-транспорт недоступным")
+	}
+}
+
 func TestTransportRecoveryDoesNotHideUnrelatedFailure(t *testing.T) {
 	client := &Client{status: ClientStatus{
 		State: "waiting", Title: "Не удалось прочитать EAVC", Detail: "сбой базы", TelegramOK: false,

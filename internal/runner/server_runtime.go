@@ -336,7 +336,7 @@ func (server *Server) deliveryLoop(ctx context.Context, service *application.Del
 	for {
 		count, err := service.RunOnce(ctx, 100)
 		if err != nil && ctx.Err() == nil {
-			server.warn(
+			server.warnDelivery(
 				"Не удалось доставить результат",
 				"Результат сохранён в очереди. Программа повторит отправку автоматически.",
 				err,
@@ -510,6 +510,21 @@ func (server *Server) warn(title, detail string, err error) {
 		status.Title = title
 		status.Detail = detail
 		status.TransportOK = false
+	})
+}
+
+// warnDelivery показывает сбой конкретного получателя, не объявляя при этом
+// входящий Telegram-транспорт недоступным. Его состояние проверяется и
+// восстанавливается независимым циклом transportLoop.
+func (server *Server) warnDelivery(title, detail string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	server.Logger.Warn(title, "error", err)
+	server.update(func(status *ServerStatus) {
+		status.State = "waiting"
+		status.Title = title
+		status.Detail = detail
 	})
 }
 

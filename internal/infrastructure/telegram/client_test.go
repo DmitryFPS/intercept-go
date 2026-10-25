@@ -63,6 +63,25 @@ func TestSendLimiterHonorsSharedCooldown(t *testing.T) {
 	}
 }
 
+func TestTopicFailsWhenProbeMessageCannotBeDeleted(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			io.WriteString(writer, `{"ok":true,"result":{"message_id":17,"chat":{"id":-1001}}}`)
+			return
+		}
+		writer.WriteHeader(http.StatusBadRequest)
+		io.WriteString(writer, `{"ok":false,"error_code":400,"description":"message can't be deleted"}`)
+	}))
+	defer server.Close()
+	client, _ := NewWithBaseURL("123:token", server.URL, server.Client())
+	err := client.TestTopic(context.Background(), -1001, 42)
+	if err == nil || !strings.Contains(err.Error(), "не удалено") {
+		t.Fatalf("неудачное удаление должно остановить настройку: %v", err)
+	}
+}
+
 func TestPrivateRecipientLimiterSeparatesBots(t *testing.T) {
 	t.Parallel()
 	first := privateRecipientLimiterID("@First_Point_Bot")

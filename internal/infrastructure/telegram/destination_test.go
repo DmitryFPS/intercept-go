@@ -72,10 +72,10 @@ func TestFormatEventMatchesApprovedTelegramExample(t *testing.T) {
 		}},
 	}
 	want := "Радиосеть <b>Гольназ</b> - 39\n" +
-		"159.3000 МГц (ID 18902 AES-256)\n" +
+		"159.3000 МГц (гр. ID 18902 AES-256)\n" +
 		"20.10.2026г.\n\n" +
-		"1. «<b>Торба</b>» (id: 52325) Старший группы Гольназ, мужской голос, украинская речь;\n" +
-		"2. «<b>Монако</b>» (id: 52345) ОД на КНП Гольназ, мужской голос, украинская речь;\n\n" +
+		"1.«<b>Торба</b>» (id: 52325) – Старший группы Гольназ, мужской голос, украинская речь;\n" +
+		"2.«<b>Монако</b>» (id: 52345) – ОД на КНП Гольназ, мужской голос, украинская речь;\n\n" +
 		"<b>17:30</b>\n" +
 		"/1/ Монако Торбе на связь.\n" +
 		"/2/ На связи.\n" +
@@ -101,7 +101,10 @@ func TestFormatEventKeepsSeveralTimeBlocksInOneMessage(t *testing.T) {
 			},
 			{
 				Key: "20.51", Sequence: 1, Text: "20.51\n-Принял, продолжаю работу. (61021)",
-				Callsigns: []domain.Callsign{{Number: 3, Code: "61021", Label: "Рубин"}},
+				Callsigns: []domain.Callsign{
+					{Number: 3, Code: "61021", Label: "Рубин"},
+					{Number: 1, Code: "52345", Label: "Монако", Description: "ОД, мужской голос"},
+				},
 			},
 			{
 				Key: "21.14", Sequence: 2, Text: "21.14\n-Доложите обстановку. (61022)\n-Без изменений. (52345)",
@@ -111,10 +114,11 @@ func TestFormatEventKeepsSeveralTimeBlocksInOneMessage(t *testing.T) {
 	}
 	got := FormatEventForNetwork(event, "313", false)
 	for _, expected := range []string{
-		"1. «<b>Монако</b>»", "2. «<b>Торба</b>»", "3. «<b>Рубин</b>»", "4. «<b>Вектор</b>»",
+		"1.«<b>Монако</b>»", "2.«<b>Торба</b>»", "3.«<b>Рубин</b>»", "4.«<b>Вектор</b>»",
 		"<b>17:30</b>\n/1/ На связи.\n/2/ Слышу уверенно.",
 		"<b>20:51</b>\n/3/ Принял, продолжаю работу.",
 		"<b>21:14</b>\n/4/ Доложите обстановку.\n/1/ Без изменений.",
+		"1.«<b>Монако</b>» (id: 52345) – ОД, мужской голос;",
 	} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("в объединённом сообщении нет %q:\n%s", expected, got)
@@ -148,6 +152,15 @@ func TestMessageTemplateValidationListsMissingMarkers(t *testing.T) {
 	}
 	if err := ValidateMessageTemplate(DefaultMessageTemplate); err != nil {
 		t.Fatalf("стандартный шаблон не прошёл проверку: %v", err)
+	}
+}
+
+func TestLegacyDefaultTemplateMigratesToWordRadioNetworkLabel(t *testing.T) {
+	t.Parallel()
+	legacy := strings.Replace(DefaultMessageTemplate, "МГц (гр. ID", "МГц (ID", 1)
+	migrated := MigrateMessageTemplate(legacy)
+	if !strings.Contains(migrated, "МГц (гр. ID {{GROUP_ID}} {{PROTECTION}})") {
+		t.Fatalf("старый шаблон не приведён к общему с Word виду: %q", migrated)
 	}
 }
 
@@ -224,7 +237,7 @@ func TestFormatDeferredEventKeepsMarkerAndOriginalDate(t *testing.T) {
 	got := FormatEventForNetwork(event, "39", false)
 	for _, expected := range []string{
 		"Радиосеть <b>2 об 3 обр ОсН НГ (отложенный режим)</b> - 39",
-		"19.10.2026г.", "1. «<b>Марс</b>»", "<b>03:51</b>", "/1/ На приём.",
+		"19.10.2026г.", "1.«<b>Марс</b>»", "<b>03:51</b>", "/1/ На приём.",
 	} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("в отложенном сообщении нет %q:\n%s", expected, got)

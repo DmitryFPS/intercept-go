@@ -23,7 +23,7 @@ var legacyDatePrefix = regexp.MustCompile(`^\s*(\d{4})-(\d{2})-(\d{2})`)
 const DefaultProtection = "AES-256"
 
 const DefaultMessageTemplate = `Радиосеть <b>{{UNIT}}</b> - {{NETWORK}}
-{{FREQUENCY}} МГц (ID {{GROUP_ID}} {{PROTECTION}})
+{{FREQUENCY}} МГц (гр. ID {{GROUP_ID}} {{PROTECTION}})
 {{DATE}}г.
 
 {{CORRESPONDENTS}}
@@ -90,6 +90,9 @@ func ValidateMessageTemplate(template string) error {
 // MigrateMessageTemplate переводит старый редактируемый шаблон на явную метку
 // защиты. Значение защиты хранится в настройках получателя, а не в коде макета.
 func MigrateMessageTemplate(template string) string {
+	if strings.Contains(template, "МГц (ID {{GROUP_ID}}") {
+		template = strings.Replace(template, "МГц (ID {{GROUP_ID}}", "МГц (гр. ID {{GROUP_ID}}", 1)
+	}
 	if strings.Contains(template, "{{PROTECTION}}") {
 		return template
 	}
@@ -137,17 +140,11 @@ func combinedEventBlock(event domain.Event) domain.ContentBlock {
 	sort.SliceStable(blocks, func(left, right int) bool { return blocks[left].Sequence < blocks[right].Sequence })
 	texts := make([]string, 0, len(blocks))
 	callsigns := make([]domain.Callsign, 0)
-	seenCallsign := make(map[string]bool)
 	for _, block := range blocks {
 		if text := strings.TrimSpace(block.Text); text != "" {
 			texts = append(texts, text)
 		}
 		for _, callsign := range block.Callsigns {
-			key := domain.NormalizeCorrespondentCode(callsign.Code)
-			if key == "" || seenCallsign[key] {
-				continue
-			}
-			seenCallsign[key] = true
 			callsigns = append(callsigns, callsign)
 		}
 	}
@@ -208,11 +205,11 @@ func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.
 			description = "сведения не указаны"
 		}
 		description = strings.TrimRight(description, ";") + ";"
-		correspondentText.WriteString(fmt.Sprintf("%d. «<b>", correspondent.Number))
+		correspondentText.WriteString(fmt.Sprintf("%d.«<b>", correspondent.Number))
 		correspondentText.WriteString(escapeText(correspondent.Label))
 		correspondentText.WriteString("</b>» (id: ")
 		correspondentText.WriteString(escapeText(correspondent.Code))
-		correspondentText.WriteString(") ")
+		correspondentText.WriteString(") – ")
 		correspondentText.WriteString(escapeText(description))
 		correspondentText.WriteString("\n")
 	}
