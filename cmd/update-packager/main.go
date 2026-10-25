@@ -23,7 +23,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail(errors.New("ожидается keygen, public, sign, verify или package"))
+		fail(errors.New("ожидается keygen, public, sign, verify, verify-package или package"))
 	}
 	var err error
 	switch os.Args[1] {
@@ -35,6 +35,8 @@ func main() {
 		err = signFile(os.Args[2:])
 	case "verify":
 		err = verifyFile(os.Args[2:])
+	case "verify-package":
+		err = verifyPackage(os.Args[2:])
 	case "package":
 		err = createPackage(os.Args[2:])
 	default:
@@ -43,6 +45,29 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
+}
+
+func verifyPackage(arguments []string) error {
+	set := flag.NewFlagSet("verify-package", flag.ContinueOnError)
+	packagePath := set.String("package", "", "")
+	stagingRoot := set.String("staging", "", "")
+	product := set.String("product", "", "")
+	version := set.String("version", "", "")
+	publicKeyText := set.String("public-key", "", "")
+	if err := set.Parse(arguments); err != nil {
+		return err
+	}
+	if *packagePath == "" || *stagingRoot == "" || *product == "" || *version == "" || *publicKeyText == "" {
+		return errors.New("неполные параметры проверки пакета")
+	}
+	plan, err := selfupdate.VerifyAndExtract(*packagePath, *stagingRoot, *product, "", *publicKeyText)
+	if err != nil {
+		return err
+	}
+	if plan.Manifest.Version != *version {
+		return fmt.Errorf("версия пакета %s не совпадает с ожидаемой %s", plan.Manifest.Version, *version)
+	}
+	return nil
 }
 
 func verifyFile(arguments []string) error {

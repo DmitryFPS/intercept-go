@@ -196,8 +196,41 @@ try {
     $serverUpdate = Join-Path $distRoot 'EAVC-Connect-Center-update.zip'
     go run ./cmd/update-packager package -source $clientRoot -product eavc-connect-station -version $Version -output $clientUpdate -key $UpdateSigningKeyPath
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось подписать пакет обновления рабочей точки.' }
-    go run ./cmd/update-packager package -source $serverRoot -product eavc-connect-center -version $Version -output $serverUpdate -key $UpdateSigningKeyPath
+
+    # Старые установленные версии допускают не более 64 файлов в подписанном
+    # update-ZIP. Полный набор иллюстраций остаётся в portable-комплекте и уже
+    # установленной документации; обновление заменяет программы, шаблон точки и
+    # тексты руководства, не удаляя существующие изображения.
+    $serverUpdateSource = Join-Path $buildCacheRoot ('center-update-source-' + $Version)
+    if (Test-Path -LiteralPath $serverUpdateSource) {
+        $resolvedUpdateSource = [IO.Path]::GetFullPath($serverUpdateSource)
+        $resolvedBuildCache = [IO.Path]::GetFullPath($buildCacheRoot) + [IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedUpdateSource.StartsWith($resolvedBuildCache, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Небезопасный путь временного комплекта обновления: $resolvedUpdateSource"
+        }
+        Remove-Item -LiteralPath $resolvedUpdateSource -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $serverUpdateSource | Out-Null
+    Get-ChildItem -LiteralPath $serverRoot -Force |
+        Where-Object Name -ne 'Документация' |
+        Copy-Item -Destination $serverUpdateSource -Recurse -Force
+    $serverUpdateGuide = Join-Path $serverUpdateSource 'Документация'
+    New-Item -ItemType Directory -Path $serverUpdateGuide | Out-Null
+    Copy-Item -LiteralPath (Join-Path $guideRoot 'index.html') -Destination $serverUpdateGuide
+    Copy-Item -LiteralPath (Join-Path $guideRoot 'Полная установка и настройка EAVC Connect.md') -Destination $serverUpdateGuide
+
+    go run ./cmd/update-packager package -source $serverUpdateSource -product eavc-connect-center -version $Version -output $serverUpdate -key $UpdateSigningKeyPath
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось подписать пакет обновления центра.' }
+
+    foreach ($packageCheck in @(
+        @{Path=$clientUpdate; Product='eavc-connect-station'; Name='рабочей точки'},
+        @{Path=$serverUpdate; Product='eavc-connect-center'; Name='центра'}
+    )) {
+        $staging = Join-Path $buildCacheRoot ('verify-' + $packageCheck.Product + '-' + $Version)
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+        go run ./cmd/update-packager verify-package -package $packageCheck.Path -staging $staging -product $packageCheck.Product -version $Version -public-key $updatePublicKey
+        if ($LASTEXITCODE -ne 0) { throw "Пакет обновления $($packageCheck.Name) не прошёл полную проверку." }
+    }
 
     $hashes = Get-FileHash -Algorithm SHA256 -LiteralPath $clientArchive, $serverArchive, $clientUpdate, $serverUpdate
     $lines = $hashes | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($_.Path))" }
