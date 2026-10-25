@@ -21,6 +21,12 @@ var requiredColumns = []string{
 	"group_code", "uuid", "content", "updated_by", "updated_at",
 }
 
+// maxBoundaryReplay ограничивает повторное чтение записей с одной секундой
+// updated_at. До этого ошибочная или искусственно плотная база могла вернуть
+// неограниченный объём, обходя BatchSize. Переполнение не замалчивается:
+// оператор получает явную ошибку, а курсор не сдвигается.
+const maxBoundaryReplay = 1000
+
 // Source читает EAVC только через SQLite mode=ro и PRAGMA query_only.
 type Source struct {
 	db              *sql.DB
@@ -166,14 +172,20 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 			SELECT * FROM all_items
 			WHERE ? <> '' AND julianday(updated_at) = julianday(?)
 			ORDER BY id DESC
+			LIMIT ?
 		)
 		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
-			uuid, content, updated_by, updated_at, catalog_uuid, source_mode
-		FROM (SELECT * FROM newer UNION SELECT * FROM boundary)
+			uuid, content, updated_by, updated_at, catalog_uuid, source_mode, is_boundary
+		FROM (
+			SELECT *, 0 AS is_boundary FROM newer
+			UNION ALL
+			SELECT *, 1 AS is_boundary FROM boundary
+		)
 		ORDER BY julianday(updated_at), id
 		`, allItemsQuery)
 	rows, err := source.db.QueryContext(
-		ctx, query, after.UpdatedAt, after.UpdatedAt, limit, after.UpdatedAt, after.UpdatedAt,
+		ctx, query, after.UpdatedAt, after.UpdatedAt, limit,
+		after.UpdatedAt, after.UpdatedAt, maxBoundaryReplay+1,
 	)
 	if err != nil {
 		return nil, after, fmt.Errorf("прочитать изменения EAVC: %w", err)
@@ -182,6 +194,7 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 
 	cursor := after
 	var items []application.SourceItem
+	boundaryCount := 0
 	for rows.Next() {
 		var item application.SourceItem
 		var mode string
@@ -190,11 +203,21 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		var sessionUUID, unitName, frequency, groupCode, sourceUUID sql.NullString
 		var content, updatedBy, catalogUUID sql.NullString
 		var id int64
+		var isBoundary bool
 		if err := rows.Scan(
 			&id, &sessionID, &sessionUUID, &unitName, &frequency, &groupCode,
-			&sourceUUID, &content, &updatedBy, &updatedAt, &catalogUUID, &mode,
+			&sourceUUID, &content, &updatedBy, &updatedAt, &catalogUUID, &mode, &isBoundary,
 		); err != nil {
 			return nil, after, fmt.Errorf("декодировать запись EAVC: %w", err)
+		}
+		if isBoundary {
+			boundaryCount++
+			if boundaryCount > maxBoundaryReplay {
+				return nil, after, fmt.Errorf(
+					"в EAVC более %d записей с одной отметкой времени %q; чтение остановлено без сдвига курсора",
+					maxBoundaryReplay, after.UpdatedAt,
+				)
+			}
 		}
 		item.Record = domain.SourceRecord{
 			ID: id, UUID: sourceUUID.String, SessionID: sessionID.Int64,

@@ -322,6 +322,29 @@ func TestProtectedHistorySearchKeepsExactPagination(t *testing.T) {
 	}
 }
 
+func TestHistoryPageReportsCorruptedProtectedEvent(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	rules := serverTestRules()
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	event := serverTestEvent()
+	plan, err := rules.Resolve(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+		t.Fatalf("accept=%v err=%v", accepted, acceptErr)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE received_events SET payload_json=? WHERE event_id=?`, []byte("corrupt"), event.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.HistoryPage(ctx, "received", 30, 0, time.Now().UTC()); err == nil {
+		t.Fatal("повреждённая защищённая запись истории была молча принята")
+	}
+}
+
 func TestUnicodeHistorySearchIsCaseInsensitive(t *testing.T) {
 	t.Parallel()
 	store, ctx := openObservabilityStore(t)

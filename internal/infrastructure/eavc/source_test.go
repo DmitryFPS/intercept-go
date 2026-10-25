@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"intercept/internal/application"
@@ -405,5 +406,50 @@ func TestSourceDoesNotSkipLargeSameTimestampBatch(t *testing.T) {
 		if !seen[id] {
 			t.Fatalf("запись %d из граничной секунды пропущена", id)
 		}
+	}
+}
+
+func TestSourceRejectsUnboundedSameTimestampBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE intercept_items (
+		id INTEGER PRIMARY KEY, session_id INTEGER, session_uuid TEXT,
+		unit_name TEXT, frequency TEXT, group_code TEXT, uuid TEXT,
+		content TEXT, updated_by TEXT, updated_at TEXT
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	statement, err := db.Prepare(`INSERT INTO intercept_items VALUES(?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := 1; id <= maxBoundaryReplay+1; id++ {
+		if _, err = statement.Exec(
+			id, id, fmt.Sprintf("session-%d", id), "Позиция", "100.0", "A",
+			fmt.Sprintf("source-%d", id), "10.00\n-Текст", "Оператор", "2026-10-23 10:00:00",
+		); err != nil {
+			statement.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := statement.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	_, _, err = source.Scan(context.Background(), application.Cursor{
+		UpdatedAt: "2026-10-23 10:00:00", ID: 1,
+	}, 100)
+	if err == nil || !strings.Contains(err.Error(), "без сдвига курсора") {
+		t.Fatalf("неограниченная граничная секунда не отклонена: %v", err)
 	}
 }

@@ -490,32 +490,43 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 		&item.DestinationID, &deliveryPayload, &item.State, &occurred, &item.Attempts, &next, &item.Reason); err != nil {
 		return ServerHistoryItem{}, err
 	}
-	item.OccurredAt, _ = time.Parse(time.RFC3339Nano, occurred)
-	item.NextAttemptAt = parseNullableTime(next)
+	parsedOccurredAt, err := time.Parse(time.RFC3339Nano, occurred)
+	if err != nil {
+		return ServerHistoryItem{}, fmt.Errorf("история %s: неверное время события %q: %w", item.ID, occurred, err)
+	}
+	item.OccurredAt = parsedOccurredAt
+	item.NextAttemptAt, err = parseNullableTimeStrict(next)
+	if err != nil {
+		return ServerHistoryItem{}, fmt.Errorf("история %s: неверное время следующей попытки: %w", item.ID, err)
+	}
 	plain, err := unprotectDatabaseValue(eventPayload)
-	if err == nil {
-		var event domain.Event
-		if json.Unmarshal(plain, &event) == nil {
-			item.UnitName = event.Position.UnitName
-			item.SourceRecord = event.Source.ID
-			item.SourceMode = string(event.Mode)
-			sourceAt := event.SourceAt
-			if sourceAt.IsZero() {
-				sourceAt = event.ObservedAt
-			}
-			if !sourceAt.IsZero() {
-				item.SourceAt = &sourceAt
-			}
-		}
+	if err != nil {
+		return ServerHistoryItem{}, fmt.Errorf("история %s: не удалось расшифровать событие: %w", item.ID, err)
+	}
+	var event domain.Event
+	if err := json.Unmarshal(plain, &event); err != nil {
+		return ServerHistoryItem{}, fmt.Errorf("история %s: повреждён JSON события: %w", item.ID, err)
+	}
+	item.UnitName = event.Position.UnitName
+	item.SourceRecord = event.Source.ID
+	item.SourceMode = string(event.Mode)
+	sourceAt := event.SourceAt
+	if sourceAt.IsZero() {
+		sourceAt = event.ObservedAt
+	}
+	if !sourceAt.IsZero() {
+		item.SourceAt = &sourceAt
 	}
 	if len(deliveryPayload) > 0 {
 		plain, err := unprotectDatabaseValue(deliveryPayload)
-		if err == nil {
-			var delivery domain.PlannedDelivery
-			if json.Unmarshal(plain, &delivery) == nil {
-				item.Destination = delivery.Destination.Name
-			}
+		if err != nil {
+			return ServerHistoryItem{}, fmt.Errorf("история %s/%s: не удалось расшифровать доставку: %w", item.ID, item.DestinationID, err)
 		}
+		var delivery domain.PlannedDelivery
+		if err := json.Unmarshal(plain, &delivery); err != nil {
+			return ServerHistoryItem{}, fmt.Errorf("история %s/%s: повреждён JSON доставки: %w", item.ID, item.DestinationID, err)
+		}
+		item.Destination = delivery.Destination.Name
 	}
 	return item, nil
 }
@@ -693,14 +704,19 @@ func (store *ServerStore) CompleteTransportDeletion(ctx context.Context, message
 }
 
 func parseNullableTime(value sql.NullString) *time.Time {
+	parsed, _ := parseNullableTimeStrict(value)
+	return parsed
+}
+
+func parseNullableTimeStrict(value sql.NullString) (*time.Time, error) {
 	if !value.Valid || value.String == "" {
-		return nil
+		return nil, nil
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, value.String)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return &parsed
+	return &parsed, nil
 }
 
 func stamp(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
