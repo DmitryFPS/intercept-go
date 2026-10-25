@@ -62,6 +62,53 @@ func TestClientUpdateValidationExposesFailureToHealthCheck(t *testing.T) {
 	}
 }
 
+func TestClientUpdateValidationAllowsTemporarilyUnavailableEAVC(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Client{
+		Schema: config.ClientSchemaV2, GeneratedAt: time.Now(), ClientID: "id", ClientNumber: "01", ClientName: "Точка",
+		EAVC:         config.EAVC{SQLitePath: "auto", TimeZone: "Europe/Moscow"},
+		Transport:    config.ClientTransport{BotToken: "123456789:abcdefghijklmnopqrstuvwxyzABCDE", BotUsername: "point_bot", ServerBotID: 2, ServerBotUsername: "center_bot", ChatID: -1001, ThreadID: 2},
+		Cryptography: config.ClientCrypto{KeyID: "key", KeyBase64: base64.RawStdEncoding.EncodeToString(make([]byte, 32))},
+		Polling:      config.ClientPolling{EAVCSeconds: 10, BatchSize: 100, MaxEventAgeMinutes: 30},
+	}
+	cfg, err = config.SignClient(cfg, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseDir := t.TempDir()
+	client := NewClient(baseDir, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer client.Close()
+	issuer, _, err := client.verifyTrustedIssuer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.persistConfig(payload, issuer, true); err != nil {
+		t.Fatal(err)
+	}
+	missingPath := filepath.Join(baseDir, "temporarily-unavailable", "eavc.db")
+	local, err := json.Marshal(clientLocalSettings{EAVCPath: missingPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := secrets.Save(client.localSettingsPath(), local); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ValidateForUpdate(context.Background()); err != nil {
+		t.Fatalf("временно недоступная EAVC помешала безопасному обновлению: %v", err)
+	}
+	status := client.Status()
+	if status.State != "paused" || status.Processing || !status.Configured || status.DatabaseOK || status.EAVCPath != missingPath {
+		t.Fatalf("неожиданное состояние изолированной проверки: %+v", status)
+	}
+}
+
 func TestFirstClientConfigTrustsProvisionedCenterAndRejectsAnother(t *testing.T) {
 	t.Parallel()
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)

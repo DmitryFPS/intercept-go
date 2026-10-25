@@ -99,6 +99,31 @@ func (client *Client) savedEAVCPath(ctx context.Context) (string, error) {
 	return eavc.ValidatePath(ctx, settings.EAVCPath)
 }
 
+// configuredEAVCPathForUpdate читает и проверяет формат локального
+// пути, но не требует доступности внешней базы в момент обновления.
+func (client *Client) configuredEAVCPathForUpdate(cfg config.Client) (string, error) {
+	payload, err := secrets.Load(client.localSettingsPath())
+	if err == nil {
+		var settings clientLocalSettings
+		if err := json.Unmarshal(payload, &settings); err != nil {
+			return "", errors.New("локальные настройки EAVC повреждены")
+		}
+		path := strings.TrimSpace(settings.EAVCPath)
+		if path == "" {
+			return "", errors.New("в локальных настройках не указан путь EAVC")
+		}
+		return path, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	configured := strings.TrimSpace(cfg.EAVC.SQLitePath)
+	if strings.EqualFold(configured, "auto") {
+		return "", nil
+	}
+	return configured, nil
+}
+
 func (client *Client) localSettingsPath() string {
 	return filepath.Join(client.BaseDir, "data", "client-local.dat")
 }

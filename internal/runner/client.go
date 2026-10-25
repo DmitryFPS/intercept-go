@@ -13,7 +13,6 @@ import (
 
 	"intercept/internal/config"
 	"intercept/internal/domain"
-	"intercept/internal/infrastructure/eavc"
 	"intercept/internal/infrastructure/secrets"
 	stateDB "intercept/internal/infrastructure/sqlite"
 )
@@ -222,8 +221,11 @@ func (client *Client) ensureRootLifecycle(parent context.Context) context.Contex
 	return rootContext
 }
 
-// ValidateForUpdate проверяет защищённые настройки, доверие, базу EAVC и
-// локальную очередь, не запуская Telegram и циклы отправки.
+// ValidateForUpdate проверяет защищённые настройки, доверие и
+// локальную очередь, не запуская EAVC, Telegram и циклы отправки.
+// Внешняя база может быть временно недоступна: это не делает пакет
+// несовместимым. После активации обычный рабочий цикл перейдёт в
+// состояние ожидания и восстановится без повторной установки.
 func (client *Client) ValidateForUpdate(ctx context.Context) (resultErr error) {
 	defer func() {
 		if resultErr != nil {
@@ -250,15 +252,10 @@ func (client *Client) ValidateForUpdate(ctx context.Context) (resultErr error) {
 	if _, _, err := client.verifyTrustedIssuer(cfg); err != nil {
 		return err
 	}
-	eavcPath, err := client.resolveEAVCPath(ctx, cfg)
+	eavcPath, err := client.configuredEAVCPathForUpdate(cfg)
 	if err != nil {
 		return err
 	}
-	source, err := eavc.Open(ctx, eavcPath)
-	if err != nil {
-		return err
-	}
-	_ = source.Close()
 	db, err := stateDB.OpenState(filepath.Join(client.BaseDir, "data", "client.db"))
 	if err != nil {
 		return err
@@ -272,7 +269,7 @@ func (client *Client) ValidateForUpdate(ctx context.Context) (resultErr error) {
 			State: "paused", Title: "Обновление проверено",
 			Detail:     "Настройки и рабочие данные совместимы. Рабочие циклы ещё не запускались.",
 			Configured: true, ClientID: cfg.ClientID, ClientName: cfg.ClientName,
-			ClientNumber: cfg.ClientNumber, DatabaseOK: true, EAVCPath: eavcPath,
+			ClientNumber: cfg.ClientNumber, DatabaseOK: false, EAVCPath: eavcPath,
 			Version: client.Version, Processing: false,
 		}
 	})
