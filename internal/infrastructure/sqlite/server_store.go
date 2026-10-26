@@ -45,7 +45,31 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 	if err := repairIncidentTimes(ctx, db); err != nil {
 		return nil, err
 	}
+	if err := finalizeTerminalTelegramEdits(ctx, db); err != nil {
+		return nil, err
+	}
 	return &ServerStore{db: db}, nil
+}
+
+// finalizeTerminalTelegramEdits освобождает очереди, уже заблокированные
+// старыми версиями Центра. Эти ответы Telegram означают, что исходного
+// сообщения больше нет или его принципиально нельзя редактировать; ожидание и
+// перезапуск не способны сделать ту же операцию успешной.
+func finalizeTerminalTelegramEdits(ctx context.Context, db *sql.DB) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := db.ExecContext(ctx, `
+		UPDATE delivery_jobs
+		SET state='expired', expired_at=?,
+			last_error='Окончательная ошибка доставки: ' || last_error
+		WHERE state='pending' AND (
+			lower(last_error) LIKE '%message to edit not found%'
+			OR lower(last_error) LIKE '%message can''t be edited%'
+			OR lower(last_error) LIKE '%message_id_invalid%'
+		)`, now)
+	if err != nil {
+		return fmt.Errorf("завершить неисправимые редактирования Telegram: %w", err)
+	}
+	return nil
 }
 
 // repairIncidentTimes исправляет записи старых версий, в которых задержанный

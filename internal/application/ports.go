@@ -123,6 +123,7 @@ type DeliveryQueue interface {
 	PendingDeliveries(ctx context.Context, limit int, now time.Time) ([]DeliveryJob, error)
 	MarkDelivered(ctx context.Context, eventID, destinationID string, at time.Time) error
 	MarkDeliveryExpired(ctx context.Context, eventID, destinationID string, at time.Time, reason string) error
+	MarkDeliveryFailed(ctx context.Context, eventID, destinationID string, at time.Time, reason string) error
 	MarkDeliveryRetry(ctx context.Context, eventID, destinationID string, next time.Time, reason string) error
 }
 

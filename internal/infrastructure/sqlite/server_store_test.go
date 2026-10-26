@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -362,6 +363,113 @@ func TestServerStorePreservesOrderInsideTopicWithoutBlockingOtherTopics(t *testi
 	jobs, err = store.PendingDeliveries(ctx, 10, now.Add(time.Minute))
 	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "event-2" {
 		t.Fatalf("после первого ожидалось второе событие топика: %#v, %v", jobs, err)
+	}
+}
+
+// Окончательная ошибка головы освобождает тот же поток немедленно, сохраняя
+// причину и число реально выполненных попыток для оператора.
+func TestServerStorePermanentFailureReleasesStream(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	destination := domain.Destination{ID: "telegram", Name: "Группа", Kind: domain.DestinationTelegram, Enabled: true}
+	for index, id := range []string{"broken-edit", "next-message"} {
+		event := serverTestEvent()
+		event.ID, event.Source.UUID, event.ContentDigest = id, "source-"+id, "digest-"+id
+		event.CreatedAt, event.SourceAt = now.Add(time.Duration(index)*time.Second), now.Add(time.Duration(index)*time.Second)
+		event.ExpiresAt = now.Add(30 * time.Minute)
+		plan := domain.DeliveryPlan{EventID: id, RuleSetVersion: 1, Deliveries: []domain.PlannedDelivery{{
+			Destination: destination, Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 2},
+		}}}
+		if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+			t.Fatalf("принять %s: %v, %v", id, accepted, acceptErr)
+		}
+	}
+	if err := store.MarkDeliveryFailed(ctx, "broken-edit", destination.ID, now.Add(2*time.Second), "сообщение Telegram удалено"); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.PendingDeliveries(ctx, 10, now.Add(2*time.Second))
+	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "next-message" {
+		t.Fatalf("следующее сообщение не освобождено: %#v, %v", jobs, err)
+	}
+	var state, reason string
+	var attempts int
+	if err := db.QueryRowContext(ctx, `SELECT state,attempts,last_error FROM delivery_jobs WHERE event_id='broken-edit'`).Scan(&state, &attempts, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if state != "expired" || attempts != 1 || reason != "сообщение Telegram удалено" {
+		t.Fatalf("неверная история ошибки: state=%s attempts=%d reason=%q", state, attempts, reason)
+	}
+}
+
+// Обновление с rc69 освобождает уже сохранённую ошибку, не ожидая следующего
+// экспоненциального повтора и не удаляя следующие задания.
+func TestServerStoreRepairsTerminalEditFromPreviousVersion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	destination := domain.Destination{ID: "telegram", Name: "Группа", Kind: domain.DestinationTelegram, Enabled: true}
+	for index, id := range []string{"rc69-broken", "rc69-next"} {
+		event := serverTestEvent()
+		event.ID, event.Source.UUID, event.ContentDigest = id, "source-"+id, "digest-"+id
+		event.CreatedAt, event.SourceAt = now.Add(time.Duration(index)*time.Second), now.Add(time.Duration(index)*time.Second)
+		event.ExpiresAt = now.Add(30 * time.Minute)
+		plan := domain.DeliveryPlan{EventID: id, RuleSetVersion: 1, Deliveries: []domain.PlannedDelivery{{
+			Destination: destination, Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 2},
+		}}}
+		if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+			t.Fatalf("принять %s: %v, %v", id, accepted, acceptErr)
+		}
+	}
+	legacyReason := "старое сообщение Telegram невозможно исправить: telegram: Bad Request: message to edit not found (код 400)"
+	if err := store.MarkDeliveryRetry(ctx, "rc69-broken", destination.ID, now.Add(time.Hour), legacyReason); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewServerStore(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.PendingDeliveries(ctx, 10, now.Add(2*time.Second))
+	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "rc69-next" {
+		t.Fatalf("очередь rc69 не освобождена при запуске: %#v, %v", jobs, err)
+	}
+	var state, reason string
+	if err := db.QueryRowContext(ctx, `SELECT state,last_error FROM delivery_jobs WHERE event_id='rc69-broken'`).Scan(&state, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if state != "expired" || !strings.Contains(reason, "Окончательная ошибка доставки") {
+		t.Fatalf("ошибка rc69 не сохранена в истории: state=%s reason=%q", state, reason)
 	}
 }
 

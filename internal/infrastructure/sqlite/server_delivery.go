@@ -312,6 +312,20 @@ func (store *ServerStore) MarkDeliveryExpired(
 	return changedExactlyOnce(result, err, "завершить просроченную доставку")
 }
 
+// MarkDeliveryFailed завершает предпринятую, но объективно неисправимую
+// доставку. Для совместимости истории она хранится среди недоставленных за
+// разрешённое окно, но причина и фактическая попытка сохраняются отдельно.
+func (store *ServerStore) MarkDeliveryFailed(
+	ctx context.Context, eventID, destinationID string, at time.Time, reason string,
+) error {
+	result, err := store.db.ExecContext(ctx, `
+		UPDATE delivery_jobs
+		SET state='expired', attempts=attempts+1, expired_at=?, last_error=?
+		WHERE event_id=? AND destination_id=? AND state='pending'`,
+		at.UTC().Format(time.RFC3339Nano), reason, eventID, destinationID)
+	return changedExactlyOnce(result, err, "завершить неисправимую доставку")
+}
+
 // MarkDeliveryRetry сохраняет ошибку отдельного направления и время повтора.
 func (store *ServerStore) MarkDeliveryRetry(ctx context.Context, eventID, destinationID string, next time.Time, reason string) error {
 	result, err := store.db.ExecContext(ctx, `

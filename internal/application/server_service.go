@@ -279,6 +279,20 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 	err := gateway.Deliver(attemptContext, job.Event, job.Delivery)
 	cancel()
 	if err != nil {
+		if IsPermanentDeliveryError(err) {
+			if markErr := service.Queue.MarkDeliveryFailed(ctx, job.Event.ID, job.Delivery.Destination.ID,
+				now, err.Error()); markErr != nil {
+				return false, fmt.Errorf("доставка окончательно невозможна: %v; сохранить результат: %w", err, markErr)
+			}
+			if service.Logger != nil {
+				service.Logger.Error("доставка окончательно невозможна, очередь продолжена",
+					"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+					"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts+1,
+					"error", err,
+				)
+			}
+			return false, nil
+		}
 		next := now.Add(retryDelayFor(err, job.Attempts+1))
 		if markErr := service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
 			next, err.Error()); markErr != nil {

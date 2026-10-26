@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"intercept/internal/application"
 	"intercept/internal/domain"
 )
 
@@ -273,7 +274,9 @@ func (destination *Destination) upsertBlock(
 			// Новое сообщение намеренно не создаётся: иначе исправление старого
 			// перехвата появится в топике как новое и нарушит хронологию. Ошибка
 			// остаётся видимой, а состояние не помечается синхронизированным.
-			return nil, fmt.Errorf("старое сообщение Telegram невозможно исправить: %w", err)
+			return nil, application.NewPermanentDeliveryError(
+				fmt.Errorf("старое сообщение Telegram невозможно исправить: %w", err),
+			)
 		}
 		if destination.Logger != nil {
 			destination.Logger.Info("Telegram-сообщение отредактировано",
@@ -352,6 +355,10 @@ func missingDeleteError(err error) bool {
 }
 
 func terminalEditError(err error) bool {
+	var telegramError *apiError
+	if errors.As(err, &telegramError) && telegramError.code != 400 {
+		return false
+	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "message to edit not found") ||
 		strings.Contains(message, "message can't be edited") ||

@@ -121,6 +121,17 @@ func (err *rateLimitError) Error() string {
 
 func (err *rateLimitError) RetryAfter() time.Duration { return err.after }
 
+// apiError сохраняет код Telegram Bot API для надёжной классификации. Текст
+// остаётся человекочитаемым и совместимым с существующими журналами.
+type apiError struct {
+	code        int
+	description string
+}
+
+func (err *apiError) Error() string {
+	return fmt.Sprintf("telegram: %s (код %d)", err.description, err.code)
+}
+
 // User содержит только поля Telegram-пользователя, нужные транспорту.
 type User struct {
 	ID       int64  `json:"id"`
@@ -434,7 +445,11 @@ func (client *Client) do(request *http.Request, output any) error {
 			client.sends.blockFor(after + time.Second)
 			return &rateLimitError{after: after, description: description}
 		}
-		return fmt.Errorf("telegram: %s (код %d)", description, result.ErrorCode)
+		code := result.ErrorCode
+		if code == 0 {
+			code = response.StatusCode
+		}
+		return &apiError{code: code, description: description}
 	}
 	if output != nil && len(result.Result) != 0 {
 		if err := json.Unmarshal(result.Result, output); err != nil {

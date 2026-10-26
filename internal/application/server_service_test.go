@@ -197,6 +197,30 @@ func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 	}
 }
 
+// Неисправимое редактирование завершается один раз и не превращается в
+// бесконечный повтор, удерживающий следующие сообщения очереди.
+func TestDeliveryServiceFinalizesPermanentFailure(t *testing.T) {
+	t.Parallel()
+
+	queue := &memoryDeliveryQueue{jobs: []DeliveryJob{
+		{Event: serverServiceEvent(), Delivery: domain.PlannedDelivery{Destination: domain.Destination{ID: "telegram"}}},
+	}}
+	service := DeliveryService{
+		Queue: queue,
+		Gateways: map[string]DeliveryGateway{
+			"telegram": memoryGateway{err: NewPermanentDeliveryError(errors.New("сообщение удалено"))},
+		},
+		Now: time.Now, MaxConcurrent: 1,
+	}
+	count, err := service.RunOnce(context.Background(), 10)
+	if err != nil || count != 0 {
+		t.Fatalf("run: %d %v", count, err)
+	}
+	if len(queue.failed) != 1 || len(queue.retried) != 0 {
+		t.Fatalf("неисправимая доставка не завершена: failed=%#v retried=%#v", queue.failed, queue.retried)
+	}
+}
+
 // Зависшая отправка в один топик не должна останавливать сообщения для другого топика.
 func TestDeliveryServiceDoesNotLetSlowStreamBlockAnother(t *testing.T) {
 	t.Parallel()
@@ -306,6 +330,7 @@ type memoryDeliveryQueue struct {
 	jobs      []DeliveryJob
 	delivered []string
 	retried   []string
+	failed    []string
 }
 
 func (queue *memoryDeliveryQueue) PendingDeliveries(_ context.Context, _ int, _ time.Time) ([]DeliveryJob, error) {
@@ -355,6 +380,13 @@ func (queue *memoryDeliveryQueue) MarkDeliveryExpired(_ context.Context, eventID
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
 	queue.retried = append(queue.retried, eventID+":"+destinationID+":expired")
+	return nil
+}
+
+func (queue *memoryDeliveryQueue) MarkDeliveryFailed(_ context.Context, eventID, destinationID string, _ time.Time, _ string) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.failed = append(queue.failed, eventID+":"+destinationID)
 	return nil
 }
 

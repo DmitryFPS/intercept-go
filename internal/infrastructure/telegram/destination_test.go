@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"intercept/internal/application"
 	"intercept/internal/domain"
 )
 
@@ -359,12 +360,35 @@ func TestDestinationDoesNotReplaceMessageAfterTerminalEditError(t *testing.T) {
 		t.Fatal(err)
 	}
 	event.Blocks[0].Text = "12.00\n-Первое исправлено"
-	if err := destination.Deliver(context.Background(), event, delivery); err == nil {
+	err = destination.Deliver(context.Background(), event, delivery)
+	if err == nil {
 		t.Fatal("невозможная правка не должна считаться доставленной")
+	}
+	if !application.IsPermanentDeliveryError(err) {
+		t.Fatalf("неисправимая правка ошибочно назначит повтор: %v", err)
 	}
 	want := []string{"sendMessage", "editMessageText"}
 	if strings.Join(methods, ",") != strings.Join(want, ",") {
 		t.Fatalf("неожиданные действия Telegram: %v", methods)
+	}
+}
+
+func TestTerminalEditErrorClassification(t *testing.T) {
+	t.Parallel()
+	for _, description := range []string{
+		"Bad Request: message to edit not found",
+		"Bad Request: message can't be edited",
+		"Bad Request: MESSAGE_ID_INVALID",
+	} {
+		if !terminalEditError(&apiError{code: 400, description: description}) {
+			t.Errorf("окончательная ошибка не распознана: %s", description)
+		}
+	}
+	if terminalEditError(&apiError{code: 500, description: "message to edit not found"}) {
+		t.Fatal("временная серверная ошибка Telegram ошибочно завершит доставку")
+	}
+	if terminalEditError(&apiError{code: 400, description: "Bad Request: chat not found"}) {
+		t.Fatal("исправимая настройкой ошибка чата ошибочно завершит доставку")
 	}
 }
 
