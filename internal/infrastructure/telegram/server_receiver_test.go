@@ -108,6 +108,7 @@ func TestServerReceiverRecognizesTransportProbe(t *testing.T) {
 func TestServerReceiverSkipsPermanentlyUnavailableFile(t *testing.T) {
 	t.Parallel()
 	var deleted atomic.Int32
+	var discarded atomic.Int64
 	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch {
 		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
@@ -147,6 +148,7 @@ func TestServerReceiverSkipsPermanentlyUnavailableFile(t *testing.T) {
 	receiver := ServerReceiver{
 		API: client, ChatID: -1001, MaxBytes: 1024,
 		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+		Discard:   func(_ context.Context, messageID int64) { discarded.Store(messageID) },
 	}
 	packets, next, err := receiver.Packets(context.Background(), 0)
 	if err != nil {
@@ -155,8 +157,9 @@ func TestServerReceiverSkipsPermanentlyUnavailableFile(t *testing.T) {
 	if len(packets) != 1 || packets[0].MessageID != 32 || string(packets[0].Payload) != "encrypted" {
 		t.Fatalf("следующий исправный пакет не получен: %#v", packets)
 	}
-	if next != 23 || deleted.Load() != 1 {
-		t.Fatalf("неверное продвижение: next=%d deleted=%d", next, deleted.Load())
+	if next != 23 || discarded.Load() != 31 || deleted.Load() != 0 {
+		t.Fatalf("неверное продвижение или очистка: next=%d discarded=%d deleted=%d",
+			next, discarded.Load(), deleted.Load())
 	}
 }
 

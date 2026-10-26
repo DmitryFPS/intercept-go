@@ -149,6 +149,11 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			)
 		},
 	}
+	// Даже файлы, отброшенные до расшифровки (исчезнувшие, чужие или
+	// повреждённые), очищаются через ту же долговечную очередь, что и принятые.
+	receiver.Discard = func(discardContext context.Context, messageID int64) {
+		server.deleteTransportPacket(discardContext, receiver, messageID)
+	}
 	reception := &application.ServerService{
 		Clients: server.Store, Rules: server.Store, Store: server.Store,
 		DeliveryWindow: cfg.DeliveryTimeout(),
@@ -306,20 +311,26 @@ func (server *Server) deleteTransportPacket(ctx context.Context, receiver *teleg
 	if messageID <= 0 {
 		return
 	}
-	if err := receiver.DeletePacket(ctx, messageID); err != nil && ctx.Err() == nil {
-		server.Logger.Warn("не удалось удалить обработанный пакет из транспортной группы",
-			"telegram_message_id", messageID, "error", err)
-		dropped, queueErr := server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC())
-		if queueErr != nil {
-			server.Logger.Warn("не удалось сохранить повтор удаления транспортного пакета",
-				"telegram_message_id", messageID, "error", queueErr)
-		} else if dropped {
-			server.Logger.Error("исчерпан лимит удаления транспортного пакета",
-				"telegram_message_id", messageID, "attempts", 120)
-		}
+	err := receiver.DeletePacket(ctx, messageID)
+	if err == nil {
+		_ = server.Store.CompleteTransportDeletion(ctx, messageID)
 		return
 	}
-	_ = server.Store.CompleteTransportDeletion(ctx, messageID)
+	// Отмена процесса не означает, что Telegram удалил сообщение. Существующую
+	// запись очистки нельзя ошибочно завершать: после запуска она будет повторена.
+	if ctx.Err() != nil {
+		return
+	}
+	server.Logger.Warn("не удалось удалить обработанный пакет из транспортной группы",
+		"telegram_message_id", messageID, "error", err)
+	dropped, queueErr := server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC())
+	if queueErr != nil {
+		server.Logger.Warn("не удалось сохранить повтор удаления транспортного пакета",
+			"telegram_message_id", messageID, "error", queueErr)
+	} else if dropped {
+		server.Logger.Error("исчерпан лимит удаления транспортного пакета",
+			"telegram_message_id", messageID, "attempts", 120)
+	}
 }
 
 func (server *Server) retryTransportDeletions(ctx context.Context, receiver *telegram.ServerReceiver) {

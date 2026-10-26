@@ -21,6 +21,9 @@ type ServerReceiver struct {
 	Logger   *slog.Logger
 	// Authorize проверяет метаданные отправителя до скачивания файла.
 	Authorize func(context.Context, application.IncomingPacket) (bool, error)
+	// Discard передаёт удаление служебного файла владельцу долговечной очереди
+	// очистки. Без обработчика сохраняется совместимый однократный вызов API.
+	Discard func(context.Context, int64)
 }
 
 // Packets возвращает пакеты и следующее безопасное смещение Telegram.
@@ -63,7 +66,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			}
 			if !allowed {
 				// Неизвестный бот не заставит сервер скачивать произвольные файлы.
-				_ = receiver.API.DeleteMessage(ctx, receiver.ChatID, message.MessageID)
+				receiver.discardPacket(ctx, message.MessageID)
 				continue
 			}
 		}
@@ -91,12 +94,12 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			if err := decoder.Decode(&probe); err != nil || probe.Schema != probeSchema ||
 				strings.TrimSpace(probe.ClientID) == "" || !validProbeID(probe.ProbeID) ||
 				strings.TrimSpace(probe.MAC) == "" {
-				_ = receiver.API.DeleteMessage(ctx, receiver.ChatID, message.MessageID)
+				receiver.discardPacket(ctx, message.MessageID)
 				continue
 			}
 			probeAt, err := time.Parse(time.RFC3339, probe.SentAt)
 			if err != nil {
-				_ = receiver.API.DeleteMessage(ctx, receiver.ChatID, message.MessageID)
+				receiver.discardPacket(ctx, message.MessageID)
 				continue
 			}
 			packet.ProbeID = probe.ProbeID
@@ -134,7 +137,18 @@ func (receiver *ServerReceiver) skipUnavailableFile(ctx context.Context, packet 
 			"error", err,
 		)
 	}
-	_ = receiver.API.DeleteMessage(ctx, receiver.ChatID, packet.MessageID)
+	receiver.discardPacket(ctx, packet.MessageID)
+}
+
+func (receiver *ServerReceiver) discardPacket(ctx context.Context, messageID int64) {
+	if receiver.Discard != nil {
+		receiver.Discard(ctx, messageID)
+		return
+	}
+	if err := receiver.DeletePacket(ctx, messageID); err != nil && receiver.Logger != nil && ctx.Err() == nil {
+		receiver.Logger.Warn("не удалось удалить отброшенный транспортный файл",
+			"telegram_message_id", messageID, "error", err)
+	}
 }
 
 func validProbeID(value string) bool {
