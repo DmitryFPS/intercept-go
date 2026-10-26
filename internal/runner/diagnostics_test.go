@@ -2,12 +2,14 @@ package runner
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
 
 func TestDiagnosticLogRedactsOperationalIdentifiers(t *testing.T) {
-	source := strings.NewReader(`{"time":"2026-10-23T10:00:00Z","msg":"received","source_uuid":"secret-uuid","source_id":42,"event_id":"event-secret","destination_id":"telegram-secret","thread_id":42,"telegram_message_id":99,"sender_bot":"secret_bot","client_name":"Текстиль","client_number":"01","position":"1 мб 155 омбр","error":"open C:\\secret\\main.sqlite: denied","status":{"invite_link":"https://t.me/+secret","eavc_path":"C:\\secret\\main.sqlite","queue":3}}` + "\n")
+	source := strings.NewReader(`{"time":"2026-10-23T10:00:00Z","msg":"received","source_uuid":"secret-uuid","source_id":42,"event_id":"event-secret","destination_id":"telegram-secret","thread_id":42,"telegram_message_id":99,"sender_bot":"secret_bot","client_name":"Текстиль","client_number":"01","position":"1 мб 155 омбр","error":"open C:\\secret\\main.sqlite: denied","status":{"invite_link":"https://t.me/+secret","eavc_path":"C:\\secret\\main.sqlite","queue":3}}` + "\n" +
+		`{"time":"2026-10-23T10:00:01Z","msg":"delivered","event_id":"event-secret","telegram_message_id":99}` + "\n")
 	var output bytes.Buffer
 	if err := copyRedactedDiagnosticLog(&output, source); err != nil {
 		t.Fatal(err)
@@ -20,6 +22,18 @@ func TestDiagnosticLogRedactsOperationalIdentifiers(t *testing.T) {
 	}
 	if !strings.Contains(text, `"queue":3`) || !strings.Contains(text, `"msg":"received"`) {
 		t.Fatalf("полезные технические поля потеряны: %s", text)
+	}
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, record)
+	}
+	if records[0]["event_ref"] == "" || records[0]["event_ref"] != records[1]["event_ref"] ||
+		records[0]["telegram_message_ref"] != records[1]["telegram_message_ref"] {
+		t.Fatalf("обезличенные ссылки не связывают одну цепочку: %#v", records)
 	}
 }
 

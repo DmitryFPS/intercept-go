@@ -3,6 +3,9 @@ package runner
 import (
 	"archive/zip"
 	"bufio"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +19,10 @@ import (
 // addDiagnosticLogs includes the complete bounded log set. Read failures are
 // returned instead of silently producing an incomplete archive.
 func addDiagnosticLogs(archive *zip.Writer, baseDir, primary string) error {
+	redactor, err := newDiagnosticRedactor()
+	if err != nil {
+		return err
+	}
 	paths := make([]string, 0, 24)
 	for index := 0; index <= 5; index++ {
 		name := primary
@@ -45,11 +52,11 @@ func addDiagnosticLogs(archive *zip.Writer, baseDir, primary string) error {
 		if err == nil {
 			switch filepath.Base(clean) {
 			case "latest-update.json":
-				err = copyRedactedDiagnosticJSON(part, file, true)
+				err = copyRedactedDiagnosticJSONWithRedactor(part, file, true, redactor)
 			case "updates.log":
-				err = copyRedactedDiagnosticLogWithUpdates(part, file, true)
+				err = copyRedactedDiagnosticLogWithRedactor(part, file, true, redactor)
 			default:
-				err = copyRedactedDiagnosticLog(part, file)
+				err = copyRedactedDiagnosticLogWithRedactor(part, file, false, redactor)
 			}
 		}
 		closeErr := file.Close()
@@ -77,6 +84,34 @@ var diagnosticAllowedKeys = map[string]bool{
 	"last_upload": true, "last_acknowledged": true, "last_transport_check": true,
 	"next_attempt_at": true, "accepted_at": true, "expires_at": true,
 	"from_version": true, "to_version": true,
+	"event_ref": true, "source_ref": true, "source_id_ref": true, "item_ref": true,
+	"client_ref": true, "destination_ref": true, "chat_ref": true, "thread_ref": true,
+	"message_ref": true, "telegram_message_ref": true,
+	"sender_bot_ref": true, "sender_bot_id_ref": true,
+}
+
+var diagnosticReferenceKeys = map[string]string{
+	"event_id": "event_ref", "source_uuid": "source_ref", "source_id": "source_id_ref",
+	"item_key": "item_ref", "client_id": "client_ref", "destination_id": "destination_ref",
+	"chat_id": "chat_ref", "thread_id": "thread_ref", "message_id": "message_ref",
+	"telegram_message_id": "telegram_message_ref", "sender_bot": "sender_bot_ref",
+	"sender_bot_id": "sender_bot_id_ref",
+}
+
+type diagnosticRedactor struct{ key [32]byte }
+
+func newDiagnosticRedactor() (*diagnosticRedactor, error) {
+	redactor := &diagnosticRedactor{}
+	if _, err := rand.Read(redactor.key[:]); err != nil {
+		return nil, fmt.Errorf("создать ключ обезличивания диагностики: %w", err)
+	}
+	return redactor, nil
+}
+
+func (redactor *diagnosticRedactor) reference(kind string, value any) string {
+	mac := hmac.New(sha256.New, redactor.key[:])
+	_, _ = fmt.Fprintf(mac, "%s\x00%v", kind, value)
+	return fmt.Sprintf("%s-%x", strings.TrimSuffix(kind, "_ref"), mac.Sum(nil)[:8])
 }
 
 // copyRedactedDiagnosticLog preserves technical events and counters, but
@@ -87,6 +122,16 @@ func copyRedactedDiagnosticLog(target io.Writer, source io.Reader) error {
 }
 
 func copyRedactedDiagnosticLogWithUpdates(target io.Writer, source io.Reader, updateDetails bool) error {
+	redactor, err := newDiagnosticRedactor()
+	if err != nil {
+		return err
+	}
+	return copyRedactedDiagnosticLogWithRedactor(target, source, updateDetails, redactor)
+}
+
+func copyRedactedDiagnosticLogWithRedactor(
+	target io.Writer, source io.Reader, updateDetails bool, redactor *diagnosticRedactor,
+) error {
 	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	var copied int64
@@ -99,7 +144,7 @@ func copyRedactedDiagnosticLogWithUpdates(target io.Writer, source io.Reader, up
 		if json.Unmarshal(scanner.Bytes(), &record) != nil {
 			record = map[string]any{"event": "строка журнала скрыта: неизвестный формат"}
 		} else {
-			allowDiagnosticValue(record, updateDetails)
+			allowDiagnosticValue(record, updateDetails, redactor)
 		}
 		payload, err := json.Marshal(record)
 		if err != nil {
@@ -113,6 +158,16 @@ func copyRedactedDiagnosticLogWithUpdates(target io.Writer, source io.Reader, up
 }
 
 func copyRedactedDiagnosticJSON(target io.Writer, source io.Reader, updateDetails bool) error {
+	redactor, err := newDiagnosticRedactor()
+	if err != nil {
+		return err
+	}
+	return copyRedactedDiagnosticJSONWithRedactor(target, source, updateDetails, redactor)
+}
+
+func copyRedactedDiagnosticJSONWithRedactor(
+	target io.Writer, source io.Reader, updateDetails bool, redactor *diagnosticRedactor,
+) error {
 	payload, err := io.ReadAll(io.LimitReader(source, 10*1024*1024))
 	if err != nil {
 		return err
@@ -121,7 +176,7 @@ func copyRedactedDiagnosticJSON(target io.Writer, source io.Reader, updateDetail
 	if err := json.Unmarshal(payload, &record); err != nil {
 		record = map[string]any{"event": "документ диагностики скрыт: неизвестный формат"}
 	} else {
-		allowDiagnosticValue(record, updateDetails)
+		allowDiagnosticValue(record, updateDetails, redactor)
 	}
 	clean, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
@@ -131,11 +186,18 @@ func copyRedactedDiagnosticJSON(target io.Writer, source io.Reader, updateDetail
 	return err
 }
 
-func allowDiagnosticValue(value any, updateDetails bool) {
+func allowDiagnosticValue(value any, updateDetails bool, redactor *diagnosticRedactor) {
 	switch item := value.(type) {
 	case map[string]any:
 		for key, nested := range item {
 			lower := strings.ToLower(key)
+			if referenceKey, exists := diagnosticReferenceKeys[lower]; exists {
+				if nested != nil && fmt.Sprint(nested) != "" {
+					item[referenceKey] = redactor.reference(referenceKey, nested)
+				}
+				delete(item, key)
+				continue
+			}
 			allowed := diagnosticAllowedKeys[lower] || (updateDetails && (lower == "message" || lower == "error"))
 			if !allowed {
 				delete(item, key)
@@ -145,7 +207,7 @@ func allowDiagnosticValue(value any, updateDetails bool) {
 				item[key] = observability.SafeText(text)
 				continue
 			}
-			allowDiagnosticValue(nested, updateDetails)
+			allowDiagnosticValue(nested, updateDetails, redactor)
 		}
 	case []any:
 		for index, nested := range item {
@@ -153,7 +215,7 @@ func allowDiagnosticValue(value any, updateDetails bool) {
 				item[index] = observability.SafeText(text)
 				continue
 			}
-			allowDiagnosticValue(nested, updateDetails)
+			allowDiagnosticValue(nested, updateDetails, redactor)
 		}
 	}
 }

@@ -138,7 +138,9 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		item.Blocks = map[string]destinationBlock{recordStateKey: stored}
 		return destination.saveItem(itemKey, item, false)
 	}
-	messageIDs, recovered, err := destination.upsertBlock(ctx, itemKey, threadID, stored.MessageIDs, chunks, progress)
+	messageIDs, recovered, err := destination.upsertBlock(
+		ctx, event.ID, itemKey, threadID, stored.MessageIDs, chunks, progress,
+	)
 	if err != nil {
 		return fmt.Errorf("синхронизировать запись: %w", err)
 	}
@@ -150,7 +152,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	}
 	if recovered && destination.Logger != nil {
 		destination.Logger.Info("отсутствующее Telegram-сообщение автоматически восстановлено",
-			"item_key", itemKey, "chat_id", destination.ChatID,
+			"event_id", event.ID, "item_key", itemKey, "chat_id", destination.ChatID,
 			"thread_id", threadID, "message_ids", messageIDs,
 		)
 	}
@@ -248,7 +250,7 @@ func (destination *Destination) loadState() (destinationState, error) {
 }
 
 func (destination *Destination) upsertBlock(
-	ctx context.Context, itemKey string, threadID int64, oldIDs []int64, chunks []string,
+	ctx context.Context, eventID, itemKey string, threadID int64, oldIDs []int64, chunks []string,
 	progress func([]int64, bool) error,
 ) ([]int64, bool, error) {
 	ids := append([]int64(nil), oldIDs...)
@@ -264,7 +266,7 @@ func (destination *Destination) upsertBlock(
 				// предыдущая попытка успела выполниться до разрыва связи.
 				if destination.Logger != nil {
 					destination.Logger.Info("Telegram-сообщение уже содержит исправление",
-						"item_key", itemKey, "chat_id", destination.ChatID,
+						"event_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
 						"thread_id", threadID, "message_id", ids[index],
 					)
 				}
@@ -273,7 +275,7 @@ func (destination *Destination) upsertBlock(
 			if missingEditError(err) {
 				if destination.Logger != nil {
 					destination.Logger.Warn("Telegram-сообщение отсутствует; выполняется автоматическое восстановление",
-						"item_key", itemKey, "chat_id", destination.ChatID,
+						"event_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
 						"thread_id", threadID, "message_id", ids[index], "error", err,
 					)
 				}
@@ -298,6 +300,7 @@ func (destination *Destination) upsertBlock(
 			}
 			if destination.Logger != nil {
 				destination.Logger.Warn("Telegram больше не разрешает изменить старое сообщение",
+					"event_id", eventID, "item_key", itemKey,
 					"chat_id", destination.ChatID, "thread_id", threadID,
 					"message_id", ids[index], "error", err,
 				)
@@ -311,7 +314,7 @@ func (destination *Destination) upsertBlock(
 		}
 		if destination.Logger != nil {
 			destination.Logger.Info("Telegram-сообщение отредактировано",
-				"item_key", itemKey, "chat_id", destination.ChatID,
+				"event_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
 				"thread_id", threadID, "message_id", ids[index],
 			)
 		}
@@ -338,7 +341,7 @@ func (destination *Destination) upsertBlock(
 		ids = append(ids, message.MessageID)
 		if destination.Logger != nil {
 			destination.Logger.Info("Telegram-сообщение создано",
-				"item_key", itemKey, "chat_id", destination.ChatID,
+				"event_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
 				"thread_id", threadID, "message_id", message.MessageID,
 			)
 		}
