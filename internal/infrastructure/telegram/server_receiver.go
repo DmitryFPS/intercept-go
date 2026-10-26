@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ type ServerReceiver struct {
 	API      *Client
 	ChatID   int64
 	MaxBytes int64
+	Logger   *slog.Logger
 	// Authorize проверяет метаданные отправителя до скачивания файла.
 	Authorize func(context.Context, application.IncomingPacket) (bool, error)
 }
@@ -66,10 +69,18 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 		}
 		file, err := receiver.API.GetFile(ctx, message.Document.FileID)
 		if err != nil {
+			if permanentTransportFileError(err) {
+				receiver.skipUnavailableFile(ctx, packet, err)
+				continue
+			}
 			return packets, offset, fmt.Errorf("получить пакет Telegram: %w", err)
 		}
 		payload, err := receiver.API.DownloadFile(ctx, file.FilePath, receiver.MaxBytes)
 		if err != nil {
+			if permanentTransportFileError(err) {
+				receiver.skipUnavailableFile(ctx, packet, err)
+				continue
+			}
 			return packets, offset, err
 		}
 		packet.Payload = payload
@@ -96,6 +107,34 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 		packets = append(packets, packet)
 	}
 	return packets, next, nil
+}
+
+func permanentTransportFileError(err error) bool {
+	if errors.Is(err, errTelegramFileTooLarge) {
+		return true
+	}
+	var telegramError *apiError
+	if errors.As(err, &telegramError) {
+		return telegramError.code == http.StatusBadRequest || telegramError.code == http.StatusNotFound
+	}
+	var downloadError *fileDownloadError
+	if errors.As(err, &downloadError) {
+		return downloadError.code == http.StatusBadRequest || downloadError.code == http.StatusNotFound ||
+			downloadError.code == http.StatusGone
+	}
+	return false
+}
+
+func (receiver *ServerReceiver) skipUnavailableFile(ctx context.Context, packet application.IncomingPacket, err error) {
+	if receiver.Logger != nil {
+		receiver.Logger.Warn(
+			"недоступный транспортный файл пропущен; рабочая точка повторит отправку",
+			"sender_bot", packet.SenderBotUsername,
+			"message_id", packet.MessageID,
+			"error", err,
+		)
+	}
+	_ = receiver.API.DeleteMessage(ctx, receiver.ChatID, packet.MessageID)
 }
 
 func validProbeID(value string) bool {

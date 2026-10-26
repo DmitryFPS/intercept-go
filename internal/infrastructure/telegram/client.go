@@ -20,6 +20,8 @@ import (
 
 const defaultBaseURL = "https://api.telegram.org"
 
+var errTelegramFileTooLarge = errors.New("файл Telegram превышает допустимый размер")
+
 const (
 	// Telegram рекомендует не превышать примерно 30 сообщений в секунду на
 	// бота, одно сообщение в секунду в одном чате и 20 сообщений в минуту в
@@ -130,6 +132,17 @@ type apiError struct {
 
 func (err *apiError) Error() string {
 	return fmt.Sprintf("telegram: %s (код %d)", err.description, err.code)
+}
+
+// fileDownloadError сохраняет HTTP-код скачивания. Получатель транспорта
+// отличает исчезнувший файл от временной ошибки сети и не удерживает за ним
+// все более новые обновления Telegram.
+type fileDownloadError struct {
+	code int
+}
+
+func (err *fileDownloadError) Error() string {
+	return fmt.Sprintf("telegram вернул HTTP %d при скачивании файла", err.code)
 }
 
 // User содержит только поля Telegram-пользователя, нужные транспорту.
@@ -382,7 +395,7 @@ func (client *Client) DownloadFile(ctx context.Context, filePath string, maxByte
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("telegram вернул HTTP %d при скачивании файла", response.StatusCode)
+		return nil, &fileDownloadError{code: response.StatusCode}
 	}
 	limited := io.LimitReader(response.Body, maxBytes+1)
 	payload, err := io.ReadAll(limited)
@@ -390,7 +403,7 @@ func (client *Client) DownloadFile(ctx context.Context, filePath string, maxByte
 		return nil, fmt.Errorf("прочитать файл Telegram: %w", err)
 	}
 	if int64(len(payload)) > maxBytes {
-		return nil, errors.New("файл Telegram превышает допустимый размер")
+		return nil, errTelegramFileTooLarge
 	}
 	return payload, nil
 }

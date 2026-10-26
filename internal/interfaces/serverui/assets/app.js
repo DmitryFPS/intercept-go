@@ -508,7 +508,8 @@ $('incidentSearch').addEventListener('keydown', event => {
 });
 $('incidentClear').addEventListener('click', async event => {
   if (!confirm('Очистить историю сбоев и восстановлений? Текущее состояние рабочих точек не изменится.')) return;
-  setButtonBusy(event.currentTarget, true, 'Очищаем…');
+  const button = event.currentTarget;
+  setButtonBusy(button, true, 'Очищаем…');
   try {
     await request('/api/history/clients', { method: 'DELETE' });
     await Promise.all([openClientIncidents(0, true), refreshStatus()]);
@@ -516,7 +517,7 @@ $('incidentClear').addEventListener('click', async event => {
   } catch (error) {
     notify(error.message);
   } finally {
-    setButtonBusy(event.currentTarget, false);
+    setButtonBusy(button, false);
   }
 });
 
@@ -542,7 +543,8 @@ $('historySearch').addEventListener('keydown', event => {
 $('historyClear').addEventListener('click', async event => {
   const label = historySections[historyKind]?.[0] || 'этого раздела';
   if (!confirm(`Очистить видимую историю «${label}»? Активные очереди и настройки не изменятся.`)) return;
-  setButtonBusy(event.currentTarget, true, 'Очищаем…');
+  const button = event.currentTarget;
+  setButtonBusy(button, true, 'Очищаем…');
   try {
     await request(`/api/history/${encodeURIComponent(historyKind)}`, { method: 'DELETE' });
     await Promise.all([openHistory(historyKind, 0, true), refreshStatus()]);
@@ -550,7 +552,7 @@ $('historyClear').addEventListener('click', async event => {
   } catch (error) {
     notify(error.message);
   } finally {
-    setButtonBusy(event.currentTarget, false);
+    setButtonBusy(button, false);
   }
 });
 

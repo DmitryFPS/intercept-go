@@ -128,7 +128,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		}
 	}
 	receiver := &telegram.ServerReceiver{
-		API: api, ChatID: cfg.Transport.ChatID, MaxBytes: 4 * 1024 * 1024,
+		API: api, ChatID: cfg.Transport.ChatID, MaxBytes: 4 * 1024 * 1024, Logger: server.Logger,
 		Authorize: func(ctx context.Context, packet application.IncomingPacket) (bool, error) {
 			return server.Store.AuthorizeTransport(
 				ctx, packet.SenderBotID, packet.SenderBotUsername, packet.ChatID, packet.ThreadID,

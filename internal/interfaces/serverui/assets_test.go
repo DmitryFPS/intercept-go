@@ -97,6 +97,13 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 			t.Errorf("в истории отсутствует понятное оператору поле %q", fragment)
 		}
 	}
+	if strings.Contains(javascript, "setButtonBusy(event.currentTarget, false)") {
+		t.Error("после await event.currentTarget уже сброшен: кнопка очистки останется в состоянии «Очищаем…»")
+	}
+	if strings.Count(javascript, "const button = event.currentTarget;") < 2 ||
+		strings.Count(javascript, "setButtonBusy(button, false);") < 2 {
+		t.Error("обе кнопки очистки должны сохранять ссылку и восстанавливаться после запроса")
+	}
 }
 
 func TestDashboardUsesOperationalSummaryWithoutTrainingCopy(t *testing.T) {
