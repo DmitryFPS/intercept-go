@@ -220,7 +220,9 @@ func TestMissingDescriptionIsNotInvented(t *testing.T) {
 		Blocks: []domain.ContentBlock{{Text: "12.00\n-Принято. (7)", Callsigns: []domain.Callsign{{Number: 7, Code: "7", Label: "Марс"}}}},
 	}
 	message := FormatEventForNetwork(event, "313", false)
-	if !strings.Contains(message, "сведения не указаны") || strings.Contains(message, "мужской голос") {
+	if !strings.Contains(message, "1.«<b>Марс</b>» (id: 7);") ||
+		strings.Contains(message, "сведения не указаны") || strings.Contains(message, ") – ;") ||
+		strings.Contains(message, "мужской голос") {
 		t.Fatalf("программа подставила неподтверждённые сведения: %s", message)
 	}
 }

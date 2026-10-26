@@ -323,14 +323,15 @@ func renderTemplateXML(payload string, document Document) (string, error) {
 		var result strings.Builder
 		for _, correspondent := range correspondents {
 			description := strings.TrimSpace(correspondent.Description)
-			if description == "" {
-				description = "сведения не указаны"
+			suffix := "» (id: " + correspondent.Code + ")"
+			if description != "" {
+				suffix += " – " + strings.TrimRight(description, ";")
 			}
-			description = strings.TrimRight(description, ";") + ";"
+			suffix += ";"
 			result.WriteString(renderParagraph(paragraph, []styledRun{
 				{Text: strconv.Itoa(correspondent.Number) + ".«"},
 				{Text: correspondent.Label, Bold: true},
-				{Text: "» (id: " + correspondent.Code + ") – " + description},
+				{Text: suffix},
 			}))
 		}
 		if len(correspondents) > 0 {

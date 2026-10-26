@@ -201,16 +201,16 @@ func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.
 	var correspondentText strings.Builder
 	for _, correspondent := range correspondents {
 		description := strings.TrimSpace(correspondent.Description)
-		if description == "" {
-			description = "сведения не указаны"
-		}
-		description = strings.TrimRight(description, ";") + ";"
 		correspondentText.WriteString(fmt.Sprintf("%d.«<b>", correspondent.Number))
 		correspondentText.WriteString(escapeText(correspondent.Label))
 		correspondentText.WriteString("</b>» (id: ")
 		correspondentText.WriteString(escapeText(correspondent.Code))
-		correspondentText.WriteString(") – ")
-		correspondentText.WriteString(escapeText(description))
+		correspondentText.WriteString(")")
+		if description != "" {
+			correspondentText.WriteString(" – ")
+			correspondentText.WriteString(escapeText(strings.TrimRight(description, ";")))
+		}
+		correspondentText.WriteString(";")
 		correspondentText.WriteString("\n")
 	}
 	var transcript strings.Builder
