@@ -25,6 +25,7 @@ type destinationBlock struct {
 	SourceHash string  `json:"source_hash,omitempty"`
 	MessageIDs []int64 `json:"message_ids"`
 	Sequence   int     `json:"sequence"`
+	Recovering bool    `json:"recovering,omitempty"`
 }
 
 func loadDestinationState(path string) (destinationState, error) {

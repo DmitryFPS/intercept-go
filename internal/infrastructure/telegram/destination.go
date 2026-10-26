@@ -121,7 +121,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		return nil
 	}
 	chunks := baseChunks
-	if combinedState && len(stored.MessageIDs) > 0 {
+	if combinedState && (len(stored.MessageIDs) > 0 || stored.Recovering) {
 		editedAt := event.SourceAt
 		if editedAt.IsZero() {
 			editedAt = time.Now().UTC()
@@ -132,12 +132,13 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		)
 	}
 	renderHash := hashChunks(chunks)
-	progress := func(messageIDs []int64) error {
+	progress := func(messageIDs []int64, recovering bool) error {
 		stored.MessageIDs = append([]int64(nil), messageIDs...)
+		stored.Recovering = recovering
 		item.Blocks = map[string]destinationBlock{recordStateKey: stored}
 		return destination.saveItem(itemKey, item, false)
 	}
-	messageIDs, err := destination.upsertBlock(ctx, itemKey, threadID, stored.MessageIDs, chunks, progress)
+	messageIDs, recovered, err := destination.upsertBlock(ctx, itemKey, threadID, stored.MessageIDs, chunks, progress)
 	if err != nil {
 		return fmt.Errorf("синхронизировать запись: %w", err)
 	}
@@ -146,6 +147,12 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	}
 	if err := destination.saveItem(itemKey, item, false); err != nil {
 		return err
+	}
+	if recovered && destination.Logger != nil {
+		destination.Logger.Info("отсутствующее Telegram-сообщение автоматически восстановлено",
+			"item_key", itemKey, "chat_id", destination.ChatID,
+			"thread_id", threadID, "message_ids", messageIDs,
+		)
 	}
 	if migratedLegacy {
 		return destination.saveItem(legacyItemKey, destinationItem{}, true)
@@ -242,9 +249,10 @@ func (destination *Destination) loadState() (destinationState, error) {
 
 func (destination *Destination) upsertBlock(
 	ctx context.Context, itemKey string, threadID int64, oldIDs []int64, chunks []string,
-	progress func([]int64) error,
-) ([]int64, error) {
+	progress func([]int64, bool) error,
+) ([]int64, bool, error) {
 	ids := append([]int64(nil), oldIDs...)
+	recovered := false
 	common := len(ids)
 	if len(chunks) < common {
 		common = len(chunks)
@@ -262,8 +270,31 @@ func (destination *Destination) upsertBlock(
 				}
 				continue
 			}
+			if missingEditError(err) {
+				if destination.Logger != nil {
+					destination.Logger.Warn("Telegram-сообщение отсутствует; выполняется автоматическое восстановление",
+						"item_key", itemKey, "chat_id", destination.ChatID,
+						"thread_id", threadID, "message_id", ids[index], "error", err,
+					)
+				}
+				// Если запись была разбита на части, собираем её заново целиком.
+				// Иначе новая часть оказалась бы в конце темы, отдельно от остальных.
+				for _, messageID := range ids {
+					if deleteErr := destination.deleteMessage(ctx, messageID); deleteErr != nil {
+						return nil, false, deleteErr
+					}
+				}
+				ids = nil
+				recovered = true
+				if progress != nil {
+					if progressErr := progress(ids, true); progressErr != nil {
+						return nil, false, progressErr
+					}
+				}
+				break
+			}
 			if !terminalEditError(err) {
-				return nil, err
+				return nil, false, err
 			}
 			if destination.Logger != nil {
 				destination.Logger.Warn("Telegram больше не разрешает изменить старое сообщение",
@@ -274,7 +305,7 @@ func (destination *Destination) upsertBlock(
 			// Новое сообщение намеренно не создаётся: иначе исправление старого
 			// перехвата появится в топике как новое и нарушит хронологию. Ошибка
 			// остаётся видимой, а состояние не помечается синхронизированным.
-			return nil, application.NewPermanentDeliveryError(
+			return nil, false, application.NewPermanentDeliveryError(
 				fmt.Errorf("старое сообщение Telegram невозможно исправить: %w", err),
 			)
 		}
@@ -289,12 +320,12 @@ func (destination *Destination) upsertBlock(
 		for len(ids) > len(chunks) {
 			last := len(ids) - 1
 			if err := destination.deleteMessage(ctx, ids[last]); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			ids = ids[:last]
 			if progress != nil {
-				if err := progress(ids); err != nil {
-					return nil, err
+				if err := progress(ids, recovered); err != nil {
+					return nil, false, err
 				}
 			}
 		}
@@ -302,7 +333,7 @@ func (destination *Destination) upsertBlock(
 	for index := len(ids); index < len(chunks); index++ {
 		message, err := destination.API.SendHTML(ctx, destination.ChatID, threadID, chunks[index])
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		ids = append(ids, message.MessageID)
 		if destination.Logger != nil {
@@ -314,12 +345,12 @@ func (destination *Destination) upsertBlock(
 		// Сохраняем каждый успешно созданный фрагмент немедленно. Если связь
 		// оборвётся на следующем фрагменте, повтор продолжит с него без дубля.
 		if progress != nil {
-			if err := progress(ids); err != nil {
-				return nil, err
+			if err := progress(ids, recovered); err != nil {
+				return nil, false, err
 			}
 		}
 	}
-	return ids, nil
+	return ids, recovered, nil
 }
 
 func (destination *Destination) deleteAll(ctx context.Context, blocks map[string]destinationBlock) error {
@@ -362,6 +393,16 @@ func terminalEditError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "message to edit not found") ||
 		strings.Contains(message, "message can't be edited") ||
+		strings.Contains(message, "message_id_invalid")
+}
+
+func missingEditError(err error) bool {
+	var telegramError *apiError
+	if errors.As(err, &telegramError) && telegramError.code != 400 {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "message to edit not found") ||
 		strings.Contains(message, "message_id_invalid")
 }
 

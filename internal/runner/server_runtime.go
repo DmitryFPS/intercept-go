@@ -99,8 +99,22 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	// Доставка уже принятых заданий не зависит от входящего Telegram polling.
 	// Запускаем очередь до проверки webhook, чтобы временная недоступность
 	// транспортного бота не блокировала Word и другие готовые направления.
+	gateways := server.gateways(cfg)
+	telegramDestinationIDs := make([]string, 0, len(gateways))
+	for id, gateway := range gateways {
+		if _, isTelegram := gateway.(*telegram.Destination); isTelegram {
+			telegramDestinationIDs = append(telegramDestinationIDs, id)
+		}
+	}
+	if count, recoveryErr := server.Store.RequeueDeletedTelegramEdits(
+		ctx, telegramDestinationIDs, time.Now().UTC(), cfg.DeliveryTimeout(),
+	); recoveryErr != nil {
+		server.Logger.Warn("не удалось подготовить восстановление удалённых Telegram-сообщений", "error", recoveryErr)
+	} else if count > 0 {
+		server.Logger.Info("удалённые Telegram-сообщения возвращены в очередь восстановления", "count", count)
+	}
 	delivery := &application.DeliveryService{
-		Queue: server.Store, Gateways: server.gateways(cfg), Now: time.Now,
+		Queue: server.Store, Gateways: gateways, Now: time.Now,
 		MaxConcurrent: 4, AttemptTimeout: 2 * time.Minute, Logger: server.Logger,
 	}
 	var background sync.WaitGroup

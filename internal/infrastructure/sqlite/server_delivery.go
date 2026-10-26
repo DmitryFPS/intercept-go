@@ -292,6 +292,62 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 	return jobs, rows.Err()
 }
 
+// RequeueDeletedTelegramEdits переводит в восстановление только последнюю
+// версию записи, которая была завершена старым Центром из-за отсутствующего
+// message_id. Более ранние версии и существующие, но нередактируемые сообщения
+// не возвращаются: это предотвращает устаревшие публикации и дубли.
+func (store *ServerStore) RequeueDeletedTelegramEdits(
+	ctx context.Context, destinationIDs []string, now time.Time, deliveryWindow time.Duration,
+) (int, error) {
+	if len(destinationIDs) == 0 {
+		return 0, nil
+	}
+	if deliveryWindow <= 0 {
+		deliveryWindow = 120 * time.Minute
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(destinationIDs)), ",")
+	args := []any{
+		now.UTC().Format(time.RFC3339Nano),
+		now.UTC().Add(deliveryWindow).Format(time.RFC3339Nano),
+		now.UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano),
+	}
+	for _, id := range destinationIDs {
+		args = append(args, id)
+	}
+	result, err := store.db.ExecContext(ctx, `
+		UPDATE delivery_jobs AS target
+		SET state='pending', attempts=0, next_attempt_at=?, expires_at=?, expired_at=NULL,
+			last_error='Ожидается автоматическое восстановление отсутствующего Telegram-сообщения'
+		WHERE target.state='expired'
+		  AND target.expired_at>=?
+		  AND target.destination_id IN (`+placeholders+`)
+		  AND (
+			lower(target.last_error) LIKE '%message to edit not found%'
+			OR lower(target.last_error) LIKE '%message_id_invalid%'
+		  )
+		  AND EXISTS (
+			SELECT 1 FROM received_events current
+			WHERE current.event_id=target.event_id
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM received_events later
+				JOIN delivery_jobs later_job ON later_job.event_id=later.event_id
+				WHERE later.rowid>current.rowid
+				  AND later_job.destination_id=target.destination_id
+				  AND later.client_id=current.client_id
+				  AND later.source_uuid=current.source_uuid
+			  )
+		  )`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("вернуть удалённые Telegram-сообщения в восстановление: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("посчитать восстанавливаемые Telegram-сообщения: %w", err)
+	}
+	return int(count), nil
+}
+
 // MarkDelivered окончательно фиксирует успешную доставку одному получателю.
 func (store *ServerStore) MarkDelivered(ctx context.Context, eventID, destinationID string, at time.Time) error {
 	result, err := store.db.ExecContext(ctx, `

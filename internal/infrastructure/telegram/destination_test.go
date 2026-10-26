@@ -1,14 +1,18 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -324,9 +328,195 @@ func TestDestinationEditsCombinedRecordWithoutDuplicates(t *testing.T) {
 	}
 }
 
-// Если Telegram окончательно запретил правку старого сообщения, новое не
-// создаётся, но доставка остаётся ошибочной и не теряет исправление молча.
-func TestDestinationDoesNotReplaceMessageAfterTerminalEditError(t *testing.T) {
+// Удалённая вручную публикация восстанавливается ровно один раз. Параллельная
+// обработка той же версии не создаёт вторую замену, а следующая версия снова
+// редактирует уже сохранённый новый message_id.
+func TestDestinationRestoresDeletedMessageOnce(t *testing.T) {
+	t.Parallel()
+	var sends, edits, deletes atomic.Int32
+	var nextID atomic.Int64
+	nextID.Store(100)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("декодировать %s: %v", method, err)
+			return
+		}
+		switch method {
+		case "sendMessage":
+			sends.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"message_id": nextID.Add(1)},
+			})
+		case "editMessageText":
+			edits.Add(1)
+			if int64(body["message_id"].(float64)) == 101 {
+				_ = json.NewEncoder(writer).Encode(map[string]any{
+					"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found",
+				})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+		case "deleteMessage":
+			deletes.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": false, "error_code": 400, "description": "Bad Request: message to delete not found",
+			})
+		default:
+			http.Error(writer, "неожиданный метод", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	var logs bytes.Buffer
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	destination := Destination{
+		API: api, ChatID: -1001, StatePath: statePath,
+		Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	event := domain.Event{
+		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
+		SourceAt: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
+		Position: domain.Position{UnitName: "позиция"},
+		Blocks:   []domain.ContentBlock{{Key: "12.00", Text: "12.00\n-Первое"}},
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	event.Blocks[0].Text = "12.00\n-Первое исправлено"
+	event.SourceAt = event.SourceAt.Add(time.Minute)
+	start := make(chan struct{})
+	errorsFound := make(chan error, 2)
+	var workers sync.WaitGroup
+	for range 2 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			errorsFound <- destination.Deliver(context.Background(), event, delivery)
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errorsFound)
+	for deliveryErr := range errorsFound {
+		if deliveryErr != nil {
+			t.Fatalf("восстановление завершилось ошибкой: %v", deliveryErr)
+		}
+	}
+	if sends.Load() != 2 || edits.Load() != 1 || deletes.Load() != 1 {
+		t.Fatalf("ожидалась одна замена: sends=%d edits=%d deletes=%d", sends.Load(), edits.Load(), deletes.Load())
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := current.Items["point-01|source-1"].Blocks["__record__"]
+	if block.Recovering || len(block.MessageIDs) != 1 || block.MessageIDs[0] != 102 {
+		t.Fatalf("новый message_id не зафиксирован: %#v", block)
+	}
+	if !strings.Contains(logs.String(), "Telegram-сообщение автоматически восстановлено") {
+		t.Fatalf("в журнале нет результата восстановления: %s", logs.String())
+	}
+	event.Blocks[0].Text = "12.00\n-Третья редакция"
+	event.SourceAt = event.SourceAt.Add(time.Minute)
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if sends.Load() != 2 || edits.Load() != 2 {
+		t.Fatalf("следующая версия не отредактировала замену: sends=%d edits=%d", sends.Load(), edits.Load())
+	}
+}
+
+// Флаг восстановления и очищенная старая привязка сохраняются до отправки.
+// После перезапуска повтор продолжает восстановление, а не возвращается к
+// навсегда удалённому message_id.
+func TestDestinationResumesDeletedMessageRecoveryAfterRestart(t *testing.T) {
+	t.Parallel()
+	var sends atomic.Int32
+	replacementUnavailable := atomic.Bool{}
+	replacementUnavailable.Store(true)
+	var lastText atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		switch method {
+		case "sendMessage":
+			call := sends.Add(1)
+			lastText.Store(body["text"].(string))
+			if call == 2 && replacementUnavailable.Load() {
+				writer.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(writer).Encode(map[string]any{
+					"ok": false, "error_code": 503, "description": "Service Unavailable",
+				})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"message_id": 100 + call},
+			})
+		case "editMessageText":
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found",
+			})
+		case "deleteMessage":
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": false, "error_code": 400, "description": "Bad Request: message to delete not found",
+			})
+		}
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	event := domain.Event{
+		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
+		SourceAt: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
+		Position: domain.Position{UnitName: "позиция"},
+		Blocks:   []domain.ContentBlock{{Key: "12.00", Text: "12.00\n-Первое"}},
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	event.Blocks[0].Text = "12.00\n-Первое исправлено"
+	event.SourceAt = event.SourceAt.Add(time.Minute)
+	if err := destination.Deliver(context.Background(), event, delivery); err == nil {
+		t.Fatal("временная ошибка замены должна оставить задание для повтора")
+	}
+	intermediate, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := intermediate.Items["point-01|source-1"].Blocks["__record__"]
+	if !block.Recovering || len(block.MessageIDs) != 0 {
+		t.Fatalf("состояние восстановления не сохранено: %#v", block)
+	}
+	replacementUnavailable.Store(false)
+	restarted := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	if err := restarted.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatalf("восстановление после перезапуска не продолжилось: %v", err)
+	}
+	if text, _ := lastText.Load().(string); !strings.Contains(text, "(отредактировано 15:01:00)") {
+		t.Fatalf("восстановленная редакция потеряла отметку: %q", text)
+	}
+}
+
+// Если сообщение существует, но Telegram окончательно запретил его правку,
+// новое не создаётся: иначе в теме остались бы две публикации.
+func TestDestinationDoesNotReplaceExistingUneditableMessage(t *testing.T) {
 	t.Parallel()
 	var methods []string
 	nextID := int64(100)
@@ -389,6 +579,24 @@ func TestTerminalEditErrorClassification(t *testing.T) {
 	}
 	if terminalEditError(&apiError{code: 400, description: "Bad Request: chat not found"}) {
 		t.Fatal("исправимая настройкой ошибка чата ошибочно завершит доставку")
+	}
+}
+
+func TestMissingEditErrorClassification(t *testing.T) {
+	t.Parallel()
+	for _, description := range []string{
+		"Bad Request: message to edit not found",
+		"Bad Request: MESSAGE_ID_INVALID",
+	} {
+		if !missingEditError(&apiError{code: 400, description: description}) {
+			t.Errorf("отсутствующее сообщение не распознано: %s", description)
+		}
+	}
+	if missingEditError(&apiError{code: 400, description: "Bad Request: message can't be edited"}) {
+		t.Fatal("существующее нередактируемое сообщение ошибочно будет заменено")
+	}
+	if missingEditError(&apiError{code: 500, description: "message to edit not found"}) {
+		t.Fatal("временная серверная ошибка Telegram ошибочно запустит восстановление")
 	}
 }
 
