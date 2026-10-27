@@ -54,6 +54,16 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 			t.Errorf("элемент истории %q не подключён", id)
 		}
 	}
+	for _, id := range []string{"historyItemDialog", "historyItemMeta", "historyItemContent", "historyItemContentType"} {
+		if !strings.Contains(html, `id="`+id+`"`) || !strings.Contains(javascript, `'`+id+`'`) {
+			t.Errorf("просмотр содержания перехвата не подключает элемент %q", id)
+		}
+	}
+	for _, fragment := range []string{"item.content_ready", "historyContent(item)", "data-history-item", "Текст из EAVC"} {
+		if !strings.Contains(javascript, fragment) && !strings.Contains(html, fragment) {
+			t.Errorf("история не показывает фактическое содержание перехвата: нет %q", fragment)
+		}
+	}
 	for _, id := range []string{"clientIncidentLauncher", "openClientIncidents", "clientIncidentDialog", "incidentList", "incidentClear"} {
 		if !strings.Contains(html, `id="`+id+`"`) || !strings.Contains(javascript, `'`+id+`'`) {
 			t.Errorf("отдельное окно истории связи не подключает элемент %q", id)

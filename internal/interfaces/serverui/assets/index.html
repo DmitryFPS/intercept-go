@@ -127,6 +127,17 @@
   <div id="historyFooter" class="history-footer"><span id="historyRetention" class="muted"></span><div class="history-pagination"><button id="historyPrev" class="button ghost" type="button">Назад</button><span id="historyPage" class="muted"></span><button id="historyNext" class="button ghost" type="button">Дальше</button></div><button id="historyClear" class="button danger" type="button">Очистить историю</button></div>
 </dialog>
 
+<dialog id="historyItemDialog" class="modal history-item-modal">
+  <div class="modal-head"><div><span class="eyebrow">СОДЕРЖАНИЕ ПЕРЕХВАТА</span><h2 id="historyItemTitle">Подробности события</h2><p id="historyItemState" class="muted"></p></div><button type="button" class="icon-button" data-close="historyItemDialog" aria-label="Закрыть">×</button></div>
+  <dl id="historyItemMeta" class="history-item-meta"></dl>
+  <section class="history-item-content" aria-labelledby="historyItemContentTitle">
+    <div class="history-item-content-head"><h3 id="historyItemContentTitle">Текст из EAVC</h3><span id="historyItemContentType" class="badge">Текст</span></div>
+    <pre id="historyItemContent"></pre>
+  </section>
+  <p class="history-item-note">Счётчики учитывают версии событий и доставки по маршрутам. Редактирование существующего перехвата может увеличить счётчик без создания нового сообщения Telegram.</p>
+  <div class="modal-actions"><button type="button" class="button primary" data-close="historyItemDialog">Закрыть</button></div>
+</dialog>
+
 <dialog id="clientIncidentDialog" class="modal history-modal incident-modal">
   <div class="modal-head"><div><span class="eyebrow">ЖУРНАЛ СВЯЗИ</span><h2>История сбоев и восстановлений</h2><p class="muted">Когда пропала связь с точкой, что стало причиной и когда работа восстановилась.</p></div><button type="button" class="icon-button" data-close="clientIncidentDialog" aria-label="Закрыть">×</button></div>
   <div class="history-filters incident-filters">

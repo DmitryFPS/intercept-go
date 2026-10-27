@@ -429,6 +429,47 @@ function historyDetails(item) {
   return details.join(' · ');
 }
 
+function historyContent(item) {
+  if (!item.content_ready) {
+    return item.content_note || 'Содержимое этого пакета нельзя безопасно показать.';
+  }
+  return item.content || 'В EAVC сохранён пустой текст перехвата.';
+}
+
+function historyMetaEntry(label, value) {
+  if (value === undefined || value === null || value === '') return '';
+  return `<div><dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd></div>`;
+}
+
+function openHistoryItem(index) {
+  const item = (historyData?.items || [])[index];
+  if (!item) return;
+  $('historyItemTitle').textContent = item.unit_name || item.client_name || 'Отклонённый пакет';
+  $('historyItemState').textContent = `${historyStateLabel(item.state)} · ${formatDate(item.occurred_at)}`;
+  const route = [item.client_name, item.destination].filter(Boolean).join(' → ');
+  $('historyItemMeta').innerHTML = [
+    historyMetaEntry('Рабочая точка', item.client_name),
+    historyMetaEntry('Маршрут', route),
+    historyMetaEntry('Подразделение', item.unit_name),
+    historyMetaEntry('Частота', item.frequency),
+    historyMetaEntry('Группа', item.group_code),
+    historyMetaEntry('Время перехвата', item.source_at ? formatDate(item.source_at) : ''),
+    historyMetaEntry('Принято / обработано', formatDate(item.occurred_at)),
+    historyMetaEntry('Запись EAVC', item.source_record ? `№ ${item.source_record}` : ''),
+    historyMetaEntry('Режим', item.source_mode === 'deferred' ? 'Отложенный' : (item.source_mode ? 'Обычный' : '')),
+    historyMetaEntry('Изменил в EAVC', item.updated_by),
+    historyMetaEntry('Попытки доставки', item.attempts || ''),
+    historyMetaEntry('Причина', historyReasonLabel(item.reason)),
+    historyMetaEntry('ID события', item.id)
+  ].join('');
+  const contentSection = $('historyItemContent').closest('.history-item-content');
+  contentSection.classList.toggle('unavailable', !item.content_ready);
+  $('historyItemContentTitle').textContent = item.content_ready ? 'Текст из EAVC' : 'Почему содержимое недоступно';
+  $('historyItemContentType').textContent = item.content_ready ? 'Текст' : 'Недоступно';
+  $('historyItemContent').textContent = historyContent(item);
+  openDialog('historyItemDialog');
+}
+
 function renderHistory() {
   const data = historyData || {};
   const clients = data.clients || [];
@@ -461,13 +502,15 @@ function renderHistory() {
 
   $('historyList').innerHTML = historyKind === 'clients'
     ? ''
-    : items.map(item => {
+    : items.map((item, index) => {
       const route = historyKind === 'rejected'
         ? item.destination
         : [item.client_name, item.destination].filter(Boolean).join(' → ');
       return `<article class="history-row">
 		<strong>${escapeHTML(item.unit_name || item.client_name || 'Пакет без названия')}</strong><span>${escapeHTML(route || historyStateLabel(item.state))}</span><time>${formatDate(item.occurred_at)}</time>
 		<p>${escapeHTML(historyDetails(item))}</p>
+        <div class="history-content-preview"><span>${item.content_ready ? 'Содержание перехвата' : 'Содержание недоступно'}</span><pre>${escapeHTML(historyContent(item))}</pre></div>
+        <div class="history-row-actions"><button class="button ghost history-open-item" type="button" data-history-item="${index}">${item.content_ready ? 'Открыть полностью' : 'Подробнее'}</button></div>
       </article>`;
     }).join('');
 
@@ -484,6 +527,12 @@ function renderHistory() {
   $('historyClear').classList.toggle('hidden', !data.clearable);
   $('historyFooter').classList.toggle('hidden', historyKind === 'clients');
 }
+
+$('historyList').addEventListener('click', event => {
+  const button = event.target.closest('[data-history-item]');
+  if (!button) return;
+  openHistoryItem(Number(button.dataset.historyItem));
+});
 
 $('openClientIncidents').addEventListener('click', () => {
   $('historyDialog').close();

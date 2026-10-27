@@ -43,12 +43,17 @@ type ConnectionIncident struct {
 	Reason      string     `json:"reason"`
 }
 
-// ServerHistoryItem — одна безопасная строка истории без текста перехвата.
+// ServerHistoryItem — одна строка истории для защищённого локального интерфейса.
+// Текст раскрывается только уже авторизованному локальному оператору. Для
+// карантина содержимое намеренно недоступно: отклонённый пакет мог не пройти
+// проверку подписи и его нельзя выдавать за достоверный перехват.
 type ServerHistoryItem struct {
 	ID            string     `json:"id"`
 	ClientID      string     `json:"client_id,omitempty"`
 	ClientName    string     `json:"client_name,omitempty"`
 	UnitName      string     `json:"unit_name,omitempty"`
+	Frequency     string     `json:"frequency,omitempty"`
+	GroupCode     string     `json:"group_code,omitempty"`
 	DestinationID string     `json:"destination_id,omitempty"`
 	Destination   string     `json:"destination,omitempty"`
 	State         string     `json:"state"`
@@ -59,6 +64,10 @@ type ServerHistoryItem struct {
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
 	Attempts      int        `json:"attempts,omitempty"`
 	Reason        string     `json:"reason,omitempty"`
+	UpdatedBy     string     `json:"updated_by,omitempty"`
+	Content       string     `json:"content,omitempty"`
+	ContentReady  bool       `json:"content_ready"`
+	ContentNote   string     `json:"content_note,omitempty"`
 }
 
 // ServerHistoryPage объединяет текущую связь и постраничную историю.
@@ -74,8 +83,9 @@ type ServerHistoryPage struct {
 	RetentionDays int                  `json:"retention_days"`
 }
 
-// HistoryFilter ограничивает историю только операторскими признаками. Текст
-// самого перехвата по-прежнему не раскрывается и в фильтрации не участвует.
+// HistoryFilter ограничивает историю операторскими признаками. Поиск по тексту
+// выполняется только после расшифровки в памяти: защищённое содержимое не
+// переносится в открытые индексы SQLite.
 type HistoryFilter struct {
 	Query         string
 	ClientID      string
@@ -508,8 +518,13 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 		return ServerHistoryItem{}, fmt.Errorf("история %s: повреждён JSON события: %w", item.ID, err)
 	}
 	item.UnitName = event.Position.UnitName
+	item.Frequency = event.Position.Frequency
+	item.GroupCode = event.Position.GroupCode
 	item.SourceRecord = event.Source.ID
 	item.SourceMode = string(event.Mode)
+	item.UpdatedBy = event.UpdatedBy
+	item.Content = event.Content
+	item.ContentReady = true
 	sourceAt := event.SourceAt
 	if sourceAt.IsZero() {
 		sourceAt = event.ObservedAt
@@ -534,7 +549,8 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 func serverHistoryItemMatches(item ServerHistoryItem, query string) bool {
 	searchable := strings.ToLower(strings.Join([]string{
 		item.ID, item.ClientID, item.ClientName, item.UnitName,
-		item.DestinationID, item.Destination, item.Reason,
+		item.Frequency, item.GroupCode, item.DestinationID, item.Destination,
+		item.Reason, item.UpdatedBy, item.Content,
 		fmt.Sprintf("%d", item.SourceRecord),
 	}, " "))
 	return strings.Contains(searchable, query)
@@ -587,6 +603,7 @@ func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int
 		item.ClientName = strings.TrimPrefix(sender, "@")
 		item.Destination = fmt.Sprintf("Тема %d", thread)
 		item.State = "rejected"
+		item.ContentNote = "Содержимое недоступно: пакет отклонён до подтверждения подлинности и безопасной расшифровки."
 		item.OccurredAt, _ = time.Parse(time.RFC3339Nano, occurred)
 		if searchQuery != "" {
 			searchable := strings.ToLower(strings.Join([]string{item.ID, item.ClientName, item.Destination, item.Reason}, " "))

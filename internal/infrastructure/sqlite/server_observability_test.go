@@ -145,6 +145,9 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := serverTestEvent()
+	event.Position.Frequency = "166.4520 МГц"
+	event.Position.GroupCode = "3155208"
+	event.UpdatedBy = "Оператор 1"
 	plan, err := rules.Resolve(event)
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +163,11 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 		t.Fatalf("история приёма: %+v err=%v", received, err)
 	}
 	if len(received.Items) != 1 || received.Items[0].SourceRecord != event.Source.ID ||
-		received.Items[0].SourceAt == nil || received.Items[0].SourceMode != string(event.Mode) {
+		received.Items[0].SourceAt == nil || received.Items[0].SourceMode != string(event.Mode) ||
+		!received.Items[0].ContentReady || received.Items[0].Content != event.Content ||
+		received.Items[0].Frequency != event.Position.Frequency ||
+		received.Items[0].GroupCode != event.Position.GroupCode ||
+		received.Items[0].UpdatedBy != event.UpdatedBy {
 		t.Fatalf("история не содержит полезные сведения EAVC: %+v", received.Items)
 	}
 	delivered, err := store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC())
@@ -266,6 +273,7 @@ func TestAllDashboardHistoryFilters(t *testing.T) {
 		want  int
 	}{
 		{kind: "received", query: "1 МБ 155 ОМБР", want: 2},
+		{kind: "received", query: "данные", want: 2},
 		{kind: "pending", query: "39-ка", want: 1},
 		{kind: "delivered", query: "Аэродром", want: 1},
 		{kind: "expired", query: "39-КА", want: 1},
@@ -293,6 +301,10 @@ func TestAllDashboardHistoryFilters(t *testing.T) {
 	rejected, err := store.HistoryPage(ctx, "rejected", 30, 0, now.Add(time.Second), HistoryFilter{Query: "нет такого значения"})
 	if err != nil || len(rejected.Items) != 0 {
 		t.Fatalf("поиск карточки отклонений проигнорирован: %+v err=%v", rejected, err)
+	}
+	rejected, err = store.HistoryPage(ctx, "rejected", 30, 0, now.Add(time.Second))
+	if err != nil || len(rejected.Items) != 1 || rejected.Items[0].ContentReady || rejected.Items[0].ContentNote == "" {
+		t.Fatalf("карантин ошибочно показывает недостоверное содержимое: %+v err=%v", rejected, err)
 	}
 }
 
