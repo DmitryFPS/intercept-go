@@ -470,6 +470,8 @@ function openHistoryItem(index) {
     historyMetaEntry('Попытки доставки', item.attempts || ''),
     historyMetaEntry('Причина', historyReasonLabel(item.reason)),
     historyMetaEntry('Что передал Клиент', historyContentLabel(item)),
+    historyMetaEntry('ID Telegram-темы', item.telegram_thread_id || ''),
+    historyMetaEntry('Telegram message_id', (item.telegram_message_ids || []).join(', ')),
     historyMetaEntry('ID события', item.id)
   ].join('');
   const contentSection = $('historyItemContent').closest('.history-item-content');
@@ -477,6 +479,15 @@ function openHistoryItem(index) {
   $('historyItemContentTitle').textContent = item.content_ready ? 'Текст из EAVC' : 'Почему содержимое недоступно';
   $('historyItemContentType').textContent = item.content_kind === 'text' ? 'Текст' : (item.content_kind === 'empty_text' ? 'Без текста' : 'Недоступно');
   $('historyItemContent').textContent = historyContent(item);
+  const telegramURLs = item.telegram_message_urls || [];
+  const telegramIDs = item.telegram_message_ids || [];
+  $('historyTelegramResult').classList.toggle('hidden', telegramIDs.length === 0);
+  $('historyTelegramLinks').innerHTML = telegramIDs.map((messageID, messageIndex) => {
+    const url = telegramURLs[messageIndex];
+    return url
+      ? `<a class="button secondary" href="${escapeHTML(url)}" target="_blank" rel="noreferrer">Открыть сообщение ${escapeHTML(messageID)}</a>`
+      : `<span class="badge">message_id ${escapeHTML(messageID)}</span>`;
+  }).join('');
   openDialog('historyItemDialog');
 }
 

@@ -155,7 +155,10 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 	if accepted, err := store.Accept(ctx, event, plan); err != nil || !accepted {
 		t.Fatalf("accept=%v err=%v", accepted, err)
 	}
-	if err := store.MarkDelivered(ctx, event.ID, plan.Deliveries[0].Destination.ID, time.Now().UTC()); err != nil {
+	receipt := application.DeliveryReceipt{
+		Kind: "telegram", ChatID: -1003943357633, ThreadID: 17, MessageIDs: []int64{701, 702},
+	}
+	if err := store.MarkDeliveredWithReceipt(ctx, event.ID, plan.Deliveries[0].Destination.ID, time.Now().UTC(), receipt); err != nil {
 		t.Fatal(err)
 	}
 	received, err := store.HistoryPage(ctx, "received", 30, 0, time.Now().UTC())
@@ -173,6 +176,11 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 	delivered, err := store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC())
 	if err != nil || delivered.Total != 1 {
 		t.Fatalf("история доставки: %+v err=%v", delivered, err)
+	}
+	if len(delivered.Items[0].TelegramIDs) != 2 || delivered.Items[0].TelegramIDs[0] != 701 ||
+		delivered.Items[0].TelegramTopic != 17 || delivered.Items[0].TelegramChat != "-1003943357633" ||
+		len(delivered.Items[0].TelegramURLs) != 2 || delivered.Items[0].TelegramURLs[0] != "https://t.me/c/3943357633/701" {
+		t.Fatalf("история потеряла ID конечных сообщений Telegram: %+v", delivered.Items[0])
 	}
 	filtered, err := store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC(), HistoryFilter{
 		ClientID: "textile", DestinationID: plan.Deliveries[0].Destination.ID, Query: "Текстиль",

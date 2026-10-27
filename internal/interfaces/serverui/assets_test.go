@@ -54,9 +54,14 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 			t.Errorf("элемент истории %q не подключён", id)
 		}
 	}
-	for _, id := range []string{"historyItemDialog", "historyItemMeta", "historyItemContent", "historyItemContentType"} {
+	for _, id := range []string{"historyItemDialog", "historyItemMeta", "historyItemContent", "historyItemContentType", "historyTelegramResult", "historyTelegramLinks"} {
 		if !strings.Contains(html, `id="`+id+`"`) || !strings.Contains(javascript, `'`+id+`'`) {
 			t.Errorf("просмотр содержания перехвата не подключает элемент %q", id)
+		}
+	}
+	for _, fragment := range []string{"telegram_message_ids", "telegram_message_urls", "Telegram message_id", "Открыть сообщение"} {
+		if !strings.Contains(javascript, fragment) {
+			t.Errorf("подробности доставки не показывают Telegram ID: нет %q", fragment)
 		}
 	}
 	for _, fragment := range []string{"item.content_ready", "historyContent(item)", "historyContentLabel(item)", "data-history-item", "Текст из EAVC", "Клиент передал перехват без текста"} {

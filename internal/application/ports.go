@@ -131,3 +131,25 @@ type DeliveryQueue interface {
 type DeliveryGateway interface {
 	Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error
 }
+
+// DeliveryReceipt — подтверждённый внешний результат уже выполненной доставки.
+// Telegram может разбить длинный перехват на несколько сообщений, поэтому ID
+// хранится списком. Для Word и других направлений результат может быть пустым.
+type DeliveryReceipt struct {
+	Kind       string  `json:"kind"`
+	ChatID     int64   `json:"chat_id,omitempty"`
+	ThreadID   int64   `json:"thread_id,omitempty"`
+	MessageIDs []int64 `json:"message_ids,omitempty"`
+}
+
+// DeliveryReceiptProvider сообщает фактические ID только после успешной
+// внешней операции. Ошибка чтения результата не должна повторять уже
+// выполненную доставку и создавать дубль.
+type DeliveryReceiptProvider interface {
+	DeliveryReceipt(event domain.Event, delivery domain.PlannedDelivery) (DeliveryReceipt, error)
+}
+
+// DeliveryReceiptQueue расширяет очередь без нарушения старых адаптеров.
+type DeliveryReceiptQueue interface {
+	MarkDeliveredWithReceipt(ctx context.Context, eventID, destinationID string, at time.Time, receipt DeliveryReceipt) error
+}

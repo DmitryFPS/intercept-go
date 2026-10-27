@@ -325,14 +325,42 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 		}
 		return false, nil
 	}
-	if err := service.Queue.MarkDelivered(ctx, job.Event.ID, job.Delivery.Destination.ID, service.Now()); err != nil {
-		return false, err
+	receipt := DeliveryReceipt{}
+	receiptReady := false
+	if provider, ok := gateway.(DeliveryReceiptProvider); ok {
+		var receiptErr error
+		receipt, receiptErr = provider.DeliveryReceipt(job.Event, job.Delivery)
+		if receiptErr != nil {
+			if service.Logger != nil {
+				service.Logger.Warn("доставка выполнена, но внешний ID прочитать не удалось",
+					"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+					"error", receiptErr)
+			}
+		} else {
+			receiptReady = true
+		}
+	}
+	markErr := error(nil)
+	if queue, ok := service.Queue.(DeliveryReceiptQueue); ok && receiptReady {
+		markErr = queue.MarkDeliveredWithReceipt(
+			ctx, job.Event.ID, job.Delivery.Destination.ID, service.Now(), receipt,
+		)
+	} else {
+		markErr = service.Queue.MarkDelivered(ctx, job.Event.ID, job.Delivery.Destination.ID, service.Now())
+	}
+	if markErr != nil {
+		return false, markErr
 	}
 	if service.Logger != nil {
-		service.Logger.Info("событие доставлено",
+		fields := []any{
 			"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
-			"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts+1,
-		)
+			"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts + 1,
+			"telegram_message_count", len(receipt.MessageIDs),
+		}
+		if len(receipt.MessageIDs) > 0 {
+			fields = append(fields, "telegram_message_id", receipt.MessageIDs[0])
+		}
+		service.Logger.Info("событие доставлено", fields...)
 	}
 	return true, nil
 }

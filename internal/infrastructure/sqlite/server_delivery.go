@@ -350,10 +350,38 @@ func (store *ServerStore) RequeueDeletedTelegramEdits(
 
 // MarkDelivered окончательно фиксирует успешную доставку одному получателю.
 func (store *ServerStore) MarkDelivered(ctx context.Context, eventID, destinationID string, at time.Time) error {
+	return store.markDelivered(ctx, eventID, destinationID, at, nil)
+}
+
+// MarkDeliveredWithReceipt атомарно сохраняет доставку вместе с фактическим
+// внешним ID. Эти данные защищаются так же, как событие и план доставки.
+func (store *ServerStore) MarkDeliveredWithReceipt(
+	ctx context.Context, eventID, destinationID string, at time.Time, receipt application.DeliveryReceipt,
+) error {
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		return fmt.Errorf("кодировать результат доставки: %w", err)
+	}
+	protected, err := protectDatabaseValue(payload)
+	if err != nil {
+		return fmt.Errorf("защитить результат доставки: %w", err)
+	}
+	return store.markDelivered(ctx, eventID, destinationID, at, protected)
+}
+
+func (store *ServerStore) markDelivered(
+	ctx context.Context, eventID, destinationID string, at time.Time, receipt []byte,
+) error {
+	query := `UPDATE delivery_jobs SET state='delivered', delivered_at=?, last_error=''`
+	args := []any{at.UTC().Format(time.RFC3339Nano)}
+	if receipt != nil {
+		query += `, result_json=?`
+		args = append(args, receipt)
+	}
+	query += ` WHERE event_id=? AND destination_id=? AND state='pending'`
+	args = append(args, eventID, destinationID)
 	result, err := store.db.ExecContext(ctx, `
-		UPDATE delivery_jobs SET state='delivered', delivered_at=?, last_error=''
-		WHERE event_id=? AND destination_id=? AND state='pending'`,
-		at.UTC().Format(time.RFC3339Nano), eventID, destinationID)
+		`+query, args...)
 	return changedExactlyOnce(result, err, "подтвердить внешнюю доставку")
 }
 

@@ -211,6 +211,21 @@ func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 	}
 }
 
+func TestDeliveryServicePersistsExternalReceipt(t *testing.T) {
+	t.Parallel()
+	event := serverServiceEvent()
+	delivery := domain.PlannedDelivery{Destination: domain.Destination{ID: "telegram", Kind: domain.DestinationTelegram}}
+	queue := &memoryDeliveryQueue{jobs: []DeliveryJob{{Event: event, Delivery: delivery}}}
+	service := DeliveryService{
+		Queue: queue, Gateways: map[string]DeliveryGateway{"telegram": receiptGateway{}}, Now: time.Now,
+	}
+	delivered, err := service.RunOnce(context.Background(), 10)
+	if err != nil || delivered != 1 || len(queue.receipts) != 1 ||
+		len(queue.receipts[0].MessageIDs) != 1 || queue.receipts[0].MessageIDs[0] != 701 {
+		t.Fatalf("результат внешней доставки не сохранён: delivered=%d receipts=%#v err=%v", delivered, queue.receipts, err)
+	}
+}
+
 // Неисправимое редактирование завершается один раз и не превращается в
 // бесконечный повтор, удерживающий следующие сообщения очереди.
 func TestDeliveryServiceFinalizesPermanentFailure(t *testing.T) {
@@ -321,6 +336,16 @@ func (gateway memoryGateway) Deliver(_ context.Context, _ domain.Event, _ domain
 	return gateway.err
 }
 
+type receiptGateway struct{}
+
+func (receiptGateway) Deliver(_ context.Context, _ domain.Event, _ domain.PlannedDelivery) error {
+	return nil
+}
+
+func (receiptGateway) DeliveryReceipt(_ domain.Event, _ domain.PlannedDelivery) (DeliveryReceipt, error) {
+	return DeliveryReceipt{Kind: "telegram", ChatID: -1001, ThreadID: 17, MessageIDs: []int64{701}}, nil
+}
+
 type channelGateway struct {
 	release <-chan struct{}
 	done    chan<- struct{}
@@ -345,6 +370,7 @@ type memoryDeliveryQueue struct {
 	delivered []string
 	retried   []string
 	failed    []string
+	receipts  []DeliveryReceipt
 }
 
 func (queue *memoryDeliveryQueue) PendingDeliveries(_ context.Context, _ int, _ time.Time) ([]DeliveryJob, error) {
@@ -387,6 +413,16 @@ func (queue *memoryDeliveryQueue) MarkDelivered(_ context.Context, eventID, dest
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
 	queue.delivered = append(queue.delivered, eventID+":"+destinationID)
+	return nil
+}
+
+func (queue *memoryDeliveryQueue) MarkDeliveredWithReceipt(
+	_ context.Context, eventID, destinationID string, _ time.Time, receipt DeliveryReceipt,
+) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.delivered = append(queue.delivered, eventID+":"+destinationID)
+	queue.receipts = append(queue.receipts, receipt)
 	return nil
 }
 

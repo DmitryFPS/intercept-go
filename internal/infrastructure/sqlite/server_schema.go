@@ -152,3 +152,10 @@ CREATE INDEX rejected_packets_history_idx
 CREATE INDEX client_connection_incidents_time_idx
 	ON client_connection_incidents(started_at DESC);
 `
+
+// Результат доставки хранит фактические ID конечных Telegram-сообщений.
+// Старые строки остаются допустимыми: у них результат пуст, потому что прежняя
+// версия Центра ещё не сохраняла эту информацию.
+const serverDeliveryResultMigration = `
+ALTER TABLE delivery_jobs ADD COLUMN result_json BLOB NOT NULL DEFAULT X'';
+`

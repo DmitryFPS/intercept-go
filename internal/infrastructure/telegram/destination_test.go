@@ -778,3 +778,25 @@ func TestDestinationMigratesLegacyTokenScopeWithoutLosingMessageIDs(t *testing.T
 		t.Fatalf("миграция области потеряла историю сообщений: %#v", current)
 	}
 }
+
+func TestDestinationReceiptReturnsFinalTelegramMessageIDs(t *testing.T) {
+	t.Parallel()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	event := domain.Event{ClientID: "textile", Source: domain.SourceRecord{UUID: "source-1"}}
+	if err := saveDestinationState(statePath, destinationState{
+		Items: map[string]destinationItem{"textile|source-1": {
+			ThreadID: 17,
+			Blocks: map[string]destinationBlock{
+				"__record__": {MessageIDs: []int64{701, 702}},
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{ChatID: -1003943357633, StatePath: statePath}
+	receipt, err := destination.DeliveryReceipt(event, domain.PlannedDelivery{})
+	if err != nil || receipt.Kind != "telegram" || receipt.ChatID != destination.ChatID ||
+		receipt.ThreadID != 17 || len(receipt.MessageIDs) != 2 || receipt.MessageIDs[0] != 701 {
+		t.Fatalf("неверный результат Telegram-доставки: %#v err=%v", receipt, err)
+	}
+}

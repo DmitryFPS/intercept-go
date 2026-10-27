@@ -85,7 +85,7 @@ var diagnosticAllowedKeys = map[string]bool{
 	"next_attempt_at": true, "accepted_at": true, "expires_at": true,
 	"from_version": true, "to_version": true,
 	"content_kind": true, "content_chars": true, "content_blocks": true,
-	"source_mode": true, "new_event": true,
+	"source_mode": true, "new_event": true, "telegram_message_count": true,
 	"event_ref": true, "source_ref": true, "source_id_ref": true, "item_ref": true,
 	"client_ref": true, "destination_ref": true, "chat_ref": true, "thread_ref": true,
 	"message_ref": true, "telegram_message_ref": true,

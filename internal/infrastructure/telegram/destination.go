@@ -162,6 +162,28 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	return nil
 }
 
+// DeliveryReceipt возвращает сохранённые ID конечной публикации, а не ID
+// транспортного .icevent-файла. Метод вызывается только после успешной Deliver.
+func (destination *Destination) DeliveryReceipt(
+	event domain.Event, delivery domain.PlannedDelivery,
+) (application.DeliveryReceipt, error) {
+	legacyItemKey := strings.TrimSpace(event.Source.UUID)
+	if legacyItemKey == "" {
+		legacyItemKey = fmt.Sprintf("id:%d", event.Source.ID)
+	}
+	itemKey := strings.TrimSpace(event.ClientID) + "|" + legacyItemKey
+	item, err := destination.loadItem(itemKey)
+	if err != nil {
+		return application.DeliveryReceipt{}, err
+	}
+	const recordStateKey = "__record__"
+	block := item.Blocks[recordStateKey]
+	return application.DeliveryReceipt{
+		Kind: "telegram", ChatID: destination.ChatID,
+		ThreadID: item.ThreadID, MessageIDs: append([]int64(nil), block.MessageIDs...),
+	}, nil
+}
+
 func legacyMessageIDs(blocks map[string]destinationBlock) []int64 {
 	ordered := make([]destinationBlock, 0, len(blocks))
 	for _, block := range blocks {

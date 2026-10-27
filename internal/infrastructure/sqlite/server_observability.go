@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	"intercept/internal/application"
 	"intercept/internal/domain"
 )
 
@@ -69,6 +71,10 @@ type ServerHistoryItem struct {
 	ContentReady  bool       `json:"content_ready"`
 	ContentKind   string     `json:"content_kind"`
 	ContentNote   string     `json:"content_note,omitempty"`
+	TelegramChat  string     `json:"telegram_chat_id,omitempty"`
+	TelegramTopic int64      `json:"telegram_thread_id,omitempty"`
+	TelegramIDs   []int64    `json:"telegram_message_ids,omitempty"`
+	TelegramURLs  []string   `json:"telegram_message_urls,omitempty"`
 }
 
 // ServerHistoryPage объединяет текущую связь и постраничную историю.
@@ -449,9 +455,9 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 			return nil, 0, err
 		}
 	}
-	columns := "e.event_id,e.client_id,c.name,e.payload_json,'' AS destination_id,NULL AS delivery_json,'received' AS state,e.received_at,0 AS attempts,NULL AS next_attempt_at,'' AS last_error"
+	columns := "e.event_id,e.client_id,c.name,e.payload_json,'' AS destination_id,NULL AS delivery_json,NULL AS result_json,'received' AS state,e.received_at,0 AS attempts,NULL AS next_attempt_at,'' AS last_error"
 	if kind != "received" {
-		columns = "e.event_id,e.client_id,c.name,e.payload_json,j.destination_id,j.delivery_json,j.state," + timeColumn + ",j.attempts,j.next_attempt_at,j.last_error"
+		columns = "e.event_id,e.client_id,c.name,e.payload_json,j.destination_id,j.delivery_json,j.result_json,j.state," + timeColumn + ",j.attempts,j.next_attempt_at,j.last_error"
 	}
 	query := "SELECT " + columns + " FROM received_events e JOIN server_clients c ON c.client_id=e.client_id" + join + where + " ORDER BY " + timeColumn + " DESC"
 	queryArgs := args
@@ -494,11 +500,11 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 
 func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 	var item ServerHistoryItem
-	var eventPayload, deliveryPayload []byte
+	var eventPayload, deliveryPayload, resultPayload []byte
 	var occurred string
 	var next sql.NullString
 	if err := rows.Scan(&item.ID, &item.ClientID, &item.ClientName, &eventPayload,
-		&item.DestinationID, &deliveryPayload, &item.State, &occurred, &item.Attempts, &next, &item.Reason); err != nil {
+		&item.DestinationID, &deliveryPayload, &resultPayload, &item.State, &occurred, &item.Attempts, &next, &item.Reason); err != nil {
 		return ServerHistoryItem{}, err
 	}
 	parsedOccurredAt, err := time.Parse(time.RFC3339Nano, occurred)
@@ -548,8 +554,41 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 			return ServerHistoryItem{}, fmt.Errorf("история %s/%s: повреждён JSON доставки: %w", item.ID, item.DestinationID, err)
 		}
 		item.Destination = delivery.Destination.Name
+		if delivery.Destination.Kind == domain.DestinationTelegram {
+			item.TelegramTopic = delivery.Decision.ThreadID
+		}
+	}
+	if len(resultPayload) > 0 {
+		plain, err := unprotectDatabaseValue(resultPayload)
+		if err != nil {
+			return ServerHistoryItem{}, fmt.Errorf("история %s/%s: не удалось расшифровать результат доставки: %w", item.ID, item.DestinationID, err)
+		}
+		if len(plain) > 0 {
+			var receipt application.DeliveryReceipt
+			if err := json.Unmarshal(plain, &receipt); err != nil {
+				return ServerHistoryItem{}, fmt.Errorf("история %s/%s: повреждён результат доставки: %w", item.ID, item.DestinationID, err)
+			}
+			if receipt.Kind == "telegram" {
+				item.TelegramChat = strconv.FormatInt(receipt.ChatID, 10)
+				item.TelegramTopic = receipt.ThreadID
+				item.TelegramIDs = append([]int64(nil), receipt.MessageIDs...)
+				for _, messageID := range receipt.MessageIDs {
+					if link := telegramMessageURL(receipt.ChatID, messageID); link != "" {
+						item.TelegramURLs = append(item.TelegramURLs, link)
+					}
+				}
+			}
+		}
 	}
 	return item, nil
+}
+
+func telegramMessageURL(chatID, messageID int64) string {
+	chat := strconv.FormatInt(chatID, 10)
+	if messageID <= 0 || !strings.HasPrefix(chat, "-100") || len(chat) <= 4 {
+		return ""
+	}
+	return "https://t.me/c/" + strings.TrimPrefix(chat, "-100") + "/" + strconv.FormatInt(messageID, 10)
 }
 
 func serverHistoryItemMatches(item ServerHistoryItem, query string) bool {
@@ -557,6 +596,7 @@ func serverHistoryItemMatches(item ServerHistoryItem, query string) bool {
 		item.ID, item.ClientID, item.ClientName, item.UnitName,
 		item.Frequency, item.GroupCode, item.DestinationID, item.Destination,
 		item.Reason, item.UpdatedBy, item.Content,
+		item.TelegramChat, fmt.Sprint(item.TelegramTopic), fmt.Sprint(item.TelegramIDs),
 		fmt.Sprintf("%d", item.SourceRecord),
 	}, " "))
 	return strings.Contains(searchable, query)
