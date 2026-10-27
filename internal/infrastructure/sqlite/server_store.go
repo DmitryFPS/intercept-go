@@ -26,7 +26,7 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 	if err := Migrate(ctx, db, []string{
 		serverMigration, serverDeliveryOrderMigration, serverStreamRepairMigration,
 		serverObservabilityMigration, serverIntegrityMigration, serverHistoryIndexesMigration,
-		serverDeliveryResultMigration,
+		serverDeliveryResultMigration, serverTransportAuditMigration,
 	}); err != nil {
 		return nil, err
 	}

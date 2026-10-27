@@ -504,8 +504,11 @@ func TestClientQueuePagesAndProtectsActiveMessagesFromDeletion(t *testing.T) {
 	for _, state := range []string{"pending", "uploaded", "acknowledged", "expired"} {
 		items, total, err := queue.EventsPage(ctx, state, 20, 0)
 		if err != nil || total != 1 || len(items) != 1 || items[0].Content != "текст "+state ||
-			items[0].ContentKind != "text" || items[0].ContentNote == "" {
+			items[0].ContentKind != "text" || items[0].ContentNote == "" || items[0].SourceUUID != "source-"+state {
 			t.Fatalf("неверная страница %s: total=%d items=%#v err=%v", state, total, items, err)
+		}
+		if (state == "uploaded" || state == "acknowledged") && items[0].TransportMessageID == nil {
+			t.Fatalf("для %s потерян message_id транспорта: %#v", state, items[0])
 		}
 	}
 	for _, state := range []string{"pending", "uploaded"} {

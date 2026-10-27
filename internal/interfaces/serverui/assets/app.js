@@ -49,7 +49,8 @@ const historySections = {
   pending: ['Ожидает отправки', 'Живая очередь с попытками, ошибкой и временем следующего повтора.'],
   delivered: ['Доставлено', 'Успешные доставки по каждому Telegram- и Word-направлению.'],
   expired: ['Просрочено', 'Задания, которые не удалось доставить в разрешённое время.'],
-  rejected: ['Отклонено', 'Пакеты, которые центр не принял, с безопасным описанием причины.']
+  rejected: ['Отклонено', 'Пакеты, которые центр не принял, с безопасным описанием причины.'],
+  transport: ['Журнал транспорта', 'Все замеченные в группе обмена сообщения: перехваты, проверки связи и то, что не повлияло на рабочие счётчики.']
 };
 
 const historyColumnLabels = {
@@ -57,7 +58,8 @@ const historyColumnLabels = {
   pending: ['Подразделение', 'Рабочая точка → получатель', 'Принято центром'],
   delivered: ['Подразделение', 'Маршрут доставки', 'Доставлено'],
   expired: ['Подразделение', 'Маршрут доставки', 'Просрочено'],
-  rejected: ['Отправитель', 'Тема', 'Отклонено']
+  rejected: ['Отправитель', 'Тема', 'Отклонено'],
+  transport: ['Источник', 'Результат классификации', 'Замечено']
 };
 
 function escapeHTML(value) {
@@ -399,8 +401,30 @@ function historyStateLabel(state) {
     pending: 'Ожидает отправки',
     delivered: 'Доставлено',
     expired: 'Срок доставки истёк',
-    rejected: 'Отклонено центром'
+    rejected: 'Отклонено центром',
+    transport: 'Сообщение транспорта классифицировано'
   })[state] || 'Состояние обновлено';
+}
+
+function transportOutcomeLabel(value) {
+  return ({
+    event_accepted: 'Новый перехват принят и учтён',
+    processed_duplicate: 'Повтор: уже учтён ранее',
+    event_expired: 'Перехват поступил после допустимого срока',
+    probe_valid: 'Проверка связи выполнена, в счётчики не входит',
+    probe_rejected: 'Проверка связи отклонена',
+    ignored_non_transport: 'Сообщение пользователя или посторонний файл — не учитывается',
+    ignored_unauthorized: 'Незарегистрированный бот или тема — не учитывается',
+    ignored_invalid_size: 'Недопустимый размер файла — не учитывается',
+    ignored_missing_sender: 'Отправитель не определён — не учитывается',
+    unavailable_file: 'Файл недоступен; ожидается безопасный повтор Клиента',
+    download_retry: 'Временный сбой скачивания; будет повторено',
+    authorization_retry: 'Временный сбой проверки; будет повторено',
+    processing_retry: 'Временный сбой обработки; будет повторено',
+    quarantined: 'Повреждённый пакет помещён в карантин',
+    invalid_probe: 'Повреждённая проверка связи отклонена',
+    awaiting_processing: 'Ожидает классификации'
+  })[value] || String(value || 'Неизвестный результат').replaceAll('_', ' ');
 }
 
 function historyReasonLabel(reason) {
@@ -418,6 +442,11 @@ function historyReasonLabel(reason) {
 
 function historyDetails(item) {
   const details = [];
+  if (item.state === 'transport') {
+    details.push(transportOutcomeLabel(item.transport_outcome));
+    details.push(item.counted ? 'увеличил «Получено»' : 'рабочие счётчики не изменил');
+    if (item.transport_seen > 1) details.push(`Telegram update замечен повторно: ${item.transport_seen}`);
+  }
   if (item.source_record) details.push(`Запись EAVC № ${item.source_record}`);
   if (item.source_at) details.push(`время перехвата: ${formatDate(item.source_at)}`);
   if (item.source_mode === 'deferred') details.push('отложенный режим');
@@ -430,6 +459,7 @@ function historyDetails(item) {
 }
 
 function historyContent(item) {
+  if (item.content_kind === 'transport') return item.content_note || item.reason || 'Техническая классификация транспорта.';
   if (!item.content_ready) {
     return item.content_note || 'Содержимое этого пакета нельзя безопасно показать.';
   }
@@ -440,6 +470,7 @@ function historyContent(item) {
 }
 
 function historyContentLabel(item) {
+  if (item.content_kind === 'transport') return 'Почему сообщение учтено или проигнорировано';
   if (item.content_kind === 'text') return 'Клиент передал текст';
   if (item.content_kind === 'empty_text') return 'Клиент передал перехват без текста';
   return 'Содержимое не подтверждено';
@@ -465,6 +496,9 @@ function openHistoryItem(index) {
     historyMetaEntry('Время перехвата', item.source_at ? formatDate(item.source_at) : ''),
     historyMetaEntry('Принято / обработано', formatDate(item.occurred_at)),
     historyMetaEntry('Запись EAVC', item.source_record ? `№ ${item.source_record}` : ''),
+    historyMetaEntry('UUID записи EAVC', item.source_uuid),
+    historyMetaEntry('Версия записи EAVC', item.source_version),
+    historyMetaEntry('Отпечаток содержимого', item.content_digest),
     historyMetaEntry('Режим', item.source_mode === 'deferred' ? 'Отложенный' : (item.source_mode ? 'Обычный' : '')),
     historyMetaEntry('Изменил в EAVC', item.updated_by),
     historyMetaEntry('Попытки доставки', item.attempts || ''),
@@ -472,12 +506,17 @@ function openHistoryItem(index) {
     historyMetaEntry('Что передал Клиент', historyContentLabel(item)),
     historyMetaEntry('ID Telegram-темы', item.telegram_thread_id || ''),
     historyMetaEntry('Telegram message_id', (item.telegram_message_ids || []).join(', ')),
-    historyMetaEntry('ID события', item.id)
+    historyMetaEntry('Входящий Telegram message_id', item.transport_message_id || ''),
+    historyMetaEntry('Telegram update_id', item.transport_update_id || ''),
+    historyMetaEntry('Тип транспортного сообщения', item.transport_kind),
+    historyMetaEntry('Результат транспорта', item.transport_outcome ? transportOutcomeLabel(item.transport_outcome) : ''),
+    historyMetaEntry('Влияние на «Получено»', item.transport_outcome ? (item.counted ? 'Да — создан новый перехват' : 'Нет') : ''),
+    historyMetaEntry('Код трассировки', item.id)
   ].join('');
   const contentSection = $('historyItemContent').closest('.history-item-content');
   contentSection.classList.toggle('unavailable', !item.content_ready);
-  $('historyItemContentTitle').textContent = item.content_ready ? 'Текст из EAVC' : 'Почему содержимое недоступно';
-  $('historyItemContentType').textContent = item.content_kind === 'text' ? 'Текст' : (item.content_kind === 'empty_text' ? 'Без текста' : 'Недоступно');
+  $('historyItemContentTitle').textContent = item.content_kind === 'transport' ? 'Классификация сообщения' : (item.content_ready ? 'Текст из EAVC' : 'Почему содержимое недоступно');
+  $('historyItemContentType').textContent = item.content_kind === 'text' ? 'Текст' : (item.content_kind === 'empty_text' ? 'Без текста' : (item.content_kind === 'transport' ? 'Транспорт' : 'Недоступно'));
   $('historyItemContent').textContent = historyContent(item);
   const telegramURLs = item.telegram_message_urls || [];
   const telegramIDs = item.telegram_message_ids || [];
@@ -526,7 +565,7 @@ function renderHistory() {
     : items.map((item, index) => {
       const route = historyKind === 'rejected'
         ? item.destination
-        : [item.client_name, item.destination].filter(Boolean).join(' → ');
+        : (historyKind === 'transport' ? transportOutcomeLabel(item.transport_outcome) : [item.client_name, item.destination].filter(Boolean).join(' → '));
       return `<article class="history-row">
 		<strong>${escapeHTML(item.unit_name || item.client_name || 'Пакет без названия')}</strong><span>${escapeHTML(route || historyStateLabel(item.state))}</span><time>${formatDate(item.occurred_at)}</time>
 		<p>${escapeHTML(historyDetails(item))}</p>

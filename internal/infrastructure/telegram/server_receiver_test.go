@@ -17,6 +17,7 @@ import (
 func TestServerReceiverRejectsUnknownBotBeforeDownload(t *testing.T) {
 	t.Parallel()
 	var downloads atomic.Int32
+	var observations []application.TransportObservation
 	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch {
 		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
@@ -47,6 +48,7 @@ func TestServerReceiverRejectsUnknownBotBeforeDownload(t *testing.T) {
 	receiver := ServerReceiver{
 		API: client, ChatID: -1001, MaxBytes: 1024,
 		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return false, nil },
+		Observe:   func(item application.TransportObservation) { observations = append(observations, item) },
 	}
 	packets, next, err := receiver.Packets(context.Background(), 0)
 	if err != nil || len(packets) != 0 || next != 8 {
@@ -54,6 +56,64 @@ func TestServerReceiverRejectsUnknownBotBeforeDownload(t *testing.T) {
 	}
 	if downloads.Load() != 0 {
 		t.Fatal("сервер запросил файл неизвестного бота")
+	}
+	if len(observations) != 1 || observations[0].Outcome != "ignored_unauthorized" || observations[0].MessageID != 15 {
+		t.Fatalf("отказ неизвестного бота не объяснён в журнале: %#v", observations)
+	}
+}
+
+// Текст, картинка и файл человека в группе обмена классифицируются, но не
+// превращаются в рабочий пакет и не требуют скачивания.
+func TestServerReceiverAuditsHumanMessagesWithoutCountingThem(t *testing.T) {
+	t.Parallel()
+	var downloads atomic.Int32
+	var observations []application.TransportObservation
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": []any{
+				map[string]any{"update_id": 1, "message": map[string]any{
+					"message_id": 101, "date": time.Now().Unix(),
+					"from": map[string]any{"id": 5, "is_bot": false, "username": "operator"},
+					"chat": map[string]any{"id": -1001, "type": "supergroup"}, "text": "ручной текст",
+				}},
+				map[string]any{"update_id": 2, "message": map[string]any{
+					"message_id": 102, "date": time.Now().Unix(),
+					"from":     map[string]any{"id": 5, "is_bot": false, "username": "operator"},
+					"chat":     map[string]any{"id": -1001, "type": "supergroup"},
+					"document": map[string]any{"file_id": "photo", "file_name": "photo.jpg", "file_size": 100},
+				}},
+				map[string]any{"update_id": 3, "edited_message": map[string]any{
+					"message_id": 103, "date": time.Now().Unix(),
+					"from": map[string]any{"id": 5, "is_bot": false, "username": "operator"},
+					"chat": map[string]any{"id": -1001, "type": "supergroup"}, "text": "отредактированный текст",
+				}},
+			}})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			downloads.Add(1)
+			http.Error(writer, "не должен скачиваться", http.StatusInternalServerError)
+		default:
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+		}
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := ServerReceiver{
+		API: client, ChatID: -1001, MaxBytes: 1024,
+		Observe: func(item application.TransportObservation) { observations = append(observations, item) },
+	}
+	packets, next, err := receiver.Packets(context.Background(), 0)
+	if err != nil || len(packets) != 0 || next != 4 || downloads.Load() != 0 {
+		t.Fatalf("чужие сообщения затронули транспорт: packets=%#v next=%d downloads=%d err=%v",
+			packets, next, downloads.Load(), err)
+	}
+	if len(observations) != 3 || observations[0].Outcome != "ignored_non_transport" ||
+		observations[1].Outcome != "ignored_non_transport" ||
+		observations[2].MessageKind != "user_text_edited" {
+		t.Fatalf("чужие сообщения не классифицированы: %#v", observations)
 	}
 }
 

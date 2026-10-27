@@ -187,7 +187,15 @@ async function loadQueuePage(offset = 0) {
       <p>${escapeHTML(item.reason)}</p>
       <p class="content-note">${escapeHTML(item.content_note || (item.content ? 'Текст перехвата, прочитанный Клиентом из EAVC.' : 'EAVC передал запись без текста.'))}</p>
       <pre>${escapeHTML(item.content_kind === 'text' ? item.content : 'Текст перехвата отсутствует')}</pre>
-      <small class="event-id">ID пакета: ${escapeHTML(item.event_id)}</small>
+      <dl class="queue-trace">
+        <div><dt>Код трассировки</dt><dd>${escapeHTML(item.event_id)}</dd></div>
+        <div><dt>Запись EAVC</dt><dd>${escapeHTML(item.source_record || 'не указана')}</dd></div>
+        <div><dt>UUID записи EAVC</dt><dd>${escapeHTML(item.source_uuid || 'не указан')}</dd></div>
+        <div><dt>Версия записи</dt><dd>${escapeHTML(item.source_version || 'не указана')}</dd></div>
+        <div><dt>Отпечаток содержимого</dt><dd>${escapeHTML(item.content_digest || 'не указан')}</dd></div>
+        <div><dt>Попытки передачи</dt><dd>${escapeHTML(item.attempts)}</dd></div>
+        <div><dt>Telegram message_id служебного пакета</dt><dd>${escapeHTML(item.transport_message_id || 'ещё не присвоен')}</dd></div>
+      </dl>
     </article>`).join('');
   }
   const current = data.total ? Math.floor(data.offset / data.limit) + 1 : 1;

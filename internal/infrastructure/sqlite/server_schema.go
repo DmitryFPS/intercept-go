@@ -159,3 +159,30 @@ CREATE INDEX client_connection_incidents_time_idx
 const serverDeliveryResultMigration = `
 ALTER TABLE delivery_jobs ADD COLUMN result_json BLOB NOT NULL DEFAULT X'';
 `
+
+// Журнал транспорта отделён от рабочих счётчиков и очередей. Повтор одного
+// Telegram update обновляет ту же строку, а не создаёт бесконечную историю.
+const serverTransportAuditMigration = `
+CREATE TABLE transport_audit (
+	chat_id INTEGER NOT NULL,
+	message_id INTEGER NOT NULL,
+	update_id INTEGER NOT NULL,
+	thread_id INTEGER NOT NULL,
+	sender_bot_id INTEGER NOT NULL,
+	sender_bot_username TEXT NOT NULL,
+	message_kind TEXT NOT NULL,
+	outcome TEXT NOT NULL,
+	reason TEXT NOT NULL DEFAULT '',
+	event_id TEXT NOT NULL DEFAULT '',
+	client_id TEXT NOT NULL DEFAULT '',
+	counted INTEGER NOT NULL DEFAULT 0 CHECK(counted IN (0,1)),
+	state_rank INTEGER NOT NULL DEFAULT 0,
+	seen_count INTEGER NOT NULL DEFAULT 1,
+	sent_at TEXT NOT NULL,
+	first_seen_at TEXT NOT NULL,
+	last_seen_at TEXT NOT NULL,
+	PRIMARY KEY(chat_id, message_id)
+);
+CREATE INDEX transport_audit_time_idx ON transport_audit(last_seen_at DESC);
+CREATE INDEX transport_audit_event_idx ON transport_audit(event_id) WHERE event_id<>'';
+`

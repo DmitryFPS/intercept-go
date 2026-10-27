@@ -135,7 +135,7 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 				message = "событие EAVC не будет отправлено из-за срока"
 			}
 			service.Logger.Log(ctx, level, message,
-				"event_id", event.ID, "source_uuid", event.Source.UUID,
+				"event_id", event.ID, "trace_id", event.ID, "source_uuid", event.Source.UUID,
 				"source_id", event.Source.ID, "position", event.Position.UnitName,
 				"source_at", event.SourceAt, "expires_at", event.ExpiresAt,
 				"reason", event.FreshnessIssue, "content_kind", eventContentKind(event),
@@ -228,7 +228,7 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 			}
 			if service.Logger != nil {
 				service.Logger.Warn("передача события не удалась, назначен повтор",
-					"event_id", event.ID, "attempt", queued.Attempts+1,
+					"event_id", event.ID, "trace_id", event.ID, "attempt", queued.Attempts+1,
 					"next_attempt_at", next, "error", err,
 				)
 			}
@@ -239,7 +239,8 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 		}
 		if service.Logger != nil {
 			service.Logger.Info("событие загружено в транспортную группу",
-				"event_id", event.ID, "telegram_message_id", messageID,
+				"event_id", event.ID, "trace_id", event.ID,
+				"telegram_message_id", messageID, "transport_message_id", messageID,
 				"attempt", queued.Attempts+1,
 			)
 		}
@@ -292,7 +293,8 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (Ackn
 		result.Events++
 		if service.Logger != nil {
 			service.Logger.Info("получено подтверждение сервера",
-				"event_id", acknowledgement.EventID, "status", acknowledgement.Status,
+				"event_id", acknowledgement.EventID, "trace_id", acknowledgement.EventID,
+				"status", acknowledgement.Status,
 				"accepted_at", acknowledgement.AcceptedAt,
 			)
 		}

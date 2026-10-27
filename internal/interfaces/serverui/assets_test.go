@@ -41,7 +41,7 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	}
 	html := string(index)
 	javascript := string(application)
-	for _, kind := range []string{"clients", "received", "pending", "delivered", "expired", "rejected"} {
+	for _, kind := range []string{"clients", "received", "pending", "delivered", "expired", "rejected", "transport"} {
 		if !strings.Contains(html, `data-history="`+kind+`"`) {
 			t.Errorf("карточка %q не открывает историю", kind)
 		}
@@ -62,6 +62,11 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	for _, fragment := range []string{"telegram_message_ids", "telegram_message_urls", "Telegram message_id", "Открыть сообщение"} {
 		if !strings.Contains(javascript, fragment) {
 			t.Errorf("подробности доставки не показывают Telegram ID: нет %q", fragment)
+		}
+	}
+	for _, fragment := range []string{"Код трассировки", "transport_message_id", "transportOutcomeLabel", "рабочие счётчики не изменил"} {
+		if !strings.Contains(javascript, fragment) {
+			t.Errorf("сквозная трассировка не показана: нет %q", fragment)
 		}
 	}
 	for _, fragment := range []string{"item.content_ready", "historyContent(item)", "historyContentLabel(item)", "data-history-item", "Текст из EAVC", "Клиент передал перехват без текста"} {

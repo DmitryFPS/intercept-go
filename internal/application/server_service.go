@@ -32,6 +32,26 @@ type IncomingPacket struct {
 	ProbeMAC          string
 }
 
+// TransportObservation описывает только технический след Telegram-обновления.
+// Текст, подпись и содержимое пользовательских файлов сюда не попадают.
+type TransportObservation struct {
+	UpdateID          int64
+	MessageID         int64
+	ChatID            int64
+	ThreadID          int64
+	SenderBotID       int64
+	SenderBotUsername string
+	MessageKind       string
+	Outcome           string
+	Reason            string
+	EventID           string
+	ClientID          string
+	Counted           bool
+	Rank              int
+	SentAt            time.Time
+	ObservedAt        time.Time
+}
+
 // ErrClientNotFound позволяет отличить неизвестную точку от временного сбоя
 // реестра. Неизвестный отправитель отклоняется окончательно, а ошибка БД
 // должна оставить транспортный пакет для следующей попытки.
@@ -58,6 +78,7 @@ func IsPermanentPacketError(err error) bool {
 // PacketResult нужен приёмнику для безопасного подтверждения клиенту.
 type PacketResult struct {
 	EventID            string
+	ClientID           string
 	ClientBotUsername  string
 	AcknowledgementKey []byte
 	Accepted           bool
@@ -133,7 +154,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	}
 	if known {
 		return PacketResult{
-			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
+			EventID: event.ID, ClientID: client.ID, ClientBotUsername: client.SenderBotUsername,
 			AcknowledgementKey: append([]byte(nil), client.Key...),
 			Status:             "accepted", ContentKind: eventContentKind(event),
 			ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
@@ -142,7 +163,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	}
 	if event.Expired(now) {
 		return PacketResult{
-			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
+			EventID: event.ID, ClientID: client.ID, ClientBotUsername: client.SenderBotUsername,
 			AcknowledgementKey: append([]byte(nil), client.Key...),
 			Status:             "expired", ContentKind: eventContentKind(event),
 			ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
@@ -170,7 +191,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 		return PacketResult{}, err
 	}
 	return PacketResult{
-		EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
+		EventID: event.ID, ClientID: client.ID, ClientBotUsername: client.SenderBotUsername,
 		AcknowledgementKey: append([]byte(nil), client.Key...),
 		Accepted:           accepted, Status: "accepted", ContentKind: eventContentKind(event),
 		ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
@@ -271,7 +292,7 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 	if job.Event.Expired(now) {
 		if service.Logger != nil {
 			service.Logger.Warn("доставка отменена: событие старше допустимого срока",
-				"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+				"event_id", job.Event.ID, "trace_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
 				"position", job.Event.Position.UnitName, "expires_at", job.Event.ExpiresAt,
 			)
 		}
@@ -283,7 +304,7 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 	if !exists {
 		reason := "для направления не настроен адаптер доставки"
 		if service.Logger != nil {
-			service.Logger.Error(reason, "event_id", job.Event.ID,
+			service.Logger.Error(reason, "event_id", job.Event.ID, "trace_id", job.Event.ID,
 				"destination_id", job.Delivery.Destination.ID)
 		}
 		return false, service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
@@ -304,7 +325,7 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 			}
 			if service.Logger != nil {
 				service.Logger.Error("доставка окончательно невозможна, очередь продолжена",
-					"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+					"event_id", job.Event.ID, "trace_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
 					"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts+1,
 					"error", err,
 				)
@@ -318,7 +339,7 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 		}
 		if service.Logger != nil {
 			service.Logger.Warn("доставка не удалась, назначен повтор",
-				"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+				"event_id", job.Event.ID, "trace_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
 				"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts+1,
 				"next_attempt_at", next, "error", err,
 			)
@@ -333,7 +354,7 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 		if receiptErr != nil {
 			if service.Logger != nil {
 				service.Logger.Warn("доставка выполнена, но внешний ID прочитать не удалось",
-					"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+					"event_id", job.Event.ID, "trace_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
 					"error", receiptErr)
 			}
 		} else {
@@ -353,9 +374,9 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 	}
 	if service.Logger != nil {
 		fields := []any{
-			"event_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+			"event_id", job.Event.ID, "trace_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
 			"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts + 1,
-			"telegram_message_count", len(receipt.MessageIDs),
+			"telegram_message_count", len(receipt.MessageIDs), "final_message_ids", receipt.MessageIDs,
 		}
 		if len(receipt.MessageIDs) > 0 {
 			fields = append(fields, "telegram_message_id", receipt.MessageIDs[0])

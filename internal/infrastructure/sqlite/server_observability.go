@@ -50,31 +50,40 @@ type ConnectionIncident struct {
 // карантина содержимое намеренно недоступно: отклонённый пакет мог не пройти
 // проверку подписи и его нельзя выдавать за достоверный перехват.
 type ServerHistoryItem struct {
-	ID            string     `json:"id"`
-	ClientID      string     `json:"client_id,omitempty"`
-	ClientName    string     `json:"client_name,omitempty"`
-	UnitName      string     `json:"unit_name,omitempty"`
-	Frequency     string     `json:"frequency,omitempty"`
-	GroupCode     string     `json:"group_code,omitempty"`
-	DestinationID string     `json:"destination_id,omitempty"`
-	Destination   string     `json:"destination,omitempty"`
-	State         string     `json:"state"`
-	OccurredAt    time.Time  `json:"occurred_at"`
-	SourceAt      *time.Time `json:"source_at,omitempty"`
-	SourceRecord  int64      `json:"source_record,omitempty"`
-	SourceMode    string     `json:"source_mode,omitempty"`
-	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
-	Attempts      int        `json:"attempts,omitempty"`
-	Reason        string     `json:"reason,omitempty"`
-	UpdatedBy     string     `json:"updated_by,omitempty"`
-	Content       string     `json:"content,omitempty"`
-	ContentReady  bool       `json:"content_ready"`
-	ContentKind   string     `json:"content_kind"`
-	ContentNote   string     `json:"content_note,omitempty"`
-	TelegramChat  string     `json:"telegram_chat_id,omitempty"`
-	TelegramTopic int64      `json:"telegram_thread_id,omitempty"`
-	TelegramIDs   []int64    `json:"telegram_message_ids,omitempty"`
-	TelegramURLs  []string   `json:"telegram_message_urls,omitempty"`
+	ID                 string     `json:"id"`
+	ClientID           string     `json:"client_id,omitempty"`
+	ClientName         string     `json:"client_name,omitempty"`
+	UnitName           string     `json:"unit_name,omitempty"`
+	Frequency          string     `json:"frequency,omitempty"`
+	GroupCode          string     `json:"group_code,omitempty"`
+	DestinationID      string     `json:"destination_id,omitempty"`
+	Destination        string     `json:"destination,omitempty"`
+	State              string     `json:"state"`
+	OccurredAt         time.Time  `json:"occurred_at"`
+	SourceAt           *time.Time `json:"source_at,omitempty"`
+	SourceRecord       int64      `json:"source_record,omitempty"`
+	SourceUUID         string     `json:"source_uuid,omitempty"`
+	SourceVersion      string     `json:"source_version,omitempty"`
+	ContentDigest      string     `json:"content_digest,omitempty"`
+	SourceMode         string     `json:"source_mode,omitempty"`
+	NextAttemptAt      *time.Time `json:"next_attempt_at,omitempty"`
+	Attempts           int        `json:"attempts,omitempty"`
+	Reason             string     `json:"reason,omitempty"`
+	UpdatedBy          string     `json:"updated_by,omitempty"`
+	Content            string     `json:"content,omitempty"`
+	ContentReady       bool       `json:"content_ready"`
+	ContentKind        string     `json:"content_kind"`
+	ContentNote        string     `json:"content_note,omitempty"`
+	TelegramChat       string     `json:"telegram_chat_id,omitempty"`
+	TelegramTopic      int64      `json:"telegram_thread_id,omitempty"`
+	TelegramIDs        []int64    `json:"telegram_message_ids,omitempty"`
+	TelegramURLs       []string   `json:"telegram_message_urls,omitempty"`
+	TransportUpdateID  int64      `json:"transport_update_id,omitempty"`
+	TransportMessageID int64      `json:"transport_message_id,omitempty"`
+	TransportKind      string     `json:"transport_kind,omitempty"`
+	TransportOutcome   string     `json:"transport_outcome,omitempty"`
+	TransportSeen      int        `json:"transport_seen,omitempty"`
+	Counted            bool       `json:"counted"`
 }
 
 // ServerHistoryPage объединяет текущую связь и постраничную историю.
@@ -284,6 +293,12 @@ func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, o
 		page.Items, page.Total = items, total
 		return page, err
 	}
+	if kind == "transport" {
+		page.RetentionDays = 90
+		items, total, err := store.transportHistory(ctx, limit, offset, filter)
+		page.Items, page.Total = items, total
+		return page, err
+	}
 	if kind != "received" && kind != "pending" && kind != "delivered" && kind != "expired" {
 		return ServerHistoryPage{}, errors.New("неизвестный раздел истории")
 	}
@@ -484,6 +499,9 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 		if scanErr != nil {
 			return nil, 0, scanErr
 		}
+		if err := store.attachTransportTrace(ctx, &item); err != nil {
+			return nil, 0, err
+		}
 		if searchQuery != "" {
 			if !serverHistoryItemMatches(item, searchQuery) {
 				continue
@@ -528,6 +546,9 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 	item.Frequency = event.Position.Frequency
 	item.GroupCode = event.Position.GroupCode
 	item.SourceRecord = event.Source.ID
+	item.SourceUUID = event.Source.UUID
+	item.SourceVersion = event.Source.UpdatedAt
+	item.ContentDigest = event.ContentDigest
 	item.SourceMode = string(event.Mode)
 	item.UpdatedBy = event.UpdatedBy
 	item.Content = event.Content
@@ -597,6 +618,8 @@ func serverHistoryItemMatches(item ServerHistoryItem, query string) bool {
 		item.Frequency, item.GroupCode, item.DestinationID, item.Destination,
 		item.Reason, item.UpdatedBy, item.Content,
 		item.TelegramChat, fmt.Sprint(item.TelegramTopic), fmt.Sprint(item.TelegramIDs),
+		item.SourceUUID, item.SourceVersion, item.ContentDigest,
+		fmt.Sprint(item.TransportMessageID), fmt.Sprint(item.TransportUpdateID),
 		fmt.Sprintf("%d", item.SourceRecord),
 	}, " "))
 	return strings.Contains(searchable, query)
@@ -683,7 +706,7 @@ func (store *ServerStore) ClearHistory(ctx context.Context, kind string, now tim
 	if kind == "pending" {
 		return errors.New("ожидающие задания очищать нельзя: они должны быть доставлены или просрочены")
 	}
-	if kind != "clients" && kind != "received" && kind != "delivered" && kind != "expired" && kind != "rejected" {
+	if kind != "clients" && kind != "received" && kind != "delivered" && kind != "expired" && kind != "rejected" && kind != "transport" {
 		return errors.New("неизвестный раздел истории")
 	}
 	return store.SaveValue(ctx, historyPrefix+kind, stamp(now.UTC()))

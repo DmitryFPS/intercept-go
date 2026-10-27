@@ -181,9 +181,11 @@ type Message struct {
 
 // Update объединяет обычные сообщения и публикации каналов.
 type Update struct {
-	UpdateID    int64    `json:"update_id"`
-	Message     *Message `json:"message"`
-	ChannelPost *Message `json:"channel_post"`
+	UpdateID          int64    `json:"update_id"`
+	Message           *Message `json:"message"`
+	ChannelPost       *Message `json:"channel_post"`
+	EditedMessage     *Message `json:"edited_message"`
+	EditedChannelPost *Message `json:"edited_channel_post"`
 }
 
 // File содержит путь, выданный Telegram после проверки file_id.
@@ -368,7 +370,8 @@ func (client *Client) TestTopic(ctx context.Context, chatID, threadID int64) err
 func (client *Client) GetUpdates(ctx context.Context, offset int64, timeoutSeconds int) ([]Update, error) {
 	var updates []Update
 	err := client.callJSON(ctx, "getUpdates", map[string]any{
-		"offset": offset, "timeout": timeoutSeconds, "allowed_updates": []string{"message", "channel_post"},
+		"offset": offset, "timeout": timeoutSeconds,
+		"allowed_updates": []string{"message", "channel_post", "edited_message", "edited_channel_post"},
 	}, &updates)
 	return updates, err
 }

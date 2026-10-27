@@ -37,15 +37,21 @@ type ClientStats struct {
 // QueueEvent описывает сообщение очереди для локального экрана точки.
 // Токены, ключи и транспортные идентификаторы сюда намеренно не входят.
 type QueueEvent struct {
-	EventID     string            `json:"event_id"`
-	Position    string            `json:"position"`
-	SourceAt    time.Time         `json:"source_at"`
-	StatusAt    time.Time         `json:"status_at"`
-	Reason      string            `json:"reason"`
-	Content     string            `json:"content"`
-	ContentKind string            `json:"content_kind"`
-	ContentNote string            `json:"content_note"`
-	Mode        domain.SourceMode `json:"mode"`
+	EventID            string            `json:"event_id"`
+	Position           string            `json:"position"`
+	SourceAt           time.Time         `json:"source_at"`
+	StatusAt           time.Time         `json:"status_at"`
+	Reason             string            `json:"reason"`
+	Content            string            `json:"content"`
+	ContentKind        string            `json:"content_kind"`
+	ContentNote        string            `json:"content_note"`
+	Mode               domain.SourceMode `json:"mode"`
+	SourceRecord       int64             `json:"source_record,omitempty"`
+	SourceUUID         string            `json:"source_uuid,omitempty"`
+	SourceVersion      string            `json:"source_version,omitempty"`
+	ContentDigest      string            `json:"content_digest,omitempty"`
+	Attempts           int               `json:"attempts"`
+	TransportMessageID *int64            `json:"transport_message_id,omitempty"`
 }
 
 // EventsPage возвращает одну страницу выбранного состояния очереди. Содержимое
@@ -65,7 +71,8 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 	}
 	rows, err := queue.db.QueryContext(ctx, `
 		SELECT event_id, payload_json,
-		       COALESCE(expired_at, acknowledged_at, uploaded_at, created_at), last_error
+		       COALESCE(expired_at, acknowledged_at, uploaded_at, created_at), last_error,
+		       attempts, telegram_message_id
 		FROM client_events WHERE state=?
 		ORDER BY COALESCE(expired_at, acknowledged_at, uploaded_at, created_at) DESC, event_id DESC
 		LIMIT ? OFFSET ?`, state, limit, offset)
@@ -76,8 +83,10 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 	result := make([]QueueEvent, 0, limit)
 	for rows.Next() {
 		var eventID, statusText, reason string
+		var attempts int
+		var transportMessageID sql.NullInt64
 		var protected []byte
-		if err := rows.Scan(&eventID, &protected, &statusText, &reason); err != nil {
+		if err := rows.Scan(&eventID, &protected, &statusText, &reason, &attempts, &transportMessageID); err != nil {
 			return nil, 0, fmt.Errorf("прочитать сообщение очереди: %w", err)
 		}
 		plain, err := unprotectDatabaseValue(protected)
@@ -97,12 +106,23 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 			EventID: eventID, Position: event.Position.UnitName, SourceAt: event.SourceAt,
 			StatusAt: statusAt, Reason: reason, Content: event.Content,
 			ContentKind: kind, ContentNote: note, Mode: event.Mode,
+			SourceRecord: event.Source.ID, SourceUUID: event.Source.UUID,
+			SourceVersion: event.Source.UpdatedAt, ContentDigest: event.ContentDigest,
+			Attempts: attempts, TransportMessageID: nullableInt64(transportMessageID),
 		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, fmt.Errorf("завершить чтение сообщений очереди: %w", err)
 	}
 	return result, total, nil
+}
+
+func nullableInt64(value sql.NullInt64) *int64 {
+	if !value.Valid {
+		return nil
+	}
+	result := value.Int64
+	return &result
 }
 
 func clientQueueContentDescription(content string) (string, string) {

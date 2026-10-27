@@ -152,8 +152,8 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	}
 	if recovered && destination.Logger != nil {
 		destination.Logger.Info("отсутствующее Telegram-сообщение автоматически восстановлено",
-			"event_id", event.ID, "item_key", itemKey, "chat_id", destination.ChatID,
-			"thread_id", threadID, "message_ids", messageIDs,
+			"event_id", event.ID, "trace_id", event.ID, "item_key", itemKey, "chat_id", destination.ChatID,
+			"thread_id", threadID, "message_ids", messageIDs, "final_message_ids", messageIDs,
 		)
 	}
 	if migratedLegacy {
@@ -288,8 +288,8 @@ func (destination *Destination) upsertBlock(
 				// предыдущая попытка успела выполниться до разрыва связи.
 				if destination.Logger != nil {
 					destination.Logger.Info("Telegram-сообщение уже содержит исправление",
-						"event_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
-						"thread_id", threadID, "message_id", ids[index],
+						"event_id", eventID, "trace_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
+						"thread_id", threadID, "message_id", ids[index], "final_message_id", ids[index],
 					)
 				}
 				continue
@@ -297,8 +297,8 @@ func (destination *Destination) upsertBlock(
 			if missingEditError(err) {
 				if destination.Logger != nil {
 					destination.Logger.Warn("Telegram-сообщение отсутствует; выполняется автоматическое восстановление",
-						"event_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
-						"thread_id", threadID, "message_id", ids[index], "error", err,
+						"event_id", eventID, "trace_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
+						"thread_id", threadID, "message_id", ids[index], "final_message_id", ids[index], "error", err,
 					)
 				}
 				// Если запись была разбита на части, собираем её заново целиком.
@@ -322,9 +322,9 @@ func (destination *Destination) upsertBlock(
 			}
 			if destination.Logger != nil {
 				destination.Logger.Warn("Telegram больше не разрешает изменить старое сообщение",
-					"event_id", eventID, "item_key", itemKey,
+					"event_id", eventID, "trace_id", eventID, "item_key", itemKey,
 					"chat_id", destination.ChatID, "thread_id", threadID,
-					"message_id", ids[index], "error", err,
+					"message_id", ids[index], "final_message_id", ids[index], "error", err,
 				)
 			}
 			// Новое сообщение намеренно не создаётся: иначе исправление старого
@@ -336,8 +336,8 @@ func (destination *Destination) upsertBlock(
 		}
 		if destination.Logger != nil {
 			destination.Logger.Info("Telegram-сообщение отредактировано",
-				"event_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
-				"thread_id", threadID, "message_id", ids[index],
+				"event_id", eventID, "trace_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
+				"thread_id", threadID, "message_id", ids[index], "final_message_id", ids[index],
 			)
 		}
 	}
@@ -363,8 +363,8 @@ func (destination *Destination) upsertBlock(
 		ids = append(ids, message.MessageID)
 		if destination.Logger != nil {
 			destination.Logger.Info("Telegram-сообщение создано",
-				"event_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
-				"thread_id", threadID, "message_id", message.MessageID,
+				"event_id", eventID, "trace_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
+				"thread_id", threadID, "message_id", message.MessageID, "final_message_id", message.MessageID,
 			)
 		}
 		// Сохраняем каждый успешно созданный фрагмент немедленно. Если связь

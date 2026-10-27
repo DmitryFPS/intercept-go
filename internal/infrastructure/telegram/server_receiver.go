@@ -24,6 +24,9 @@ type ServerReceiver struct {
 	// Discard передаёт удаление служебного файла владельцу долговечной очереди
 	// очистки. Без обработчика сохраняется совместимый однократный вызов API.
 	Discard func(context.Context, int64)
+	// Observe неблокирующе передаёт техническую классификацию владельцу журнала.
+	// Ошибка журнала не должна менять приём или продвижение Telegram offset.
+	Observe func(application.TransportObservation)
 }
 
 // Packets возвращает пакеты и следующее безопасное смещение Telegram.
@@ -39,17 +42,60 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			next = update.UpdateID + 1
 		}
 		message := update.Message
+		edited := false
 		if message == nil {
 			message = update.ChannelPost
 		}
-		if message == nil || message.Chat.ID != receiver.ChatID || message.Document == nil || message.From == nil {
+		if message == nil {
+			message, edited = update.EditedMessage, update.EditedMessage != nil
+		}
+		if message == nil {
+			message, edited = update.EditedChannelPost, update.EditedChannelPost != nil
+		}
+		if message == nil || message.Chat.ID != receiver.ChatID {
+			continue
+		}
+		observation := receiver.observation(update.UpdateID, message)
+		if message.From == nil {
+			observation.MessageKind, observation.Outcome, observation.Reason, observation.Rank =
+				"unknown", "ignored_missing_sender", "Telegram не указал отправителя", 100
+			receiver.observe(observation)
+			continue
+		}
+		if message.Document == nil {
+			observation.MessageKind = "user_media"
+			if strings.TrimSpace(message.Text) != "" || strings.TrimSpace(message.Caption) != "" {
+				observation.MessageKind = "user_text"
+			}
+			if message.From.IsBot {
+				observation.MessageKind = "bot_non_transport"
+			}
+			if edited {
+				observation.MessageKind += "_edited"
+			}
+			observation.Outcome, observation.Reason, observation.Rank =
+				"ignored_non_transport", "Не является служебным пакетом EAVC Connect", 100
+			receiver.observe(observation)
 			continue
 		}
 		filename := strings.ToLower(message.Document.FileName)
 		if !message.From.IsBot || (!strings.HasSuffix(filename, ".icevent") && !strings.HasSuffix(filename, ".icprobe")) {
+			observation.MessageKind, observation.Outcome, observation.Reason, observation.Rank =
+				"other_document", "ignored_non_transport", "Файл не является пакетом зарегистрированного бота EAVC Connect", 100
+			if edited {
+				observation.MessageKind = "other_document_edited"
+			}
+			receiver.observe(observation)
 			continue
 		}
+		observation.MessageKind = "event_packet"
+		if strings.HasSuffix(filename, ".icprobe") {
+			observation.MessageKind = "probe_packet"
+		}
 		if message.Document.FileSize <= 0 || message.Document.FileSize > receiver.MaxBytes {
+			observation.Outcome, observation.Reason, observation.Rank =
+				"ignored_invalid_size", "Недопустимый размер служебного файла", 100
+			receiver.observe(observation)
 			continue
 		}
 		packet := application.IncomingPacket{
@@ -62,9 +108,15 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 		if receiver.Authorize != nil {
 			allowed, err := receiver.Authorize(ctx, packet)
 			if err != nil {
+				observation.Outcome, observation.Reason, observation.Rank =
+					"authorization_retry", "Временная ошибка проверки отправителя", 20
+				receiver.observe(observation)
 				return packets, offset, fmt.Errorf("проверить отправителя пакета: %w", err)
 			}
 			if !allowed {
+				observation.Outcome, observation.Reason, observation.Rank =
+					"ignored_unauthorized", "Бот или тема не зарегистрированы как рабочая точка", 100
+				receiver.observe(observation)
 				// Неизвестный бот не заставит сервер скачивать произвольные файлы.
 				receiver.discardPacket(ctx, message.MessageID)
 				continue
@@ -73,17 +125,29 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 		file, err := receiver.API.GetFile(ctx, message.Document.FileID)
 		if err != nil {
 			if permanentTransportFileError(err) {
+				observation.Outcome, observation.Reason, observation.Rank =
+					"unavailable_file", "Telegram больше не отдаёт служебный файл; Клиент повторит пакет", 100
+				receiver.observe(observation)
 				receiver.skipUnavailableFile(ctx, packet, err)
 				continue
 			}
+			observation.Outcome, observation.Reason, observation.Rank =
+				"download_retry", "Временная ошибка получения служебного файла", 20
+			receiver.observe(observation)
 			return packets, offset, fmt.Errorf("получить пакет Telegram: %w", err)
 		}
 		payload, err := receiver.API.DownloadFile(ctx, file.FilePath, receiver.MaxBytes)
 		if err != nil {
 			if permanentTransportFileError(err) {
+				observation.Outcome, observation.Reason, observation.Rank =
+					"unavailable_file", "Telegram больше не отдаёт служебный файл; Клиент повторит пакет", 100
+				receiver.observe(observation)
 				receiver.skipUnavailableFile(ctx, packet, err)
 				continue
 			}
+			observation.Outcome, observation.Reason, observation.Rank =
+				"download_retry", "Временная ошибка скачивания служебного файла", 20
+			receiver.observe(observation)
 			return packets, offset, err
 		}
 		packet.Payload = payload
@@ -94,11 +158,17 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			if err := decoder.Decode(&probe); err != nil || probe.Schema != probeSchema ||
 				strings.TrimSpace(probe.ClientID) == "" || !validProbeID(probe.ProbeID) ||
 				strings.TrimSpace(probe.MAC) == "" {
+				observation.Outcome, observation.Reason, observation.Rank =
+					"invalid_probe", "Повреждённый или неподписанный контрольный пакет", 100
+				receiver.observe(observation)
 				receiver.discardPacket(ctx, message.MessageID)
 				continue
 			}
 			probeAt, err := time.Parse(time.RFC3339, probe.SentAt)
 			if err != nil {
+				observation.Outcome, observation.Reason, observation.Rank =
+					"invalid_probe", "Некорректное время контрольного пакета", 100
+				receiver.observe(observation)
 				receiver.discardPacket(ctx, message.MessageID)
 				continue
 			}
@@ -107,9 +177,31 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			packet.ProbeSentAt = probeAt.UTC()
 			packet.ProbeMAC = probe.MAC
 		}
+		observation.Outcome, observation.Reason, observation.Rank =
+			"awaiting_processing", "Служебный пакет передан обработчику", 10
+		receiver.observe(observation)
 		packets = append(packets, packet)
 	}
 	return packets, next, nil
+}
+
+func (receiver *ServerReceiver) observation(updateID int64, message *Message) application.TransportObservation {
+	item := application.TransportObservation{
+		UpdateID: updateID, MessageID: message.MessageID, ChatID: message.Chat.ID,
+		ThreadID: message.MessageThreadID, SentAt: time.Unix(message.Date, 0).UTC(),
+		ObservedAt: time.Now().UTC(),
+	}
+	if message.From != nil {
+		item.SenderBotID = message.From.ID
+		item.SenderBotUsername = message.From.Username
+	}
+	return item
+}
+
+func (receiver *ServerReceiver) observe(item application.TransportObservation) {
+	if receiver.Observe != nil {
+		receiver.Observe(item)
+	}
 }
 
 func permanentTransportFileError(err error) bool {

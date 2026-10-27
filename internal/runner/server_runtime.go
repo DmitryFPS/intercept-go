@@ -117,11 +117,16 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		Queue: server.Store, Gateways: gateways, Now: time.Now,
 		MaxConcurrent: 4, AttemptTimeout: 2 * time.Minute, Logger: server.Logger,
 	}
+	transportAudit := make(chan application.TransportObservation, 512)
 	var background sync.WaitGroup
-	background.Add(1)
+	background.Add(2)
 	go func() {
 		defer background.Done()
 		server.deliveryLoop(ctx, delivery)
+	}()
+	go func() {
+		defer background.Done()
+		server.transportAuditLoop(ctx, transportAudit)
 	}()
 	defer background.Wait()
 	for {
@@ -148,6 +153,14 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 				ctx, packet.SenderBotID, packet.SenderBotUsername, packet.ChatID, packet.ThreadID,
 			)
 		},
+	}
+	receiver.Observe = func(item application.TransportObservation) {
+		select {
+		case transportAudit <- item:
+		default:
+			server.Logger.Warn("журнал транспорта переполнен; рабочая обработка продолжается",
+				"transport_message_id", item.MessageID, "outcome", item.Outcome)
+		}
 	}
 	// Даже файлы, отброшенные до расшифровки (исчезнувшие, чужие или
 	// повреждённые), очищаются через ту же долговечную очередь, что и принятые.
@@ -195,6 +208,8 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 					client.ChatID == packet.ChatID && client.ThreadID == packet.ThreadID &&
 					telegram.VerifyProbe(packet, client.Key) && recentTransportPacket(packet.SentAt, time.Now().UTC())
 				if !valid {
+					receiver.Observe(transportObservation(packet, "probe_packet", "probe_rejected",
+						"Контрольный пакет не прошёл проверку подлинности или свежести", "", "", false, 200))
 					server.Logger.Warn("отклонён недостоверный контрольный пакет",
 						"sender_bot", packet.SenderBotUsername, "error", clientErr)
 					server.deleteTransportPacket(ctx, receiver, packet.MessageID)
@@ -212,17 +227,23 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 					server.Logger.Info("двусторонняя связь с точкой проверена",
 						"sender_bot", packet.SenderBotUsername, "thread_id", packet.ThreadID)
 				}
+				receiver.Observe(transportObservation(packet, "probe_packet", "probe_valid",
+					"Проверка связи выполнена; рабочие счётчики не изменены", "", packet.ProbeClientID, false, 200))
 				server.deleteTransportPacket(ctx, receiver, packet.MessageID)
 				continue
 			}
 			result, err := reception.Receive(ctx, packet)
 			if err != nil {
 				if !application.IsPermanentPacketError(err) {
+					receiver.Observe(transportObservation(packet, "event_packet", "processing_retry",
+						"Временная ошибка обработки; пакет будет прочитан повторно", "", "", false, 30))
 					server.Logger.Warn("временная ошибка приёма пакета; пакет сохранён для повтора",
 						"error", err, "sender_bot_id", packet.SenderBotID)
 					batchComplete = false
 					break
 				}
+				receiver.Observe(transportObservation(packet, "event_packet", "quarantined",
+					"Пакет окончательно отклонён и помещён в карантин", "", "", false, 200))
 				server.Logger.Warn("пакет помещён в карантин", "error", err,
 					"sender_bot_id", packet.SenderBotID, "content_kind", "unverified")
 				if quarantineErr := server.Store.Quarantine(ctx, packet, err.Error()); quarantineErr != nil {
@@ -233,6 +254,17 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 				server.deleteTransportPacket(ctx, receiver, packet.MessageID)
 				continue
 			}
+			outcome := "processed_duplicate"
+			reason := "Повтор уже принятого события; рабочие счётчики не изменены"
+			if result.Status == "expired" {
+				outcome = "event_expired"
+				reason = "Пакет получен после допустимого срока; в рабочие события не добавлен"
+			} else if result.Accepted {
+				outcome = "event_accepted"
+				reason = "Создано новое принятое событие"
+			}
+			receiver.Observe(transportObservation(packet, "event_packet", outcome, reason,
+				result.EventID, result.ClientID, result.Accepted, 200))
 			if result.Accepted && recentTransportPacket(packet.SentAt, time.Now().UTC()) {
 				if err := server.Store.RecordClientSignalByTransport(
 					ctx, packet.SenderBotID, packet.ChatID, packet.ThreadID, false, packet.SentAt,
@@ -241,7 +273,8 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 				}
 			}
 			server.Logger.Info("транспортный пакет обработан",
-				"event_id", result.EventID, "status", result.Status,
+				"event_id", result.EventID, "trace_id", result.EventID,
+				"transport_message_id", packet.MessageID, "status", result.Status,
 				"new_event", result.Accepted, "sender_bot", result.ClientBotUsername,
 				"content_kind", result.ContentKind, "content_chars", result.ContentChars,
 				"content_blocks", result.ContentBlocks, "source_mode", result.SourceMode,
@@ -251,7 +284,8 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 				if err := receiver.Acknowledge(
 					ctx, result.ClientBotUsername, result.EventID, result.Status, result.AcknowledgementKey,
 				); err != nil {
-					server.Logger.Warn("не удалось подтвердить событие", "event_id", result.EventID, "error", err)
+					server.Logger.Warn("не удалось подтвердить событие", "event_id", result.EventID,
+						"trace_id", result.EventID, "transport_message_id", packet.MessageID, "error", err)
 				} else {
 					recentAcknowledgements[result.EventID] = acknowledgedAt
 				}
@@ -268,6 +302,39 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		}
 		_ = server.Store.SaveValue(ctx, serverOffsetName, strconv.FormatInt(offset, 10))
 		server.retryTransportDeletions(ctx, receiver)
+	}
+}
+
+func transportObservation(
+	packet application.IncomingPacket, kind, outcome, reason, eventID, clientID string, counted bool, rank int,
+) application.TransportObservation {
+	return application.TransportObservation{
+		UpdateID: packet.UpdateID, MessageID: packet.MessageID, ChatID: packet.ChatID,
+		ThreadID: packet.ThreadID, SenderBotID: packet.SenderBotID,
+		SenderBotUsername: packet.SenderBotUsername, MessageKind: kind, Outcome: outcome,
+		Reason: reason, EventID: eventID, ClientID: clientID, Counted: counted, Rank: rank,
+		SentAt: packet.SentAt, ObservedAt: time.Now().UTC(),
+	}
+}
+
+func (server *Server) transportAuditLoop(ctx context.Context, observations <-chan application.TransportObservation) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case item := <-observations:
+			writeContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+			err := server.Store.RecordTransportObservation(writeContext, item)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				server.Logger.Warn("не удалось записать журнал транспорта; рабочая обработка продолжается",
+					"transport_message_id", item.MessageID, "outcome", item.Outcome, "error", err)
+			} else if err == nil && item.Rank >= 100 {
+				server.Logger.Info("транспортное сообщение классифицировано",
+					"trace_id", item.EventID, "transport_message_id", item.MessageID,
+					"outcome", item.Outcome, "counted", item.Counted)
+			}
+		}
 	}
 }
 
@@ -468,13 +535,21 @@ func (server *Server) serverMaintenanceLoop(ctx context.Context) {
 		)
 		if err != nil && ctx.Err() == nil {
 			server.Logger.Warn("не удалось очистить технические данные сервера", "error", err)
-		} else if result.Events+result.Rejected+result.Rules+result.Incidents > 0 {
+		}
+		transportRemoved, transportErr := server.Store.PurgeTransportAudit(ctx, now.Add(-serverRejectedRetention))
+		if transportErr != nil && ctx.Err() == nil {
+			server.Logger.Warn("не удалось ограничить журнал транспорта; рабочая обработка продолжается", "error", transportErr)
+		} else {
+			result.Transport = transportRemoved
+		}
+		if err == nil && result.Events+result.Rejected+result.Rules+result.Incidents+result.Transport > 0 {
 			if err := server.Store.Compact(ctx); err != nil && ctx.Err() == nil {
 				server.Logger.Warn("не удалось уплотнить базу сервера", "error", err)
 			} else {
 				server.Logger.Info("очищены технические данные сервера",
 					"events", result.Events, "rejected", result.Rejected,
-					"rules", result.Rules, "incidents", result.Incidents)
+					"rules", result.Rules, "incidents", result.Incidents,
+					"transport", result.Transport)
 			}
 		}
 		select {

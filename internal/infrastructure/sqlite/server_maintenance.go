@@ -26,6 +26,7 @@ type MaintenanceResult struct {
 	Rejected  int
 	Rules     int
 	Incidents int
+	Transport int
 }
 
 const serverTerminalEventLimit = 200000

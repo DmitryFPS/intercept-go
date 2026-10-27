@@ -8,7 +8,7 @@ import (
 )
 
 func TestDiagnosticLogRedactsOperationalIdentifiers(t *testing.T) {
-	source := strings.NewReader(`{"time":"2026-10-23T10:00:00Z","msg":"received","source_uuid":"secret-uuid","source_id":42,"event_id":"event-secret","destination_id":"telegram-secret","thread_id":42,"telegram_message_id":99,"sender_bot":"secret_bot","client_name":"Текстиль","client_number":"01","position":"1 мб 155 омбр","error":"open C:\\secret\\main.sqlite: denied","content_kind":"text","content_chars":321,"content_blocks":4,"source_mode":"normal","new_event":true,"status":{"invite_link":"https://t.me/+secret","eavc_path":"C:\\secret\\main.sqlite","queue":3}}` + "\n" +
+	source := strings.NewReader(`{"time":"2026-10-23T10:00:00Z","msg":"received","source_uuid":"secret-uuid","source_id":42,"event_id":"event-secret","trace_id":"trace-safe-123","transport_message_id":88,"destination_id":"telegram-secret","thread_id":42,"telegram_message_id":99,"sender_bot":"secret_bot","client_name":"Текстиль","client_number":"01","position":"1 мб 155 омбр","error":"open C:\\secret\\main.sqlite: denied","content_kind":"text","content_chars":321,"content_blocks":4,"source_mode":"normal","new_event":true,"status":{"invite_link":"https://t.me/+secret","eavc_path":"C:\\secret\\main.sqlite","queue":3}}` + "\n" +
 		`{"time":"2026-10-23T10:00:01Z","msg":"delivered","event_id":"event-secret","telegram_message_id":99}` + "\n")
 	var output bytes.Buffer
 	if err := copyRedactedDiagnosticLog(&output, source); err != nil {
@@ -26,6 +26,11 @@ func TestDiagnosticLogRedactsOperationalIdentifiers(t *testing.T) {
 	for _, expected := range []string{`"content_kind":"text"`, `"content_chars":321`, `"content_blocks":4`, `"source_mode":"normal"`, `"new_event":true`} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("диагностика потеряла характеристику содержимого %s: %s", expected, text)
+		}
+	}
+	for _, expected := range []string{`"trace_id":"trace-safe-123"`, `"transport_message_id":88`} {
+		if !strings.Contains(text, expected) {
+			t.Errorf("сквозной технический идентификатор потерян: %s", expected)
 		}
 	}
 	var records []map[string]any

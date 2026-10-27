@@ -155,6 +155,15 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 	if accepted, err := store.Accept(ctx, event, plan); err != nil || !accepted {
 		t.Fatalf("accept=%v err=%v", accepted, err)
 	}
+	if err := store.RecordTransportObservation(ctx, application.TransportObservation{
+		UpdateID: 501, MessageID: 601, ChatID: -1001, ThreadID: 10,
+		SenderBotID: 12, SenderBotUsername: "textile_bot", MessageKind: "event_packet",
+		Outcome: "event_accepted", Reason: "Создано новое принятое событие",
+		EventID: event.ID, ClientID: "textile", Counted: true, Rank: 100,
+		SentAt: time.Now().UTC(), ObservedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	receipt := application.DeliveryReceipt{
 		Kind: "telegram", ChatID: -1003943357633, ThreadID: 17, MessageIDs: []int64{701, 702},
 	}
@@ -170,7 +179,8 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 		!received.Items[0].ContentReady || received.Items[0].Content != event.Content ||
 		received.Items[0].Frequency != event.Position.Frequency ||
 		received.Items[0].GroupCode != event.Position.GroupCode ||
-		received.Items[0].UpdatedBy != event.UpdatedBy {
+		received.Items[0].UpdatedBy != event.UpdatedBy ||
+		received.Items[0].TransportMessageID != 601 || !received.Items[0].Counted {
 		t.Fatalf("история не содержит полезные сведения EAVC: %+v", received.Items)
 	}
 	delivered, err := store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC())
@@ -210,6 +220,43 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 	pending, err = store.HistoryPage(ctx, "pending", 30, 0, time.Now().UTC().Add(2*time.Second))
 	if err != nil || pending.Total != 1 {
 		t.Fatalf("очистка истории затронула очередь: %+v err=%v", pending, err)
+	}
+}
+
+func TestTransportAuditDeduplicatesAndCannotChangeWorkingCounters(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	ignored := application.TransportObservation{
+		UpdateID: 70, MessageID: 80, ChatID: -1001, ThreadID: 10,
+		SenderBotID: 5, SenderBotUsername: "operator", MessageKind: "user_media",
+		Outcome: "ignored_non_transport", Reason: "Не является служебным пакетом",
+		Rank: 100, SentAt: now, ObservedAt: now,
+	}
+	if err := store.RecordTransportObservation(ctx, ignored); err != nil {
+		t.Fatal(err)
+	}
+	ignored.ObservedAt = now.Add(time.Second)
+	if err := store.RecordTransportObservation(ctx, ignored); err != nil {
+		t.Fatal(err)
+	}
+	// Запоздалая ранняя стадия не должна стереть окончательную классификацию.
+	early := ignored
+	early.Outcome, early.Reason, early.Rank = "awaiting_processing", "ожидает", 10
+	if err := store.RecordTransportObservation(ctx, early); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.HistoryPage(ctx, "transport", 30, 0, now.Add(time.Minute))
+	if err != nil || page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("журнал транспорта: %+v err=%v", page, err)
+	}
+	item := page.Items[0]
+	if item.TransportOutcome != "ignored_non_transport" || item.TransportSeen != 3 || item.Counted {
+		t.Fatalf("повтор исказил классификацию: %+v", item)
+	}
+	stats, err := store.Stats(ctx)
+	if err != nil || stats.Events != 0 || stats.Delivered != 0 || stats.Rejected != 0 {
+		t.Fatalf("журнал транспорта изменил рабочие счётчики: %+v err=%v", stats, err)
 	}
 }
 
