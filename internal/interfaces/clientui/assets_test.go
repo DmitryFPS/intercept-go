@@ -67,6 +67,7 @@ func TestQueueHistoryExplainsContentAndRestoresClearButton(t *testing.T) {
 		"item.content_kind === 'text'",
 		"Текст перехвата отсутствует",
 		"Код трассировки",
+		"UUID временного блока",
 		"Telegram message_id служебного пакета",
 		"button.textContent = 'Очистка…'",
 		"button.textContent = label",

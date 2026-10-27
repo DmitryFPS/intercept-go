@@ -171,6 +171,49 @@ func TestDestinationBuildsOneDocumentPerBlockWithoutDuplicates(t *testing.T) {
 	}
 }
 
+func TestDestinationDeletesOnlyScopedWordBlock(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	folder := filepath.Join(root, "out")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	for _, name := range []string{"first.docx", "second.docx"} {
+		if err := os.WriteFile(filepath.Join(folder, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	statePath := filepath.Join(root, "state", "word.json")
+	if err := saveState(statePath, state{LastNumber: 2, Blocks: map[string]blockRecord{
+		"textile|source-1|block-a": {Number: 1, Filename: "first.docx"},
+		"textile|source-1|block-b": {Number: 2, Filename: "second.docx"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{TemplatePath: template, Folder: folder, StatePath: statePath}
+	event := domain.Event{
+		ClientID: "textile", Source: domain.SourceRecord{UUID: "source-1"},
+		SourceBlockUUID: "block-a", SourceBlockDeleted: true,
+		ActiveBlockUUIDs: []string{"block-b"},
+		Blocks:           []domain.ContentBlock{{UUID: "block-a", DeletedAt: "2026-10-27 19:00:00"}},
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(folder, "first.docx")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("документ удалённого блока остался: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(folder, "second.docx")); err != nil {
+		t.Fatalf("соседний документ удалён: %v", err)
+	}
+	current, err := loadState(statePath)
+	if err != nil || len(current.Blocks) != 1 || current.Blocks["textile|source-1|block-b"].Filename != "second.docx" {
+		t.Fatalf("состояние соседнего блока повреждено: %#v err=%v", current, err)
+	}
+}
+
 // Смена общей папки не должна использовать журнал прежней папки и ошибочно
 // считать документ уже доставленным.
 func TestDestinationResetsStateWhenFolderScopeChanges(t *testing.T) {

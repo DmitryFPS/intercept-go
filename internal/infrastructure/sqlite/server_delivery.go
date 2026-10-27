@@ -128,7 +128,7 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO received_events(
 			event_id, client_id, source_uuid, content_digest, payload_json, rule_version, received_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?)`, event.ID, event.ClientID, event.Source.UUID,
+		) VALUES(?, ?, ?, ?, ?, ?, ?)`, event.ID, event.ClientID, event.SourceLineageKey(),
 		event.ContentDigest, eventPayload, plan.RuleSetVersion, now); err != nil {
 		return false, fmt.Errorf("сохранить входное событие: %w", err)
 	}
@@ -178,7 +178,7 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 func addRemovedRouteCleanup(
 	ctx context.Context, tx *sql.Tx, event domain.Event, plan domain.DeliveryPlan,
 ) (domain.DeliveryPlan, error) {
-	sourceUUID := strings.TrimSpace(event.Source.UUID)
+	sourceUUID := event.SourceLineageKey()
 	if sourceUUID == "" {
 		return plan, nil
 	}

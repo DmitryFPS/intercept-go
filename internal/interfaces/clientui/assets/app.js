@@ -217,11 +217,12 @@ async function loadQueuePage(offset = 0) {
       <div class="expired-meta"><strong>${escapeHTML(item.position || 'Позиция не указана')}</strong><span>${escapeHTML(formatTime(item.source_at || item.status_at))}</span></div>
       <p>${escapeHTML(item.reason)}</p>
       <p class="content-note">${escapeHTML(item.content_note || (item.content ? 'Текст перехвата, прочитанный Клиентом из EAVC.' : 'EAVC передал запись без текста.'))}</p>
-      <pre>${escapeHTML(item.content_kind === 'text' ? item.content : 'Текст перехвата отсутствует')}</pre>
+      <pre>${escapeHTML(item.content_kind === 'text' ? item.content : (item.content_kind === 'deleted_block' ? 'Временной блок удалён в EAVC' : 'Текст перехвата отсутствует'))}</pre>
       <dl class="queue-trace">
         <div><dt>Код трассировки</dt><dd>${escapeHTML(item.event_id)}</dd></div>
         <div><dt>Запись EAVC</dt><dd>${escapeHTML(item.source_record || 'не указана')}</dd></div>
         <div><dt>UUID записи EAVC</dt><dd>${escapeHTML(item.source_uuid || 'не указан')}</dd></div>
+        <div><dt>UUID временного блока</dt><dd>${escapeHTML(item.source_block_uuid || 'не указан')}</dd></div>
         <div><dt>Версия записи</dt><dd>${escapeHTML(item.source_version || 'не указана')}</dd></div>
         <div><dt>Отпечаток содержимого</dt><dd>${escapeHTML(item.content_digest || 'не указан')}</dd></div>
         <div><dt>Попытки передачи</dt><dd>${escapeHTML(item.attempts)}</dd></div>

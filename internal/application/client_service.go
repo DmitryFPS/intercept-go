@@ -22,6 +22,7 @@ const (
 	eavcCursorName         = "eavc"
 	eavcInitializedName    = "eavc_initialized"
 	eavcBaselineName       = "eavc_initial_baseline"
+	eavcBlockEventsName    = "eavc_block_events_initialized"
 	transportOffsetName    = "transport_offset"
 	lastTransportProbeName = "last_transport_probe"
 	lastTransportProbeID   = "last_transport_probe_id"
@@ -54,6 +55,10 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	_, blockEventsInitialized, err := service.State.Value(ctx, eavcBlockEventsName)
+	if err != nil {
+		return 0, err
+	}
 	_, initialized, err := service.State.Value(ctx, eavcInitializedName)
 	if err != nil {
 		return 0, err
@@ -76,6 +81,19 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 	items, next, err := service.Source.Scan(ctx, cursor, service.BatchSize)
 	if err != nil {
 		return 0, err
+	}
+	// При первом запуске новой поблочной модели не переиздаём граничную
+	// запись, уже принятую rc87 как единое событие. Более свежие изменения,
+	// накопившиеся во время обновления, имеют другой updated_at и сохраняются.
+	if !blockEventsInitialized && strings.TrimSpace(cursor.UpdatedAt) != "" {
+		filtered := items[:0]
+		for _, item := range items {
+			if item.Record.UpdatedAt == cursor.UpdatedAt && item.Record.ID <= cursor.ID {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		items = filtered
 	}
 	if !service.CatchUpExisting {
 		baseline, exists, baselineErr := service.savedInitialBaseline(ctx)
@@ -107,7 +125,7 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 
 	queued := 0
 	for _, item := range items {
-		event, err := service.newEvent(item)
+		events, err := service.newEvents(item)
 		if err != nil {
 			// Одна повреждённая строка внешней БД не должна навсегда закрывать
 			// последующие корректные перехваты. Источник повторно отдаёт граничную
@@ -120,36 +138,48 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 			}
 			continue
 		}
-		inserted, err := service.Queue.Enqueue(ctx, event)
-		if err != nil {
-			return queued, err
-		}
-		if !inserted {
-			continue
-		}
-		if service.Logger != nil {
-			level := slog.LevelInfo
-			message := "событие EAVC поставлено в очередь"
-			if event.FreshnessIssue != "" {
-				level = slog.LevelWarn
-				message = "событие EAVC не будет отправлено из-за срока"
+		for _, event := range events {
+			inserted, err := service.Queue.Enqueue(ctx, event)
+			if err != nil {
+				return queued, err
 			}
-			service.Logger.Log(ctx, level, message,
-				"event_id", event.ID, "trace_id", event.ID, "source_uuid", event.Source.UUID,
-				"source_id", event.Source.ID, "position", event.Position.UnitName,
-				"source_at", event.SourceAt, "expires_at", event.ExpiresAt,
-				"reason", event.FreshnessIssue, "content_kind", eventContentKind(event),
-				"content_chars", utf8.RuneCountInString(event.Content),
-				"content_blocks", len(event.Blocks), "source_mode", string(event.Mode),
-			)
+			if !inserted {
+				continue
+			}
+			if service.Logger != nil {
+				level := slog.LevelInfo
+				message := "временной блок EAVC поставлен в очередь"
+				if event.FreshnessIssue != "" {
+					level = slog.LevelWarn
+					message = "временной блок EAVC не будет отправлен из-за срока"
+				}
+				if event.SourceBlockDeleted {
+					message = "удаление временного блока EAVC поставлено в очередь"
+				}
+				service.Logger.Log(ctx, level, message,
+					"event_id", event.ID, "trace_id", event.ID, "source_uuid", event.Source.UUID,
+					"source_id", event.Source.ID, "source_block_uuid", event.SourceBlockUUID,
+					"source_block_deleted", event.SourceBlockDeleted, "source_version", event.SourceVersion(),
+					"position", event.Position.UnitName,
+					"source_at", event.SourceAt, "expires_at", event.ExpiresAt,
+					"reason", event.FreshnessIssue, "content_kind", eventContentKind(event),
+					"content_chars", utf8.RuneCountInString(event.Content),
+					"content_blocks", len(event.Blocks), "source_mode", string(event.Mode),
+				)
+			}
+			queued++
 		}
-		queued++
 	}
 	if err := service.State.SaveCursor(ctx, eavcCursorName, next); err != nil {
 		return queued, err
 	}
 	if !initialized {
 		if err := service.State.SaveValue(ctx, eavcInitializedName, "true"); err != nil {
+			return queued, err
+		}
+	}
+	if !blockEventsInitialized {
+		if err := service.State.SaveValue(ctx, eavcBlockEventsName, "true"); err != nil {
 			return queued, err
 		}
 	}
@@ -357,6 +387,103 @@ func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 		Source: item.Record, Position: item.Position, Mode: item.Mode,
 		Content: content, Blocks: item.Blocks, UpdatedBy: item.UpdatedBy,
 		ContentDigest: hex.EncodeToString(digest[:]),
+	}
+	return event, event.Validate()
+}
+
+// newEvents превращает каждый устойчиво идентифицированный временной блок EAVC
+// в самостоятельное событие. Старый источник без таблицы блоков остаётся
+// совместимым и передаётся одним событием прежнего формата.
+func (service *ClientService) newEvents(item SourceItem) ([]domain.Event, error) {
+	if len(item.Blocks) == 0 && len(item.DeletedBlocks) == 0 {
+		event, err := service.newEvent(item)
+		if err != nil {
+			return nil, err
+		}
+		return []domain.Event{event}, nil
+	}
+	activeBlockUUIDs := make([]string, 0, len(item.Blocks))
+	for _, block := range item.Blocks {
+		activeBlockUUIDs = append(activeBlockUUIDs, block.Identity())
+	}
+	events := make([]domain.Event, 0, len(item.Blocks)+len(item.DeletedBlocks))
+	for _, block := range item.Blocks {
+		event, err := service.newBlockEvent(item, block, false, activeBlockUUIDs)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	for _, block := range item.DeletedBlocks {
+		event, err := service.newBlockEvent(item, block, true, activeBlockUUIDs)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
+func (service *ClientService) newBlockEvent(
+	item SourceItem, block domain.ContentBlock, deleted bool, activeBlockUUIDs []string,
+) (domain.Event, error) {
+	now := service.Now().UTC()
+	blockUUID := strings.TrimSpace(block.Identity())
+	if blockUUID == "" {
+		return domain.Event{}, errors.New("временной блок не имеет устойчивого идентификатора")
+	}
+	content := normalizeContent(block.Text)
+	if !deleted && content == "" {
+		return domain.Event{}, errors.New("временной блок ещё не содержит текста")
+	}
+	version := strings.TrimSpace(block.UpdatedAt)
+	if deleted && strings.TrimSpace(block.DeletedAt) != "" {
+		version = strings.TrimSpace(block.DeletedAt)
+	}
+	if version == "" {
+		version = item.Record.UpdatedAt
+	}
+	maxAge := service.MaxEventAge
+	if maxAge <= 0 {
+		maxAge = 30 * time.Minute
+	}
+	freshnessTimestamp := strings.TrimSpace(item.Record.UpdatedAt)
+	if deleted && strings.TrimSpace(block.DeletedAt) != "" {
+		freshnessTimestamp = strings.TrimSpace(block.DeletedAt)
+	}
+	if freshnessTimestamp == "" {
+		freshnessTimestamp = version
+	}
+	sourceAt, expiresAt, freshnessIssue := domain.FreshnessInLocation(
+		freshnessTimestamp, item.ObservedAt, now, maxAge, service.SourceLocation,
+	)
+	if deleted {
+		expiresAt = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+		freshnessIssue = ""
+		content = ""
+		block.Text = ""
+		block.Callsigns = nil
+	}
+	id, err := protocol.UUIDv7(now, rand.Reader)
+	if err != nil {
+		return domain.Event{}, err
+	}
+	marker := "active"
+	if deleted {
+		marker = "deleted"
+	}
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		marker, blockUUID, content, domain.NormalizeUnitName(item.Position.UnitName),
+		strings.TrimSpace(item.Position.Frequency), strings.TrimSpace(item.Position.GroupCode),
+	}, "\x01")))
+	event := domain.Event{
+		ID: id, ClientID: service.ClientID, CreatedAt: now, ObservedAt: item.ObservedAt,
+		SourceAt: sourceAt, ExpiresAt: expiresAt, FreshnessIssue: freshnessIssue,
+		Source: item.Record, Position: item.Position, Mode: item.Mode,
+		Content: content, Blocks: []domain.ContentBlock{block},
+		SourceBlockUUID: blockUUID, SourceBlockDeleted: deleted,
+		ActiveBlockUUIDs: append([]string(nil), activeBlockUUIDs...),
+		UpdatedBy:        item.UpdatedBy, ContentDigest: hex.EncodeToString(digest[:]),
 	}
 	return event, event.Validate()
 }

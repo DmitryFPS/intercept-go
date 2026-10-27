@@ -3,7 +3,9 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -887,6 +889,55 @@ func TestServerStoreMaintenanceKeepsPendingAndRecentData(t *testing.T) {
 	stats, err := store.Stats(ctx)
 	if err != nil || stats.Events != 2 || stats.Pending != 2 || stats.Delivered != 2 {
 		t.Fatalf("неверные остатки сервера: %+v err=%v", stats, err)
+	}
+}
+
+func TestServerStoreKeepsIndependentLineageForEachSourceBlock(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for index, blockUUID := range []string{"block-a", "block-b"} {
+		event := serverTestEvent()
+		event.ID = fmt.Sprintf("event-%d", index)
+		event.Source.UUID = "source-shared"
+		event.SourceBlockUUID = blockUUID
+		event.Blocks = []domain.ContentBlock{{UUID: blockUUID, Text: event.Content, UpdatedAt: fmt.Sprintf("version-%d", index)}}
+		event.ContentDigest = "digest-" + blockUUID
+		if accepted, err := store.Accept(ctx, event, domain.DeliveryPlan{EventID: event.ID, RuleSetVersion: 1}); err != nil || !accepted {
+			t.Fatalf("принять %s: accepted=%v err=%v", blockUUID, accepted, err)
+		}
+	}
+	rows, err := db.QueryContext(ctx, "SELECT source_uuid FROM received_events ORDER BY source_uuid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, value)
+	}
+	want := []string{"source-shared|block:block-a", "source-shared|block:block-b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("сервер смешал линии блоков: got=%v want=%v", got, want)
 	}
 }
 

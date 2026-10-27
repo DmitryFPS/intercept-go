@@ -577,6 +577,66 @@ func TestDestinationRepublishesOnlyExplicitlySelectedBlock(t *testing.T) {
 	}
 }
 
+func TestDestinationScopedEventNeverChangesSiblingBlock(t *testing.T) {
+	t.Parallel()
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		methods = append(methods, request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:])
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {ThreadID: 42, Blocks: map[string]destinationBlock{
+			"block-a": {SourceHash: "old-a", Hash: "old-a", MessageIDs: []int64{101}, Sequence: 0},
+			"block-b": {SourceHash: "old-b", Hash: "old-b", MessageIDs: []int64{102}, Sequence: 1},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	event := domain.Event{
+		ID: "event-a", ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"},
+		Position: domain.Position{UnitName: "позиция"}, SourceBlockUUID: "block-a",
+		ActiveBlockUUIDs: []string{"block-a", "block-b"},
+		Blocks:           []domain.ContentBlock{{UUID: "block-a", Text: "12.00\n-Первый исправлен"}},
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(receipt.Blocks) != 1 || receipt.Blocks[0].BlockUUID != "block-a" ||
+		!reflect.DeepEqual(receipt.MessageIDs, []int64{101}) {
+		t.Fatalf("квитанция смешала соседние блоки: %#v err=%v", receipt, err)
+	}
+	event.ID = "delete-a"
+	event.SourceBlockDeleted = true
+	event.ActiveBlockUUIDs = []string{"block-b"}
+	event.Blocks[0].DeletedAt = "2026-10-27 19:00:00"
+	event.Blocks[0].Text = ""
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := current.Items["point-01|source-1"]
+	if _, exists := item.Blocks["block-a"]; exists || !reflect.DeepEqual(item.Blocks["block-b"].MessageIDs, []int64{102}) {
+		t.Fatalf("удаление одного блока затронуло соседний: %#v", item)
+	}
+	if want := []string{"editMessageText", "deleteMessage"}; !reflect.DeepEqual(methods, want) {
+		t.Fatalf("неверные Telegram-операции: got=%v want=%v", methods, want)
+	}
+}
+
 // Если сообщение существует, но Telegram окончательно запретил его правку,
 // новое не создаётся: иначе в теме остались бы две публикации.
 func TestDestinationDoesNotReplaceExistingUneditableMessage(t *testing.T) {

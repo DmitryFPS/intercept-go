@@ -282,11 +282,12 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		if archived[index] {
 			items[index].Blocks = legacyArchiveBlocks(items[index])
 		} else {
-			blocks, err := source.readActiveBlocks(ctx, items[index])
+			blocks, deletedBlocks, err := source.readBlocks(ctx, items[index])
 			if err != nil {
 				return nil, after, err
 			}
 			items[index].Blocks = blocks
+			items[index].DeletedBlocks = deletedBlocks
 		}
 		if source.hasCallsigns {
 			if err := source.enrichCallsigns(ctx, &items[index]); err != nil {
@@ -297,54 +298,63 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 	return items, cursor, nil
 }
 
-func (source *Source) readActiveBlocks(ctx context.Context, item application.SourceItem) ([]domain.ContentBlock, error) {
+func (source *Source) readBlocks(ctx context.Context, item application.SourceItem) ([]domain.ContentBlock, []domain.ContentBlock, error) {
 	rows, err := source.db.QueryContext(ctx, `
 		SELECT uuid, item_uuid, item_id, time_key, day_offset, ord,
-			header, body, text_hash, updated_at
+			header, body, text_hash, updated_at, deleted_at
 		FROM intercept_blocks
-		WHERE item_id=? AND deleted_at IS NULL
-		ORDER BY day_offset, (time_key IS NULL), time_key, ord`, item.Record.ID)
+		WHERE item_id=?
+		ORDER BY (deleted_at IS NOT NULL), day_offset, (time_key IS NULL), time_key, ord`, item.Record.ID)
 	if err != nil {
-		return nil, fmt.Errorf("прочитать блоки EAVC для записи %d: %w", item.Record.ID, err)
+		return nil, nil, fmt.Errorf("прочитать блоки EAVC для записи %d: %w", item.Record.ID, err)
 	}
 	defer rows.Close()
 	blocks := make([]domain.ContentBlock, 0)
+	deletedBlocks := make([]domain.ContentBlock, 0)
 	texts := make([]string, 0)
 	for rows.Next() {
 		var uuid, itemUUID, header, body, storedHash, updatedAt string
+		var deletedAt sql.NullString
 		var itemID int64
 		var timeKey sql.NullInt64
 		var dayOffset, order int
 		if err := rows.Scan(&uuid, &itemUUID, &itemID, &timeKey, &dayOffset, &order,
-			&header, &body, &storedHash, &updatedAt); err != nil {
-			return nil, fmt.Errorf("декодировать блок EAVC для записи %d: %w", item.Record.ID, err)
+			&header, &body, &storedHash, &updatedAt, &deletedAt); err != nil {
+			return nil, nil, fmt.Errorf("декодировать блок EAVC для записи %d: %w", item.Record.ID, err)
 		}
 		if strings.TrimSpace(uuid) == "" || itemID != item.Record.ID ||
 			(strings.TrimSpace(item.Record.UUID) != "" && itemUUID != item.Record.UUID) {
-			return nil, fmt.Errorf("нарушен контракт EAVC: блок записи %d имеет неверную связь с исходным перехватом", item.Record.ID)
+			return nil, nil, fmt.Errorf("нарушен контракт EAVC: блок записи %d имеет неверную связь с исходным перехватом", item.Record.ID)
 		}
 		text := strings.TrimSpace(strings.TrimSpace(header) + "\n" + strings.TrimSpace(body))
 		digest := sha256.Sum256([]byte(text))
 		hash := fmt.Sprintf("%x", digest[:])
 		if storedHash != "" && !strings.EqualFold(storedHash, hash) {
-			return nil, fmt.Errorf("нарушен контракт EAVC: хеш блока %s не соответствует его тексту", uuid)
+			return nil, nil, fmt.Errorf("нарушен контракт EAVC: хеш блока %s не соответствует его тексту", uuid)
 		}
 		key := strings.TrimSpace(header)
 		if key == "" {
 			key = "без времени"
 		}
-		blocks = append(blocks, domain.ContentBlock{
-			UUID: uuid, Key: key, Sequence: len(blocks), Text: text, Hash: hash, UpdatedAt: updatedAt,
-		})
-		texts = append(texts, text)
+		block := domain.ContentBlock{
+			UUID: uuid, Key: key, Sequence: order, Text: text, Hash: hash,
+			UpdatedAt: updatedAt, DeletedAt: deletedAt.String,
+		}
+		if deletedAt.Valid && strings.TrimSpace(deletedAt.String) != "" {
+			deletedBlocks = append(deletedBlocks, block)
+		} else {
+			block.Sequence = len(blocks)
+			blocks = append(blocks, block)
+			texts = append(texts, text)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("прочитать блоки EAVC для записи %d: %w", item.Record.ID, err)
+		return nil, nil, fmt.Errorf("прочитать блоки EAVC для записи %d: %w", item.Record.ID, err)
 	}
 	if normalizeSnapshot(strings.Join(texts, "\n")) != normalizeSnapshot(item.Content) {
-		return nil, fmt.Errorf("нарушен контракт EAVC: текст записи %d и таблица intercept_blocks временно расходятся", item.Record.ID)
+		return nil, nil, fmt.Errorf("нарушен контракт EAVC: текст записи %d и таблица intercept_blocks временно расходятся", item.Record.ID)
 	}
-	return blocks, nil
+	return blocks, deletedBlocks, nil
 }
 
 func legacyArchiveBlocks(item application.SourceItem) []domain.ContentBlock {

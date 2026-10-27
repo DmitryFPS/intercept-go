@@ -87,6 +87,46 @@ func TestEventContentKindDoesNotInventAttachmentType(t *testing.T) {
 	if got := eventContentKind(domain.Event{Content: "Текст перехвата"}); got != "text" {
 		t.Fatalf("текст классифицирован как %q", got)
 	}
+	if got := eventContentKind(domain.Event{SourceBlockDeleted: true}); got != "deleted_block" {
+		t.Fatalf("удаление блока классифицировано как %q", got)
+	}
+}
+
+func TestServerServiceDoesNotExpireBlockDeletionCleanup(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 27, 20, 0, 0, 0, time.UTC)
+	key := bytes.Repeat([]byte{0x61}, 32)
+	event := serverServiceEvent()
+	event.Content = ""
+	event.SourceBlockUUID = "block-deleted"
+	event.SourceBlockDeleted = true
+	event.Blocks = []domain.ContentBlock{{UUID: "block-deleted", DeletedAt: now.Format(time.RFC3339Nano)}}
+	event.ExpiresAt = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	event.ContentDigest = "delete-digest"
+	envelope, err := protocol.Seal(event, "key-1", key, now, bytes.NewReader(make([]byte, 12)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(envelope)
+	store := &memoryServerStore{}
+	service := ServerService{
+		Clients: memoryRegistry{client: RegisteredClient{
+			ID: "textile", SenderBotID: 11, SenderBotUsername: "textile_bot",
+			ChatID: -1001, ThreadID: 42, KeyID: "key-1", Key: key, Active: true,
+		}},
+		Rules: memoryRules{rules: serverServiceRules()}, Store: store,
+		Now: func() time.Time { return now }, DeliveryWindow: 10 * time.Minute,
+	}
+	result, err := service.Receive(context.Background(), IncomingPacket{
+		SenderBotID: 11, SenderBotUsername: "textile_bot", ChatID: -1001,
+		ThreadID: 42, Payload: payload,
+	})
+	if err != nil || !result.Accepted || result.ContentKind != "deleted_block" {
+		t.Fatalf("удаление блока не принято: result=%#v err=%v", result, err)
+	}
+	if store.event.ExpiresAt.Year() != 9999 {
+		t.Fatalf("очистка ошибочно получила короткий срок: %s", store.event.ExpiresAt)
+	}
 }
 
 // Своевременно принятый пакет получает отдельные десять минут на внешние

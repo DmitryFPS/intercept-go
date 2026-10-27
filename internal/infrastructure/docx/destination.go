@@ -112,7 +112,14 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 	sourceKey := strings.TrimSpace(event.ClientID) + "|" + legacySourceKey
 	prefix := sourceKey + "|"
 	legacyPrefix := legacySourceKey + "|"
+	scopedBlockUUID := strings.TrimSpace(event.SourceBlockUUID)
 	if delivery.Decision.Action == domain.RouteSkip {
+		if scopedBlockUUID != "" {
+			if err := destination.removeScopedBlock(&current, prefix, legacyPrefix, scopedBlockUUID, len(event.ActiveBlockUUIDs) == 0); err != nil {
+				return err
+			}
+			return saveState(destination.StatePath, current)
+		}
 		for key, record := range current.Blocks {
 			if !strings.HasPrefix(key, prefix) && !strings.HasPrefix(key, legacyPrefix) {
 				continue
@@ -127,6 +134,12 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 				}
 			}
 			delete(current.Blocks, key)
+		}
+		return saveState(destination.StatePath, current)
+	}
+	if event.SourceBlockDeleted && scopedBlockUUID != "" {
+		if err := destination.removeScopedBlock(&current, prefix, legacyPrefix, scopedBlockUUID, len(event.ActiveBlockUUIDs) == 0); err != nil {
+			return err
 		}
 		return saveState(destination.StatePath, current)
 	}
@@ -146,12 +159,14 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 		active[key] = true
 		record, exists := current.Blocks[key]
 		technicalMigration := false
+		migratedBlockKey := ""
 		if !exists {
 			for _, legacyKey := range []string{prefix + block.Key, legacyPrefix + block.Key} {
 				if legacyRecord, ok := current.Blocks[legacyKey]; ok {
 					record = legacyRecord
 					exists = true
 					technicalMigration = true
+					migratedBlockKey = legacyKey
 					break
 				}
 			}
@@ -170,7 +185,7 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 		document := Document{
 			Unit: event.Position.UnitName, Frequency: event.Position.Frequency,
 			GroupCode: event.Position.GroupCode, Network: destination.Network, Protection: destination.Protection,
-			Date: date, SourceUpdatedAt: event.Source.UpdatedAt, Operator: event.UpdatedBy, Content: content,
+			Date: date, SourceUpdatedAt: event.SourceVersion(), Operator: event.UpdatedBy, Content: content,
 			Callsigns: block.Callsigns,
 		}
 		render := renderDigest(document)
@@ -204,6 +219,9 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 			record.UpdatedAt = time.Now().UTC()
 		}
 		current.Blocks[key] = record
+		if migratedBlockKey != "" && migratedBlockKey != key {
+			delete(current.Blocks, migratedBlockKey)
+		}
 		if err := saveState(destination.StatePath, current); err != nil {
 			return err
 		}
@@ -213,21 +231,62 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 			}
 		}
 	}
-	for key, record := range current.Blocks {
-		if (!strings.HasPrefix(key, prefix) && !strings.HasPrefix(key, legacyPrefix)) || active[key] {
-			continue
-		}
-		// Объединённый rc81-документ уже перезаписан первым UUID-блоком и имеет
-		// то же имя. Его файл удалять нельзя; удаляется только старый ключ.
-		if key != combinedKey && key != legacyPrefix+"record" && record.Filename != "" {
-			if obsolete, pathErr := safeDestinationPath(destination.Folder, record.Filename); pathErr == nil {
-				_ = os.Remove(obsolete)
+	if scopedBlockUUID == "" {
+		for key, record := range current.Blocks {
+			if (!strings.HasPrefix(key, prefix) && !strings.HasPrefix(key, legacyPrefix)) || active[key] {
+				continue
+			}
+			// Объединённый rc81-документ уже перезаписан первым UUID-блоком и имеет
+			// то же имя. Его файл удалять нельзя; удаляется только старый ключ.
+			if key != combinedKey && key != legacyPrefix+"record" && record.Filename != "" {
+				if obsolete, pathErr := safeDestinationPath(destination.Folder, record.Filename); pathErr == nil {
+					_ = os.Remove(obsolete)
+				}
+			}
+			delete(current.Blocks, key)
+			if err := saveState(destination.StatePath, current); err != nil {
+				return err
 			}
 		}
-		delete(current.Blocks, key)
+	} else {
+		// При миграции объединённый ключ уже перезаписан выбранным блоком.
+		// Удаляем только устаревшую ссылку, не удаляя сам новый документ.
+		delete(current.Blocks, combinedKey)
+		delete(current.Blocks, legacyPrefix+"record")
 		if err := saveState(destination.StatePath, current); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (destination Destination) removeScopedBlock(
+	current *state, prefix, legacyPrefix, blockUUID string, lastBlock bool,
+) error {
+	keys := []string{prefix + blockUUID, legacyPrefix + blockUUID}
+	if lastBlock {
+		keys = append(keys, prefix+"record", legacyPrefix+"record")
+	}
+	seen := make(map[string]bool)
+	for _, key := range keys {
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		record, exists := current.Blocks[key]
+		if !exists {
+			continue
+		}
+		if record.Filename != "" {
+			path, err := safeDestinationPath(destination.Folder, record.Filename)
+			if err != nil {
+				return err
+			}
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("удалить Word-документ временного блока: %w", err)
+			}
+		}
+		delete(current.Blocks, key)
 	}
 	return nil
 }

@@ -85,6 +85,52 @@ func TestClientQueueSurvivesReopenAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestClientQueueSeparatesBlocksButPreservesRecordOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeEvent := func(id, blockUUID, text, version string, at time.Time) domain.Event {
+		return domain.Event{
+			ID: id, ClientID: "textile", CreatedAt: at, ObservedAt: at, ExpiresAt: at.Add(time.Hour),
+			Source:   domain.SourceRecord{ID: 375, UUID: "source-375", UpdatedAt: "record-version"},
+			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+			Content: text, ContentDigest: "digest-" + blockUUID, SourceBlockUUID: blockUUID,
+			Blocks: []domain.ContentBlock{{UUID: blockUUID, Text: text, UpdatedAt: version}},
+		}
+	}
+	first := makeEvent("event-a", "block-a", "18.46\n-Первый", "2026-10-27 18:46:00", now)
+	second := makeEvent("event-b", "block-b", "18.50\n-Второй", "2026-10-27 18:50:00", now.Add(time.Second))
+	for _, event := range []domain.Event{first, second} {
+		if inserted, err := queue.Enqueue(ctx, event); err != nil || !inserted {
+			t.Fatalf("блок %s не поставлен отдельно: inserted=%v err=%v", event.SourceBlockUUID, inserted, err)
+		}
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_events WHERE source_uuid LIKE '%|block:%'").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("побочные линии не разделены: count=%d err=%v", count, err)
+	}
+	pending, err := queue.Pending(ctx, 10, now.Add(time.Minute))
+	if err != nil || len(pending) != 1 || pending[0].Event.ID != first.ID {
+		t.Fatalf("блоки одной записи нарушили порядок: %#v err=%v", pending, err)
+	}
+	if err := queue.MarkAcknowledged(ctx, first.ID, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = queue.Pending(ctx, 10, now.Add(2*time.Minute))
+	if err != nil || len(pending) != 1 || pending[0].Event.ID != second.ID {
+		t.Fatalf("второй блок не вышел после первого: %#v err=%v", pending, err)
+	}
+}
+
 // Пока ранняя версия записи ждёт повтора, более поздняя версия той же записи
 // не должна её обогнать, в том числе после исправления названия подразделения.
 func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {

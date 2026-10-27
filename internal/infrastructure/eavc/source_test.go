@@ -421,6 +421,36 @@ func TestSourceReadsStableUUIDForEveryEAVCBlock(t *testing.T) {
 		items[0].Blocks[0].UUID != "block-a" || items[0].Blocks[1].UUID != "block-b" {
 		t.Fatalf("стабильные UUID блоков не прочитаны: %#v", items)
 	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeDB.Exec(`
+		UPDATE intercept_items SET content='10.05' || char(10) || '-Второй', updated_at='2026-10-27 10:07:00' WHERE id=1;
+		UPDATE intercept_blocks SET updated_at='2026-10-27 10:07:00', deleted_at='2026-10-27 10:07:00' WHERE uuid='block-a';
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source, err = Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	items, _, err = source.Scan(context.Background(), application.Cursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || len(items[0].Blocks) != 1 || items[0].Blocks[0].UUID != "block-b" ||
+		len(items[0].DeletedBlocks) != 1 || items[0].DeletedBlocks[0].UUID != "block-a" ||
+		items[0].DeletedBlocks[0].DeletedAt != "2026-10-27 10:07:00" {
+		t.Fatalf("надгробие удалённого блока не прочитано отдельно: %#v", items)
+	}
 }
 
 func TestSourceRejectsInconsistentItemAndBlockSnapshot(t *testing.T) {

@@ -521,6 +521,9 @@ function historyContent(item) {
   if (item.content_kind === 'empty_text') {
     return item.content_note || 'Клиент передал перехват без текста. Вложений в этом событии нет.';
   }
+  if (item.content_kind === 'deleted_block') {
+    return item.content_note || 'Временной блок удалён в EAVC.';
+  }
   return item.content;
 }
 
@@ -528,6 +531,7 @@ function historyContentLabel(item) {
   if (item.content_kind === 'transport') return 'Почему сообщение учтено или проигнорировано';
   if (item.content_kind === 'text') return 'Клиент передал текст';
   if (item.content_kind === 'empty_text') return 'Клиент передал перехват без текста';
+  if (item.content_kind === 'deleted_block') return 'Клиент передал удаление временного блока';
   return 'Содержимое не подтверждено';
 }
 

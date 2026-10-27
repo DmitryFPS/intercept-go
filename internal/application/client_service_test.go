@@ -3,7 +3,6 @@ package application
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -118,6 +117,85 @@ func TestClientServiceBlockMetadataKeepsRC81ContentDigest(t *testing.T) {
 	}
 	if modern.ContentDigest != legacy.ContentDigest {
 		t.Fatalf("UUID блока изменил отпечаток rc81: %s != %s", modern.ContentDigest, legacy.ContentDigest)
+	}
+}
+
+func TestClientServiceCreatesIndependentEventForEveryTimeBlock(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 27, 18, 53, 11, 0, time.UTC)
+	item := SourceItem{
+		Record:   domain.SourceRecord{ID: 375, UUID: "record-375", UpdatedAt: "2026-10-27 18:53:11"},
+		Position: domain.Position{UnitName: "503 обмп 38 обрмп"}, Mode: domain.SourceModeDeferred,
+		Content: "18.46\n-Первый блок\n18.50\n-Второй блок", ObservedAt: now,
+		Blocks: []domain.ContentBlock{
+			{UUID: "block-1846", Key: "18.46", Sequence: 0, Text: "18.46\n-Первый блок", UpdatedAt: "2026-10-27 18:46:00"},
+			{UUID: "block-1850", Key: "18.50", Sequence: 1, Text: "18.50\n-Второй блок", UpdatedAt: "2026-10-27 18:50:00"},
+		},
+	}
+	queue := newMemoryClientState()
+	service := ClientService{
+		ClientID: "textile", Source: &memorySource{items: []SourceItem{item}}, Queue: queue, State: queue,
+		Sender: &memorySender{}, KeyID: "key", Key: make([]byte, 32), BatchSize: 10,
+		CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	queued, err := service.CollectOnce(context.Background())
+	if err != nil || queued != 2 || len(queue.events) != 2 {
+		t.Fatalf("два блока не стали двумя событиями: queued=%d events=%#v err=%v", queued, queue.events, err)
+	}
+	if queue.events[0].ID == queue.events[1].ID ||
+		queue.events[0].SourceBlockUUID != "block-1846" || queue.events[1].SourceBlockUUID != "block-1850" ||
+		len(queue.events[0].Blocks) != 1 || len(queue.events[1].Blocks) != 1 ||
+		queue.events[0].Content == queue.events[1].Content {
+		t.Fatalf("идентичность блоков смешалась: %#v", queue.events)
+	}
+	if queue.events[0].Source.UUID != "record-375" || queue.events[1].Source.UUID != "record-375" {
+		t.Fatalf("исходная запись EAVC потеряна: %#v", queue.events)
+	}
+}
+
+func TestClientServiceQueuesOnlyChangedBlockAndDeletionTombstone(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 27, 19, 0, 0, 0, time.UTC)
+	item := SourceItem{
+		Record:   domain.SourceRecord{ID: 1, UUID: "record-1", UpdatedAt: "2026-10-27 18:00:00"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "18.00\n-Первый\n18.05\n-Второй", ObservedAt: now,
+		Blocks: []domain.ContentBlock{
+			{UUID: "block-a", Key: "18.00", Text: "18.00\n-Первый", UpdatedAt: "2026-10-27 18:00:00"},
+			{UUID: "block-b", Key: "18.05", Sequence: 1, Text: "18.05\n-Второй", UpdatedAt: "2026-10-27 18:05:00"},
+		},
+	}
+	source := &replaySource{item: item}
+	queue := newMemoryClientState()
+	service := ClientService{
+		ClientID: "textile", Source: source, Queue: queue, State: queue, Sender: &memorySender{},
+		KeyID: "key", Key: make([]byte, 32), BatchSize: 10, CatchUpExisting: true,
+		Now: func() time.Time { return now },
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 2 {
+		t.Fatalf("исходные блоки: queued=%d err=%v", queued, err)
+	}
+	source.item.Record.UpdatedAt = "2026-10-27 18:10:00"
+	source.item.Content = "18.00\n-Первый исправлен\n18.05\n-Второй"
+	source.item.Blocks[0].Text = "18.00\n-Первый исправлен"
+	source.item.Blocks[0].UpdatedAt = "2026-10-27 18:10:00"
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("редакция одного блока затронула соседний: queued=%d err=%v", queued, err)
+	}
+	deleted := source.item.Blocks[0]
+	deleted.DeletedAt = "2026-10-27 18:15:00"
+	deleted.UpdatedAt = deleted.DeletedAt
+	source.item.Record.UpdatedAt = deleted.DeletedAt
+	source.item.Content = source.item.Blocks[1].Text
+	source.item.Blocks = source.item.Blocks[1:]
+	source.item.Blocks[0].Sequence = 0
+	source.item.DeletedBlocks = []domain.ContentBlock{deleted}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("удаление блока не стало одним надгробием: queued=%d err=%v", queued, err)
+	}
+	last := queue.events[len(queue.events)-1]
+	if !last.SourceBlockDeleted || last.SourceBlockUUID != "block-a" || last.Content != "" || len(last.ActiveBlockUUIDs) != 1 {
+		t.Fatalf("неверное событие удаления: %#v", last)
 	}
 }
 
@@ -350,11 +428,7 @@ func (state *memoryClientState) Enqueue(_ context.Context, event domain.Event) (
 }
 
 func sourceVersionKey(event domain.Event) string {
-	sourceKey := event.Source.UUID
-	if sourceKey == "" {
-		sourceKey = fmt.Sprintf("id:%d", event.Source.ID)
-	}
-	return sourceKey + "\x00" + event.Source.UpdatedAt + "\x00" + event.ContentDigest
+	return event.SourceLineageKey() + "\x00" + event.SourceVersion() + "\x00" + event.ContentDigest
 }
 
 func (state *memoryClientState) Pending(_ context.Context, limit int, _ time.Time) ([]QueuedEvent, error) {

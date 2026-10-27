@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +49,8 @@ type QueueEvent struct {
 	Mode               domain.SourceMode `json:"mode"`
 	SourceRecord       int64             `json:"source_record,omitempty"`
 	SourceUUID         string            `json:"source_uuid,omitempty"`
+	SourceBlockUUID    string            `json:"source_block_uuid,omitempty"`
+	SourceBlockDeleted bool              `json:"source_block_deleted,omitempty"`
 	SourceVersion      string            `json:"source_version,omitempty"`
 	ContentDigest      string            `json:"content_digest,omitempty"`
 	Attempts           int               `json:"attempts"`
@@ -103,13 +104,14 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 		if err != nil {
 			return nil, 0, fmt.Errorf("разобрать время сообщения: %w", err)
 		}
-		kind, note := clientQueueContentDescription(event.Content)
+		kind, note := clientQueueContentDescription(event)
 		result = append(result, QueueEvent{
 			EventID: eventID, Position: event.Position.UnitName, SourceAt: event.SourceAt,
 			StatusAt: statusAt, Reason: reason, Content: event.Content,
 			ContentKind: kind, ContentNote: note, Mode: event.Mode,
 			SourceRecord: event.Source.ID, SourceUUID: event.Source.UUID,
-			SourceVersion: event.Source.UpdatedAt, ContentDigest: event.ContentDigest,
+			SourceBlockUUID: event.SourceBlockUUID, SourceBlockDeleted: event.SourceBlockDeleted,
+			SourceVersion: event.SourceVersion(), ContentDigest: event.ContentDigest,
 			Attempts: attempts, TransportMessageID: nullableInt64(transportMessageID),
 		})
 	}
@@ -127,8 +129,11 @@ func nullableInt64(value sql.NullInt64) *int64 {
 	return &result
 }
 
-func clientQueueContentDescription(content string) (string, string) {
-	if strings.TrimSpace(content) == "" {
+func clientQueueContentDescription(event domain.Event) (string, string) {
+	if event.SourceBlockDeleted {
+		return "deleted_block", "Временной блок удалён в EAVC. Клиент передал Центру точную команду удалить только связанную публикацию."
+	}
+	if strings.TrimSpace(event.Content) == "" {
 		return "empty_text", "EAVC передал запись без текста. Вложения по текущему контракту EAVC → Клиент не передаются, поэтому определить их тип невозможно."
 	}
 	return "text", "Текст перехвата, прочитанный Клиентом из EAVC."
@@ -281,11 +286,8 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) (bool
 	if err != nil {
 		return false, fmt.Errorf("защитить событие: %w", err)
 	}
-	sourceKey := strings.TrimSpace(event.Source.UUID)
-	if sourceKey == "" {
-		sourceKey = "id:" + strconv.FormatInt(event.Source.ID, 10)
-	}
-	sourceVersion := strings.TrimSpace(event.Source.UpdatedAt)
+	sourceKey := event.SourceLineageKey()
+	sourceVersion := event.SourceVersion()
 	if sourceVersion == "" && !event.SourceAt.IsZero() {
 		sourceVersion = event.SourceAt.UTC().Format(time.RFC3339Nano)
 	}

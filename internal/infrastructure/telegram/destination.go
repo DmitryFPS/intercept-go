@@ -71,7 +71,11 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	if item.Blocks == nil {
 		item.Blocks = make(map[string]destinationBlock)
 	}
+	scopedBlockUUID := strings.TrimSpace(event.SourceBlockUUID)
 	if delivery.Decision.Action == domain.RouteSkip {
+		if scopedBlockUUID != "" {
+			return destination.deleteScopedBlock(ctx, itemKey, legacyItemKey, item, scopedBlockUUID, migratedLegacy, len(event.ActiveBlockUUIDs) == 0)
+		}
 		if err := destination.deleteAll(ctx, item.Blocks); err != nil {
 			return err
 		}
@@ -91,9 +95,15 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		item.Blocks = make(map[string]destinationBlock)
 	}
 	item.ThreadID = threadID
+	if event.SourceBlockDeleted && scopedBlockUUID != "" {
+		return destination.deleteScopedBlock(ctx, itemKey, legacyItemKey, item, scopedBlockUUID, migratedLegacy, len(event.ActiveBlockUUIDs) == 0)
+	}
 
 	blocks := eventBlocks(event)
 	if len(blocks) == 0 {
+		if scopedBlockUUID != "" {
+			return destination.deleteScopedBlock(ctx, itemKey, legacyItemKey, item, scopedBlockUUID, migratedLegacy, len(event.ActiveBlockUUIDs) == 0)
+		}
 		if err := destination.deleteAll(ctx, item.Blocks); err != nil {
 			return err
 		}
@@ -207,14 +217,16 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 			return err
 		}
 	}
-	for key, obsolete := range item.Blocks {
-		if key == recordStateKey || active[key] {
-			continue
+	if scopedBlockUUID == "" {
+		for key, obsolete := range item.Blocks {
+			if key == recordStateKey || active[key] {
+				continue
+			}
+			if err := destination.deleteMessages(ctx, obsolete.MessageIDs); err != nil {
+				return err
+			}
+			delete(item.Blocks, key)
 		}
-		if err := destination.deleteMessages(ctx, obsolete.MessageIDs); err != nil {
-			return err
-		}
-		delete(item.Blocks, key)
 	}
 	delete(item.Blocks, recordStateKey)
 	if len(item.Blocks) == 0 {
@@ -250,6 +262,9 @@ func (destination *Destination) DeliveryReceipt(
 	}
 	ordered := make([]orderedBlock, 0, len(item.Blocks))
 	for key, block := range item.Blocks {
+		if scoped := strings.TrimSpace(event.SourceBlockUUID); scoped != "" && !strings.EqualFold(key, scoped) {
+			continue
+		}
 		ordered = append(ordered, orderedBlock{key: key, block: block})
 	}
 	sort.SliceStable(ordered, func(left, right int) bool { return ordered[left].block.Sequence < ordered[right].block.Sequence })
@@ -266,10 +281,48 @@ func (destination *Destination) DeliveryReceipt(
 			Suppressed:        block.Suppressed, SuppressedReason: block.SuppressedReason,
 		})
 	}
+	if scoped := strings.TrimSpace(event.SourceBlockUUID); scoped != "" && len(blockReceipts) == 0 {
+		blockReceipts = append(blockReceipts, application.DeliveryBlockReceipt{BlockUUID: scoped})
+	}
 	return application.DeliveryReceipt{
 		Kind: "telegram", ChatID: destination.ChatID,
 		ThreadID: item.ThreadID, MessageIDs: messageIDs, Blocks: blockReceipts,
 	}, nil
+}
+
+// deleteScopedBlock удаляет только публикацию выбранного временного блока.
+// Соседние блоки той же записи EAVC остаются нетронутыми.
+func (destination *Destination) deleteScopedBlock(
+	ctx context.Context, itemKey, legacyItemKey string, item destinationItem,
+	blockUUID string, migratedLegacy, lastBlock bool,
+) error {
+	if stored, exists := item.Blocks[blockUUID]; exists {
+		if err := destination.deleteMessages(ctx, stored.MessageIDs); err != nil {
+			return err
+		}
+		delete(item.Blocks, blockUUID)
+	}
+	// До rc82 запись могла храниться одним сообщением. Удалять его безопасно
+	// только когда в EAVC больше не осталось активных временных блоков.
+	if lastBlock {
+		if stored, exists := item.Blocks["__record__"]; exists {
+			if err := destination.deleteMessages(ctx, stored.MessageIDs); err != nil {
+				return err
+			}
+			delete(item.Blocks, "__record__")
+		}
+	}
+	if len(item.Blocks) == 0 {
+		if err := destination.saveItem(itemKey, destinationItem{}, true); err != nil {
+			return err
+		}
+	} else if err := destination.saveItem(itemKey, item, false); err != nil {
+		return err
+	}
+	if migratedLegacy {
+		return destination.saveItem(legacyItemKey, destinationItem{}, true)
+	}
+	return nil
 }
 
 // AllowRepublish снимает только явное подавление выбранного UUID-блока.

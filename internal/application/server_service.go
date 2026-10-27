@@ -192,7 +192,14 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	}
 	// После своевременного приёма транспорт больше не отвечает за срок. Сервер
 	// получает собственное ограниченное окно, чтобы завершить внешние доставки.
-	event.ExpiresAt = now.Add(deliveryWindow)
+	if event.SourceBlockDeleted {
+		// Удаление — это корректирующая операция, а не новая публикация. Она
+		// обязана дождаться восстановления Telegram/SMB и не оставлять старый
+		// результат только из-за длительного внешнего сбоя.
+		event.ExpiresAt = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	} else {
+		event.ExpiresAt = now.Add(deliveryWindow)
+	}
 	event.FreshnessIssue = ""
 	accepted, err := service.Store.Accept(ctx, event, plan)
 	if err != nil {
@@ -208,6 +215,9 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 }
 
 func eventContentKind(event domain.Event) string {
+	if event.SourceBlockDeleted {
+		return "deleted_block"
+	}
 	if strings.TrimSpace(event.Content) == "" {
 		return "empty_text"
 	}

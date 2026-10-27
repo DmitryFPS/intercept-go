@@ -28,13 +28,14 @@ type Cursor struct {
 
 // SourceItem — снимок записи источника до создания доменного события.
 type SourceItem struct {
-	Record     domain.SourceRecord
-	Position   domain.Position
-	Mode       domain.SourceMode
-	Content    string
-	Blocks     []domain.ContentBlock
-	UpdatedBy  string
-	ObservedAt time.Time
+	Record        domain.SourceRecord
+	Position      domain.Position
+	Mode          domain.SourceMode
+	Content       string
+	Blocks        []domain.ContentBlock
+	DeletedBlocks []domain.ContentBlock
+	UpdatedBy     string
+	ObservedAt    time.Time
 }
 
 // ClientQueue гарантирует сохранение события до обращения к сети.

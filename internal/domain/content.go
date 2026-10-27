@@ -30,6 +30,7 @@ type ContentBlock struct {
 	Text      string     `json:"text"`
 	Hash      string     `json:"hash"`
 	UpdatedAt string     `json:"updated_at,omitempty"`
+	DeletedAt string     `json:"deleted_at,omitempty"`
 	Callsigns []Callsign `json:"callsigns,omitempty"`
 }
 

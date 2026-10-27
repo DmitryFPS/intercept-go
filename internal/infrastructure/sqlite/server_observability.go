@@ -561,7 +561,7 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 	item.GroupCode = event.Position.GroupCode
 	item.SourceRecord = event.Source.ID
 	item.SourceUUID = event.Source.UUID
-	item.SourceVersion = event.Source.UpdatedAt
+	item.SourceVersion = event.SourceVersion()
 	item.ContentDigest = event.ContentDigest
 	item.SourceMode = string(event.Mode)
 	item.UpdatedBy = event.UpdatedBy
@@ -571,7 +571,10 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 	}
 	item.ContentReady = true
 	item.ContentKind = "text"
-	if strings.TrimSpace(event.Content) == "" {
+	if event.SourceBlockDeleted {
+		item.ContentKind = "deleted_block"
+		item.ContentNote = "Временной блок удалён в EAVC. Центр удаляет только связанную с ним публикацию и не затрагивает соседние перехваты."
+	} else if strings.TrimSpace(event.Content) == "" {
 		item.ContentKind = "empty_text"
 		item.ContentNote = "Клиент передал перехват без текста. Протокол rc69 не передаёт вложения, поэтому фото, аудио, видео или иной файл в этом событии отсутствуют."
 	}
