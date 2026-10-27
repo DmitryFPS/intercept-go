@@ -614,4 +614,11 @@ func TestLateUploadDoesNotUndoAcknowledgement(t *testing.T) {
 	if stats.Acknowledged != 1 || stats.Pending != 0 || stats.Uploaded != 0 {
 		t.Fatalf("подтверждение было отменено: %+v", stats)
 	}
+	items, total, err := queue.EventsPage(ctx, "acknowledged", 20, 0)
+	if err != nil || total != 1 || len(items) != 1 {
+		t.Fatalf("не удалось прочитать подтверждённое событие: total=%d items=%#v err=%v", total, items, err)
+	}
+	if items[0].TransportMessageID == nil || *items[0].TransportMessageID != 77 {
+		t.Fatalf("быстро подтверждённое событие потеряло message_id транспорта: %#v", items[0])
+	}
 }

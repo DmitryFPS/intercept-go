@@ -359,15 +359,18 @@ func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, tele
 	now := time.Now().UTC()
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
-		SET state = 'uploaded', telegram_message_id = ?, uploaded_at = ?,
-			last_error = '', next_attempt_at = ?, attempts = attempts + 1
-		WHERE event_id = ? AND state IN ('pending', 'uploaded')`,
+		SET state = CASE WHEN state IN ('acknowledged','expired') THEN state ELSE 'uploaded' END,
+			telegram_message_id = ?, uploaded_at = COALESCE(uploaded_at, ?),
+			last_error = CASE WHEN state='expired' THEN last_error ELSE '' END,
+			next_attempt_at = CASE WHEN state IN ('acknowledged','expired') THEN next_attempt_at ELSE ? END,
+			attempts = attempts + 1
+		WHERE event_id = ? AND state IN ('pending','uploaded','acknowledged','expired')`,
 		telegramMessageID, now.Format(time.RFC3339Nano),
 		now.Add(uploadedRetryDelay(attempts+1)).Format(time.RFC3339Nano), eventID,
 	)
 	// Центр может подтвердить маленький пакет быстрее, чем Send вернёт
-	// управление этому потоку. Поздняя промежуточная отметка загрузки не должна
-	// откатывать конечное состояние и не является ошибкой.
+	// управление этому потоку. Поздняя отметка обязана сохранить message_id для
+	// трассировки, но не должна откатывать конечное состояние обратно в очередь.
 	return terminalTransition(queue.db, ctx, result, err, eventID, "отметить загрузку")
 }
 
