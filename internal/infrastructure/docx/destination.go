@@ -57,8 +57,12 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	}
 	completed := make(chan error, 1)
 	go func() {
-		defer unlock()
-		completed <- settings.deliver(ctx, event, delivery)
+		err := settings.deliver(ctx, event, delivery)
+		// Результат нельзя публиковать раньше освобождения блокировки: при
+		// последовательных заданиях вызывающий поток может немедленно начать
+		// следующую доставку и ошибочно увидеть уже завершённую операцию занятой.
+		unlock()
+		completed <- err
 	}()
 	select {
 	case err := <-completed:
