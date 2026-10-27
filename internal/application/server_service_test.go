@@ -40,6 +40,10 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	if err != nil || !result.Accepted || store.accepted != 1 {
 		t.Fatalf("receive: %#v %v", result, err)
 	}
+	if result.ContentKind != "text" || result.ContentChars != len([]rune(event.Content)) ||
+		result.ContentBlocks != len(event.Blocks) || result.SourceMode != string(event.Mode) {
+		t.Fatalf("журналу возвращена неверная характеристика содержимого: %#v", result)
+	}
 	packet.Payload = append(append([]byte(nil), payload...), []byte("{}")...)
 	if _, err := service.Receive(context.Background(), packet); err == nil {
 		t.Fatal("дополнительный JSON после конверта должен быть отклонён")
@@ -72,6 +76,16 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	}
 	if store.accepted != 1 {
 		t.Fatal("отклонённый пакет не должен попадать в хранилище")
+	}
+}
+
+func TestEventContentKindDoesNotInventAttachmentType(t *testing.T) {
+	t.Parallel()
+	if got := eventContentKind(domain.Event{Content: " \r\n\t"}); got != "empty_text" {
+		t.Fatalf("пустой текст классифицирован как %q", got)
+	}
+	if got := eventContentKind(domain.Event{Content: "Текст перехвата"}); got != "text" {
+		t.Fatalf("текст классифицирован как %q", got)
 	}
 }
 

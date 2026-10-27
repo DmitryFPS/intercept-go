@@ -433,7 +433,16 @@ function historyContent(item) {
   if (!item.content_ready) {
     return item.content_note || 'Содержимое этого пакета нельзя безопасно показать.';
   }
-  return item.content || 'В EAVC сохранён пустой текст перехвата.';
+  if (item.content_kind === 'empty_text') {
+    return item.content_note || 'Клиент передал перехват без текста. Вложений в этом событии нет.';
+  }
+  return item.content;
+}
+
+function historyContentLabel(item) {
+  if (item.content_kind === 'text') return 'Клиент передал текст';
+  if (item.content_kind === 'empty_text') return 'Клиент передал перехват без текста';
+  return 'Содержимое не подтверждено';
 }
 
 function historyMetaEntry(label, value) {
@@ -460,12 +469,13 @@ function openHistoryItem(index) {
     historyMetaEntry('Изменил в EAVC', item.updated_by),
     historyMetaEntry('Попытки доставки', item.attempts || ''),
     historyMetaEntry('Причина', historyReasonLabel(item.reason)),
+    historyMetaEntry('Что передал Клиент', historyContentLabel(item)),
     historyMetaEntry('ID события', item.id)
   ].join('');
   const contentSection = $('historyItemContent').closest('.history-item-content');
   contentSection.classList.toggle('unavailable', !item.content_ready);
   $('historyItemContentTitle').textContent = item.content_ready ? 'Текст из EAVC' : 'Почему содержимое недоступно';
-  $('historyItemContentType').textContent = item.content_ready ? 'Текст' : 'Недоступно';
+  $('historyItemContentType').textContent = item.content_kind === 'text' ? 'Текст' : (item.content_kind === 'empty_text' ? 'Без текста' : 'Недоступно');
   $('historyItemContent').textContent = historyContent(item);
   openDialog('historyItemDialog');
 }
@@ -509,7 +519,7 @@ function renderHistory() {
       return `<article class="history-row">
 		<strong>${escapeHTML(item.unit_name || item.client_name || 'Пакет без названия')}</strong><span>${escapeHTML(route || historyStateLabel(item.state))}</span><time>${formatDate(item.occurred_at)}</time>
 		<p>${escapeHTML(historyDetails(item))}</p>
-        <div class="history-content-preview"><span>${item.content_ready ? 'Содержание перехвата' : 'Содержание недоступно'}</span><pre>${escapeHTML(historyContent(item))}</pre></div>
+        <div class="history-content-preview"><span>${escapeHTML(historyContentLabel(item))}</span><pre>${escapeHTML(historyContent(item))}</pre></div>
         <div class="history-row-actions"><button class="button ghost history-open-item" type="button" data-history-item="${index}">${item.content_ready ? 'Открыть полностью' : 'Подробнее'}</button></div>
       </article>`;
     }).join('');

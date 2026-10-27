@@ -59,7 +59,7 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 			t.Errorf("просмотр содержания перехвата не подключает элемент %q", id)
 		}
 	}
-	for _, fragment := range []string{"item.content_ready", "historyContent(item)", "data-history-item", "Текст из EAVC"} {
+	for _, fragment := range []string{"item.content_ready", "historyContent(item)", "historyContentLabel(item)", "data-history-item", "Текст из EAVC", "Клиент передал перехват без текста"} {
 		if !strings.Contains(javascript, fragment) && !strings.Contains(html, fragment) {
 			t.Errorf("история не показывает фактическое содержание перехвата: нет %q", fragment)
 		}

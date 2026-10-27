@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"intercept/internal/domain"
 	"intercept/internal/protocol"
@@ -61,6 +62,10 @@ type PacketResult struct {
 	AcknowledgementKey []byte
 	Accepted           bool
 	Status             string
+	ContentKind        string
+	ContentChars       int
+	ContentBlocks      int
+	SourceMode         string
 }
 
 // ServerService проверяет входные пакеты и создаёт независимые задания.
@@ -130,14 +135,18 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 		return PacketResult{
 			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
 			AcknowledgementKey: append([]byte(nil), client.Key...),
-			Status:             "accepted",
+			Status:             "accepted", ContentKind: eventContentKind(event),
+			ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
+			SourceMode: string(event.Mode),
 		}, nil
 	}
 	if event.Expired(now) {
 		return PacketResult{
 			EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
 			AcknowledgementKey: append([]byte(nil), client.Key...),
-			Status:             "expired",
+			Status:             "expired", ContentKind: eventContentKind(event),
+			ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
+			SourceMode: string(event.Mode),
 		}, nil
 	}
 	rules, err := service.Rules.ActiveRules(ctx)
@@ -163,8 +172,17 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	return PacketResult{
 		EventID: event.ID, ClientBotUsername: client.SenderBotUsername,
 		AcknowledgementKey: append([]byte(nil), client.Key...),
-		Accepted:           accepted, Status: "accepted",
+		Accepted:           accepted, Status: "accepted", ContentKind: eventContentKind(event),
+		ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
+		SourceMode: string(event.Mode),
 	}, nil
+}
+
+func eventContentKind(event domain.Event) string {
+	if strings.TrimSpace(event.Content) == "" {
+		return "empty_text"
+	}
+	return "text"
 }
 
 // DeliveryService выполняет ожидающие задания и не смешивает их состояния.

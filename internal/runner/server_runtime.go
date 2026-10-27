@@ -223,7 +223,8 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 					batchComplete = false
 					break
 				}
-				server.Logger.Warn("пакет помещён в карантин", "error", err, "sender_bot_id", packet.SenderBotID)
+				server.Logger.Warn("пакет помещён в карантин", "error", err,
+					"sender_bot_id", packet.SenderBotID, "content_kind", "unverified")
 				if quarantineErr := server.Store.Quarantine(ctx, packet, err.Error()); quarantineErr != nil {
 					server.Logger.Error("не удалось сохранить пакет в карантин", "error", quarantineErr)
 					batchComplete = false
@@ -242,6 +243,8 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			server.Logger.Info("транспортный пакет обработан",
 				"event_id", result.EventID, "status", result.Status,
 				"new_event", result.Accepted, "sender_bot", result.ClientBotUsername,
+				"content_kind", result.ContentKind, "content_chars", result.ContentChars,
+				"content_blocks", result.ContentBlocks, "source_mode", result.SourceMode,
 			)
 			acknowledgedAt := time.Now().UTC()
 			if acknowledgementDue(recentAcknowledgements, result.EventID, acknowledgedAt) {

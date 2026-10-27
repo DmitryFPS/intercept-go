@@ -67,6 +67,7 @@ type ServerHistoryItem struct {
 	UpdatedBy     string     `json:"updated_by,omitempty"`
 	Content       string     `json:"content,omitempty"`
 	ContentReady  bool       `json:"content_ready"`
+	ContentKind   string     `json:"content_kind"`
 	ContentNote   string     `json:"content_note,omitempty"`
 }
 
@@ -525,6 +526,11 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 	item.UpdatedBy = event.UpdatedBy
 	item.Content = event.Content
 	item.ContentReady = true
+	item.ContentKind = "text"
+	if strings.TrimSpace(event.Content) == "" {
+		item.ContentKind = "empty_text"
+		item.ContentNote = "Клиент передал перехват без текста. Протокол rc69 не передаёт вложения, поэтому фото, аудио, видео или иной файл в этом событии отсутствуют."
+	}
 	sourceAt := event.SourceAt
 	if sourceAt.IsZero() {
 		sourceAt = event.ObservedAt
@@ -603,6 +609,7 @@ func (store *ServerStore) rejectedHistory(ctx context.Context, limit, offset int
 		item.ClientName = strings.TrimPrefix(sender, "@")
 		item.Destination = fmt.Sprintf("Тема %d", thread)
 		item.State = "rejected"
+		item.ContentKind = "unverified"
 		item.ContentNote = "Содержимое недоступно: пакет отклонён до подтверждения подлинности и безопасной расшифровки."
 		item.OccurredAt, _ = time.Parse(time.RFC3339Nano, occurred)
 		if searchQuery != "" {

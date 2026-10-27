@@ -223,12 +223,26 @@ func TestAllDashboardHistoryFilters(t *testing.T) {
 	pendingEvent := serverTestEvent()
 	pendingEvent.ID = "event-pending"
 	pendingEvent.Source.UUID = "source-pending"
+	pendingEvent.Content = ""
 	pendingPlan, err := rules.Resolve(pendingEvent)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if accepted, acceptErr := store.Accept(ctx, pendingEvent, pendingPlan); acceptErr != nil || !accepted {
 		t.Fatalf("accept pending=%v err=%v", accepted, acceptErr)
+	}
+	pendingPage, pageErr := store.HistoryPage(ctx, "pending", 30, 0, time.Now().UTC())
+	if pageErr != nil || len(pendingPage.Items) != 4 {
+		t.Fatalf("история ожидания: %+v err=%v", pendingPage, pageErr)
+	}
+	foundEmpty := false
+	for _, item := range pendingPage.Items {
+		if item.ID == pendingEvent.ID {
+			foundEmpty = item.ContentReady && item.ContentKind == "empty_text" && item.ContentNote != ""
+		}
+	}
+	if !foundEmpty {
+		t.Fatalf("перехват без текста не объяснён оператору: %+v", pendingPage.Items)
 	}
 	now := time.Now().UTC()
 	if err := store.RecordClientSignalByTransport(ctx, 12, -1001, 10, true, now); err != nil {
@@ -273,7 +287,7 @@ func TestAllDashboardHistoryFilters(t *testing.T) {
 		want  int
 	}{
 		{kind: "received", query: "1 МБ 155 ОМБР", want: 2},
-		{kind: "received", query: "данные", want: 2},
+		{kind: "received", query: "данные", want: 1},
 		{kind: "pending", query: "39-ка", want: 1},
 		{kind: "delivered", query: "Аэродром", want: 1},
 		{kind: "expired", query: "39-КА", want: 1},
