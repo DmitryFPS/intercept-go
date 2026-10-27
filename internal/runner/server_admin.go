@@ -394,9 +394,21 @@ func (server *Server) ClearHistory(ctx context.Context, kind string) error {
 // RepublishTelegramBlock повторно создаёт только явно выбранный удалённый
 // временной блок. ID берётся исключительно из ответа бота: сообщения других
 // участников группы никогда не используются как привязка.
-func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, destinationID, blockUUID string) error {
+func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, destinationID, blockUUID string) (resultErr error) {
 	server.adminMu.Lock()
 	defer server.adminMu.Unlock()
+	// Фоновая доставка и ручная команда используют один файл состояния.
+	// Короткая штатная пауза исключает гонку двух экземпляров адаптера; входящие
+	// пакеты при этом остаются в Telegram и будут приняты сразу после запуска.
+	wasProcessing := server.Status().Processing
+	if wasProcessing {
+		server.stopWorker()
+		defer func() {
+			if restartErr := server.restartWorker(server.applicationContext()); restartErr != nil && resultErr == nil {
+				resultErr = fmt.Errorf("блок опубликован, но обработку Центра не удалось возобновить: %w", restartErr)
+			}
+		}()
+	}
 	job, err := server.Store.DeliveryJobByID(ctx, strings.TrimSpace(eventID), strings.TrimSpace(destinationID))
 	if err != nil {
 		return err

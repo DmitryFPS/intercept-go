@@ -378,27 +378,28 @@ func TestServerStorePreservesOrderInsideTopicWithoutBlockingOtherTopics(t *testi
 	accept("event-2", now.Add(time.Second), 2)
 	accept("event-3", now.Add(time.Second), 4)
 
-	jobs, err := store.PendingDeliveries(ctx, 10, now.Add(2*time.Second))
+	readyAt := time.Now().UTC().Add(time.Minute)
+	jobs, err := store.PendingDeliveries(ctx, 10, readyAt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(jobs) != 2 || jobs[0].Event.ID != "event-1" || jobs[1].Event.ID != "event-3" {
 		t.Fatalf("ожидались головы двух независимых топиков: %#v", jobs)
 	}
-	if err := store.MarkDeliveryRetry(ctx, "event-1", "telegram", now.Add(time.Minute), "нет сети"); err != nil {
+	if err := store.MarkDeliveryRetry(ctx, "event-1", "telegram", readyAt.Add(time.Minute), "нет сети"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkDelivered(ctx, "event-3", "telegram", now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	jobs, err = store.PendingDeliveries(ctx, 10, now.Add(3*time.Second))
+	jobs, err = store.PendingDeliveries(ctx, 10, readyAt)
 	if err != nil || len(jobs) != 0 {
 		t.Fatalf("второе событие топика 2 не должно обгонять первое: %#v, %v", jobs, err)
 	}
 	if err := store.MarkDelivered(ctx, "event-1", "telegram", now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	jobs, err = store.PendingDeliveries(ctx, 10, now.Add(time.Minute))
+	jobs, err = store.PendingDeliveries(ctx, 10, readyAt.Add(2*time.Minute))
 	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "event-2" {
 		t.Fatalf("после первого ожидалось второе событие топика: %#v, %v", jobs, err)
 	}
@@ -442,7 +443,7 @@ func TestServerStorePermanentFailureReleasesStream(t *testing.T) {
 	if err := store.MarkDeliveryFailed(ctx, "broken-edit", destination.ID, now.Add(2*time.Second), "сообщение Telegram удалено"); err != nil {
 		t.Fatal(err)
 	}
-	jobs, err := store.PendingDeliveries(ctx, 10, now.Add(2*time.Second))
+	jobs, err := store.PendingDeliveries(ctx, 10, time.Now().UTC().Add(time.Minute))
 	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "next-message" {
 		t.Fatalf("следующее сообщение не освобождено: %#v, %v", jobs, err)
 	}
@@ -498,7 +499,7 @@ func TestServerStoreRepairsTerminalEditFromPreviousVersion(t *testing.T) {
 	if _, err := NewServerStore(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	jobs, err := store.PendingDeliveries(ctx, 10, now.Add(2*time.Second))
+	jobs, err := store.PendingDeliveries(ctx, 10, time.Now().UTC().Add(time.Minute))
 	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "rc69-next" {
 		t.Fatalf("очередь rc69 не освобождена при запуске: %#v, %v", jobs, err)
 	}
@@ -549,14 +550,15 @@ func TestServerStoreKeepsRevisionAfterOriginalAcrossTopics(t *testing.T) {
 	// Идентификаторы специально расположены против алфавитного порядка.
 	accept("z-original", "исходный", "позиция А", 2)
 	accept("a-revision", "редакция", "позиция Б", 4)
-	jobs, err := store.PendingDeliveries(ctx, 10, now.Add(time.Second))
+	readyAt := time.Now().UTC().Add(time.Minute)
+	jobs, err := store.PendingDeliveries(ctx, 10, readyAt)
 	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "z-original" {
 		t.Fatalf("редакция обогнала исходное сообщение: %#v, %v", jobs, err)
 	}
 	if err := store.MarkDelivered(ctx, "z-original", destination.ID, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	jobs, err = store.PendingDeliveries(ctx, 10, now.Add(2*time.Second))
+	jobs, err = store.PendingDeliveries(ctx, 10, readyAt.Add(time.Minute))
 	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "a-revision" {
 		t.Fatalf("редакция не вышла после исходного сообщения: %#v, %v", jobs, err)
 	}
@@ -600,10 +602,11 @@ func TestServerStoreSeparatesWordQueuesByPosition(t *testing.T) {
 	accept("first", "source-1", "подразделение А", now)
 	accept("same-position", "source-2", "подразделение А", now.Add(time.Second))
 	accept("other-position", "source-3", "подразделение Б", now.Add(time.Second))
-	if err := store.MarkDeliveryRetry(ctx, "first", destination.ID, now.Add(time.Minute), "файл занят"); err != nil {
+	readyAt := time.Now().UTC().Add(time.Minute)
+	if err := store.MarkDeliveryRetry(ctx, "first", destination.ID, readyAt.Add(time.Minute), "файл занят"); err != nil {
 		t.Fatal(err)
 	}
-	jobs, err := store.PendingDeliveries(ctx, 10, now.Add(10*time.Second))
+	jobs, err := store.PendingDeliveries(ctx, 10, readyAt)
 	if err != nil || len(jobs) != 1 || jobs[0].Event.ID != "other-position" {
 		t.Fatalf("ожидался документ другого подразделения: %#v, %v", jobs, err)
 	}

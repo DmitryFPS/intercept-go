@@ -551,6 +551,12 @@ func TestDestinationRepublishesOnlyExplicitlySelectedBlock(t *testing.T) {
 	if err != nil || !allowed {
 		t.Fatalf("повторная публикация не разрешена: allowed=%v err=%v", allowed, err)
 	}
+	// Повтор команды до фактической доставки не должен снять разрешение:
+	// интерфейс или сеть могут безопасно повторить один и тот же запрос.
+	allowed, err = destination.AllowRepublish("block-1")
+	if err != nil || !allowed {
+		t.Fatalf("повторное разрешение неидемпотентно: allowed=%v err=%v", allowed, err)
+	}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}

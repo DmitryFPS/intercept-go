@@ -192,6 +192,26 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 		len(delivered.Items[0].TelegramURLs) != 2 || delivered.Items[0].TelegramURLs[0] != "https://t.me/c/3943357633/701" {
 		t.Fatalf("история потеряла ID конечных сообщений Telegram: %+v", delivered.Items[0])
 	}
+	job, err := store.DeliveryJobByID(ctx, event.ID, plan.Deliveries[0].Destination.ID)
+	if err != nil || job.Event.ID != event.ID || job.Delivery.Destination.ID != plan.Deliveries[0].Destination.ID {
+		t.Fatalf("точечная загрузка доставки: %+v err=%v", job, err)
+	}
+	replacement := application.DeliveryReceipt{
+		Kind: "telegram", ChatID: -1003943357633, ThreadID: 17, MessageIDs: []int64{703},
+		Blocks: []application.DeliveryBlockReceipt{{
+			BlockUUID: "block-1", MessageIDs: []int64{703}, DeletedMessageIDs: []int64{701},
+		}},
+	}
+	if err := store.ReplaceDeliveryReceipt(ctx, event.ID, plan.Deliveries[0].Destination.ID, time.Now().UTC(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	delivered, err = store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC())
+	if err != nil || delivered.Total != 1 || len(delivered.Items) != 1 ||
+		len(delivered.Items[0].TelegramIDs) != 1 || delivered.Items[0].TelegramIDs[0] != 703 ||
+		len(delivered.Items[0].TelegramBlocks) != 1 || delivered.Items[0].TelegramBlocks[0].BlockUUID != "block-1" ||
+		len(delivered.Items[0].TelegramBlocks[0].DeletedMessageIDs) != 1 || delivered.Items[0].TelegramBlocks[0].DeletedMessageIDs[0] != 701 {
+		t.Fatalf("история не получила новый ID ручной публикации: %+v err=%v", delivered, err)
+	}
 	filtered, err := store.HistoryPage(ctx, "delivered", 30, 0, time.Now().UTC(), HistoryFilter{
 		ClientID: "textile", DestinationID: plan.Deliveries[0].Destination.ID, Query: "Текстиль",
 	})
