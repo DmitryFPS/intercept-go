@@ -622,3 +622,100 @@ func TestLateUploadDoesNotUndoAcknowledgement(t *testing.T) {
 		t.Fatalf("быстро подтверждённое событие потеряло message_id транспорта: %#v", items[0])
 	}
 }
+
+// Оператор может очистить подтверждённую запись в коротком окне между ответом
+// центра и возвратом Telegram Send. Это не сетевая ошибка и не повод повторять
+// уже доставленный пакет.
+func TestLateUploadAfterTerminalRecordWasClearedIsSuccessful(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "fast-ack-cleared", ClientID: "client", CreatedAt: now, ObservedAt: now, SourceAt: now,
+		ExpiresAt: now.Add(time.Hour), Source: domain.SourceRecord{UUID: "source-fast-ack-cleared"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "текст", ContentDigest: "digest-fast-ack-cleared",
+	}
+	if inserted, err := queue.Enqueue(ctx, event); err != nil || !inserted {
+		t.Fatalf("поставить событие: inserted=%v err=%v", inserted, err)
+	}
+	if err := queue.MarkAcknowledged(ctx, event.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := queue.ClearTerminal(ctx, "acknowledged"); err != nil || removed != 1 {
+		t.Fatalf("очистить подтверждённое событие: removed=%d err=%v", removed, err)
+	}
+	if err := queue.MarkUploaded(ctx, event.ID, 77); err != nil {
+		t.Fatalf("поздняя отметка очищенной записи дала ложную ошибку: %v", err)
+	}
+	stats, err := queue.Stats(ctx)
+	if err != nil || stats != (ClientStats{}) {
+		t.Fatalf("очищенная запись вернулась в очередь: %+v err=%v", stats, err)
+	}
+}
+
+func TestClientClearedEventsArePrunedByAgeAndLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertCleared := func(uuid string, clearedAt time.Time) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO client_cleared_events(source_uuid, source_version, content_digest, cleared_at)
+			VALUES(?, ?, ?, ?)`, uuid, "version", "digest", clearedAt.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertCleared("too-old", now.Add(-31*24*time.Hour))
+	insertCleared("recent-1", now.Add(-3*time.Hour))
+	insertCleared("recent-2", now.Add(-2*time.Hour))
+	insertCleared("recent-3", now.Add(-time.Hour))
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneClientClearedEvents(ctx, tx, now, 30*24*time.Hour, 2); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_cleared_events").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("число меток после ограничения=%d, ожидалось 2", count)
+	}
+	for _, uuid := range []string{"recent-2", "recent-3"} {
+		event := domain.Event{
+			ID: "repeat-" + uuid, ClientID: "client", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+			Source:   domain.SourceRecord{UUID: uuid, UpdatedAt: "version"},
+			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+			Content: "текст", ContentDigest: "digest",
+		}
+		if inserted, err := queue.Enqueue(ctx, event); err != nil || inserted {
+			t.Fatalf("свежая очищенная версия %s вернулась: inserted=%v err=%v", uuid, inserted, err)
+		}
+	}
+}

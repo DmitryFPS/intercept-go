@@ -403,6 +403,47 @@ func TestProtectedHistorySearchKeepsExactPagination(t *testing.T) {
 	}
 }
 
+func TestProtectedHistoryAttachesTransportTraceBeyondSQLiteParameterLimit(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	rules := serverTestRules()
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	const eventCount = 1100
+	now := time.Now().UTC()
+	for index := 1; index <= eventCount; index++ {
+		event := serverTestEvent()
+		event.ID = fmt.Sprintf("batch-event-%04d", index)
+		event.Source.ID = int64(index)
+		event.Source.UUID = fmt.Sprintf("batch-source-%04d", index)
+		plan, err := rules.Resolve(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+			t.Fatalf("accept %d=%v err=%v", index, accepted, acceptErr)
+		}
+		if err := store.RecordTransportObservation(ctx, application.TransportObservation{
+			UpdateID: int64(10000 + index), MessageID: int64(20000 + index),
+			ChatID: -1001, ThreadID: 10, SenderBotID: 12, SenderBotUsername: "textile_bot",
+			MessageKind: "event_packet", Outcome: "event_accepted", EventID: event.ID,
+			ClientID: "textile", Counted: true, Rank: 100, SentAt: now, ObservedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := store.HistoryPage(ctx, "received", 100, 0, now.Add(time.Second), HistoryFilter{Query: "1 МБ 155 ОМБР"})
+	if err != nil || page.Total != eventCount || len(page.Items) != 100 {
+		t.Fatalf("пакетная история: total=%d items=%d err=%v", page.Total, len(page.Items), err)
+	}
+	for _, item := range page.Items {
+		if item.TransportMessageID == 0 || item.TransportUpdateID == 0 || !item.Counted || item.TransportOutcome != "event_accepted" {
+			t.Fatalf("транспортная связь потеряна: %+v", item)
+		}
+	}
+}
+
 func TestHistoryPageReportsCorruptedProtectedEvent(t *testing.T) {
 	t.Parallel()
 	store, ctx := openObservabilityStore(t)

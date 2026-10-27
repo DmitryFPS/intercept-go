@@ -62,6 +62,60 @@ func TestServerReceiverRejectsUnknownBotBeforeDownload(t *testing.T) {
 	}
 }
 
+// Служебный файл недопустимого размера окончательно отвергается без скачивания
+// и передаётся долговечной очереди очистки, чтобы не копиться в Telegram.
+func TestServerReceiverDiscardsInvalidSizeTransportFile(t *testing.T) {
+	t.Parallel()
+	var downloads atomic.Int32
+	var discarded atomic.Int64
+	var observations []application.TransportObservation
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true,
+				"result": []any{map[string]any{
+					"update_id": 17,
+					"message": map[string]any{
+						"message_id": 25, "message_thread_id": 9,
+						"from": map[string]any{"id": 101, "is_bot": true, "username": "station_bot"},
+						"chat": map[string]any{"id": -1001, "type": "supergroup"},
+						"document": map[string]any{
+							"file_id": "oversized", "file_name": "oversized.icevent", "file_size": 2048,
+						},
+					},
+				}},
+			})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			downloads.Add(1)
+			http.Error(writer, "getFile не должен вызываться", http.StatusInternalServerError)
+		default:
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+		}
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := ServerReceiver{
+		API: client, ChatID: -1001, MaxBytes: 1024,
+		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+		Discard:   func(_ context.Context, messageID int64) { discarded.Store(messageID) },
+		Observe:   func(item application.TransportObservation) { observations = append(observations, item) },
+	}
+	packets, next, err := receiver.Packets(context.Background(), 0)
+	if err != nil || len(packets) != 0 || next != 18 {
+		t.Fatalf("неожиданный результат: packets=%#v next=%d err=%v", packets, next, err)
+	}
+	if downloads.Load() != 0 || discarded.Load() != 25 {
+		t.Fatalf("неверная обработка размера: downloads=%d discarded=%d", downloads.Load(), discarded.Load())
+	}
+	if len(observations) != 1 || observations[0].Outcome != "ignored_invalid_size" {
+		t.Fatalf("невалидный размер не объяснён в журнале: %#v", observations)
+	}
+}
+
 // Текст, картинка и файл человека в группе обмена классифицируются, но не
 // превращаются в рабочий пакет и не требуют скачивания.
 func TestServerReceiverAuditsHumanMessagesWithoutCountingThem(t *testing.T) {

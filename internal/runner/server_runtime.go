@@ -117,7 +117,10 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		Queue: server.Store, Gateways: gateways, Now: time.Now,
 		MaxConcurrent: 4, AttemptTimeout: 2 * time.Minute, Logger: server.Logger,
 	}
-	transportAudit := make(chan application.TransportObservation, 512)
+	transportAudit := newTransportAuditSink(
+		server.Store, server.Logger, filepath.Join(server.BaseDir, "data", "transport-audit-spool"),
+		transportAuditBufferSize,
+	)
 	var background sync.WaitGroup
 	background.Add(2)
 	go func() {
@@ -126,9 +129,15 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	}()
 	go func() {
 		defer background.Done()
-		server.transportAuditLoop(ctx, transportAudit)
+		transportAudit.run()
 	}()
-	defer background.Wait()
+	defer func() {
+		// После выхода из run получатель больше не создаёт наблюдения. Закрываем
+		// вход, дренируем аудит независимо от отменённого рабочего контекста и
+		// только затем завершаем остановку/перезапуск центра.
+		transportAudit.shutdown()
+		background.Wait()
+	}()
 	for {
 		// Накопившиеся обновления нельзя удалять: событие могло быть отправлено
 		// точкой непосредственно перед остановкой центра и к следующей попытке
@@ -155,12 +164,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		},
 	}
 	receiver.Observe = func(item application.TransportObservation) {
-		select {
-		case transportAudit <- item:
-		default:
-			server.Logger.Warn("журнал транспорта переполнен; рабочая обработка продолжается",
-				"transport_message_id", item.MessageID, "outcome", item.Outcome)
-		}
+		transportAudit.submit(item)
 	}
 	// Даже файлы, отброшенные до расшифровки (исчезнувшие, чужие или
 	// повреждённые), очищаются через ту же долговечную очередь, что и принятые.
@@ -314,27 +318,6 @@ func transportObservation(
 		SenderBotUsername: packet.SenderBotUsername, MessageKind: kind, Outcome: outcome,
 		Reason: reason, EventID: eventID, ClientID: clientID, Counted: counted, Rank: rank,
 		SentAt: packet.SentAt, ObservedAt: time.Now().UTC(),
-	}
-}
-
-func (server *Server) transportAuditLoop(ctx context.Context, observations <-chan application.TransportObservation) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case item := <-observations:
-			writeContext, cancel := context.WithTimeout(ctx, 2*time.Second)
-			err := server.Store.RecordTransportObservation(writeContext, item)
-			cancel()
-			if err != nil && ctx.Err() == nil {
-				server.Logger.Warn("не удалось записать журнал транспорта; рабочая обработка продолжается",
-					"transport_message_id", item.MessageID, "outcome", item.Outcome, "error", err)
-			} else if err == nil && item.Rank >= 100 {
-				server.Logger.Info("транспортное сообщение классифицировано",
-					"trace_id", item.EventID, "transport_message_id", item.MessageID,
-					"outcome", item.Outcome, "counted", item.Counted)
-			}
-		}
 	}
 }
 

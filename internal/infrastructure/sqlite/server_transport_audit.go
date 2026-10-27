@@ -2,7 +2,7 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -85,25 +85,77 @@ func (store *ServerStore) PurgeTransportAudit(ctx context.Context, before time.T
 	return int(count), err
 }
 
-func (store *ServerStore) attachTransportTrace(ctx context.Context, item *ServerHistoryItem) error {
-	if item == nil || strings.TrimSpace(item.ID) == "" {
+// attachTransportTraces дополняет всю страницу истории одним пакетным запросом.
+// JSON-массив вместо IN(?,?,...) не упирается в лимит параметров SQLite даже
+// при защищённом поиске по maxHistorySearchRows строкам.
+func (store *ServerStore) attachTransportTraces(ctx context.Context, items []ServerHistoryItem) error {
+	ids := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for index := range items {
+		id := strings.TrimSpace(items[index].ID)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
 		return nil
 	}
-	var counted int
-	err := store.db.QueryRowContext(ctx, `
-		SELECT update_id,message_id,message_kind,outcome,seen_count,counted
-		FROM transport_audit WHERE event_id=?
-		ORDER BY state_rank DESC,last_seen_at DESC LIMIT 1`, item.ID).Scan(
-		&item.TransportUpdateID, &item.TransportMessageID, &item.TransportKind,
-		&item.TransportOutcome, &item.TransportSeen, &counted,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+	payload, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("подготовить транспортные связи событий: %w", err)
 	}
+	rows, err := store.db.QueryContext(ctx, `
+		WITH ranked AS (
+			SELECT t.event_id,t.update_id,t.message_id,t.message_kind,t.outcome,
+				t.seen_count,t.counted,
+				ROW_NUMBER() OVER (
+					PARTITION BY t.event_id
+					ORDER BY t.state_rank DESC,t.last_seen_at DESC
+				) AS row_number
+			FROM transport_audit t
+			JOIN json_each(?) requested ON requested.value=t.event_id
+		)
+		SELECT event_id,update_id,message_id,message_kind,outcome,seen_count,counted
+		FROM ranked WHERE row_number=1`, string(payload))
 	if err != nil {
 		return fmt.Errorf("прочитать транспортную связь события: %w", err)
 	}
-	item.Counted = counted == 1
+	defer rows.Close()
+	type trace struct {
+		updateID, messageID int64
+		kind, outcome       string
+		seen, counted       int
+	}
+	traces := make(map[string]trace, len(ids))
+	for rows.Next() {
+		var eventID string
+		var item trace
+		if err := rows.Scan(&eventID, &item.updateID, &item.messageID, &item.kind,
+			&item.outcome, &item.seen, &item.counted); err != nil {
+			return fmt.Errorf("прочитать транспортную связь события: %w", err)
+		}
+		traces[eventID] = item
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("прочитать транспортные связи событий: %w", err)
+	}
+	for index := range items {
+		trace, exists := traces[items[index].ID]
+		if !exists {
+			continue
+		}
+		items[index].TransportUpdateID = trace.updateID
+		items[index].TransportMessageID = trace.messageID
+		items[index].TransportKind = trace.kind
+		items[index].TransportOutcome = trace.outcome
+		items[index].TransportSeen = trace.seen
+		items[index].Counted = trace.counted == 1
+	}
 	return nil
 }
 

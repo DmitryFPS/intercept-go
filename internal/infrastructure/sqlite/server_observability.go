@@ -488,7 +488,7 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 		return nil, 0, err
 	}
 	defer rows.Close()
-	var result []ServerHistoryItem
+	var scannedItems []ServerHistoryItem
 	scanned := 0
 	for rows.Next() {
 		scanned++
@@ -499,9 +499,21 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 		if scanErr != nil {
 			return nil, 0, scanErr
 		}
-		if err := store.attachTransportTrace(ctx, &item); err != nil {
-			return nil, 0, err
-		}
+		scannedItems = append(scannedItems, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	// Освобождаем SELECT истории до пакетного запроса связей. Это важно и для
+	// SQLite с единственным доступным соединением, и для предсказуемой памяти.
+	if err := rows.Close(); err != nil {
+		return nil, 0, err
+	}
+	if err := store.attachTransportTraces(ctx, scannedItems); err != nil {
+		return nil, 0, err
+	}
+	result := make([]ServerHistoryItem, 0, min(limit, len(scannedItems)))
+	for _, item := range scannedItems {
 		if searchQuery != "" {
 			if !serverHistoryItemMatches(item, searchQuery) {
 				continue
@@ -513,7 +525,7 @@ func (store *ServerStore) eventHistory(ctx context.Context, kind string, limit, 
 		}
 		result = append(result, item)
 	}
-	return result, total, rows.Err()
+	return result, total, nil
 }
 
 func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {

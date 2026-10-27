@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	uploadedRetryBaseInterval = 20 * time.Minute
-	uploadedRetryMaxInterval  = 2 * time.Hour
+	uploadedRetryBaseInterval   = 20 * time.Minute
+	uploadedRetryMaxInterval    = 2 * time.Hour
+	clientClearedEventRetention = 180 * 24 * time.Hour
+	clientClearedEventLimit     = 200000
 )
 
 // ClientQueue хранит события независимо от процесса и состояния сети.
@@ -157,6 +159,9 @@ func (queue *ClientQueue) ClearTerminal(ctx context.Context, state string) (int,
 	if err != nil {
 		return 0, fmt.Errorf("определить число очищенных сообщений: %w", err)
 	}
+	if err := pruneClientClearedEvents(ctx, tx, time.Now().UTC(), clientClearedEventRetention, clientClearedEventLimit); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("завершить очистку сообщений: %w", err)
 	}
@@ -221,10 +226,41 @@ func (queue *ClientQueue) PurgeTerminal(ctx context.Context, before time.Time) (
 	if err != nil {
 		return 0, fmt.Errorf("определить число ограниченных событий клиента: %w", err)
 	}
+	if err := pruneClientClearedEvents(ctx, tx, time.Now().UTC(), clientClearedEventRetention, clientClearedEventLimit); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("завершить очистку клиента: %w", err)
 	}
 	return int(count + overflowCount), nil
+}
+
+// pruneClientClearedEvents ограничивает технические метки очистки. Свежие
+// метки нужны, чтобы повторное чтение граничной строки EAVC не вернуло её в
+// интерфейс, но хранить их бессрочно нет необходимости: курсор чтения к этому
+// моменту уже многократно сохранён и продвинут вперёд.
+func pruneClientClearedEvents(
+	ctx context.Context, tx *sql.Tx, now time.Time, retention time.Duration, limit int,
+) error {
+	if retention <= 0 || limit < 1 {
+		return errors.New("неверные параметры очистки меток клиентской очереди")
+	}
+	cutoff := now.UTC().Add(-retention).Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM client_cleared_events WHERE cleared_at < ?", cutoff,
+	); err != nil {
+		return fmt.Errorf("удалить устаревшие метки клиентской очереди: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM client_cleared_events
+		WHERE rowid NOT IN (
+			SELECT rowid FROM client_cleared_events
+			ORDER BY cleared_at DESC, rowid DESC
+			LIMIT ?
+		)`, limit); err != nil {
+		return fmt.Errorf("ограничить метки клиентской очереди: %w", err)
+	}
+	return nil
 }
 
 // Compact возвращает SQLite свободные страницы и ограничивает WAL-файл.
@@ -353,7 +389,11 @@ func clientStreamKey(event domain.Event) string {
 // MarkUploaded запоминает загрузку в транспорт, не считая её приёмом сервером.
 func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, telegramMessageID int64) error {
 	var attempts int
-	if err := queue.db.QueryRowContext(ctx, `SELECT attempts FROM client_events WHERE event_id=?`, eventID).Scan(&attempts); err != nil {
+	if err := queue.db.QueryRowContext(ctx, `SELECT attempts FROM client_events WHERE event_id=?`, eventID).Scan(&attempts); errors.Is(err, sql.ErrNoRows) {
+		// Центр мог подтвердить событие, а оператор — очистить завершённую
+		// запись до возврата Telegram Send. Для очереди это уже успех.
+		return nil
+	} else if err != nil {
 		return fmt.Errorf("прочитать число транспортных попыток: %w", err)
 	}
 	now := time.Now().UTC()

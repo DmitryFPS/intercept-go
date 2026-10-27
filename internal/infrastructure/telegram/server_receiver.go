@@ -96,6 +96,10 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			observation.Outcome, observation.Reason, observation.Rank =
 				"ignored_invalid_size", "Недопустимый размер служебного файла", 100
 			receiver.observe(observation)
+			// Размер уже известен из метаданных Telegram, поэтому такой пакет
+			// окончательно невалиден и не должен навсегда оставаться в служебной
+			// группе. Discard сохраняет неудавшееся удаление в долговечной очереди.
+			receiver.discardPacket(ctx, message.MessageID)
 			continue
 		}
 		packet := application.IncomingPacket{
