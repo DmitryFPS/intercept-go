@@ -567,6 +567,7 @@ func TestDestinationRepublishesOnlyExplicitlySelectedBlock(t *testing.T) {
 	first := current.Items["point-01|source-1"].Blocks["block-1"]
 	second := current.Items["point-01|source-1"].Blocks["block-2"]
 	if first.Suppressed || !reflect.DeepEqual(first.MessageIDs, []int64{103}) ||
+		!reflect.DeepEqual(first.DeletedMessageIDs, []int64{101}) ||
 		!reflect.DeepEqual(second.MessageIDs, []int64{102}) {
 		t.Fatalf("неверная привязка после ручной публикации: first=%#v second=%#v", first, second)
 	}

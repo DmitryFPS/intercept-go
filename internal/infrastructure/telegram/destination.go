@@ -194,8 +194,14 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		if err != nil {
 			return fmt.Errorf("синхронизировать блок %s: %w", blockKey, err)
 		}
+		// История удалённых message_id остаётся частью диагностической цепочки
+		// даже после явной повторной публикации оператором. Иначе новый
+		// message_id сохранялся правильно, но связь с вручную удалённой
+		// публикацией бесследно пропадала из интерфейса и журналов.
 		item.Blocks[blockKey] = destinationBlock{
-			Hash: renderHash, SourceHash: baseHash, MessageIDs: messageIDs, Sequence: block.Sequence,
+			Hash: renderHash, SourceHash: baseHash, MessageIDs: messageIDs,
+			DeletedMessageIDs: append([]int64(nil), stored.DeletedMessageIDs...),
+			Sequence:          block.Sequence,
 		}
 		if err := destination.saveItem(itemKey, item, false); err != nil {
 			return err
