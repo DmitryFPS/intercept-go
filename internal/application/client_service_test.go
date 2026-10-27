@@ -94,6 +94,33 @@ func TestClientServiceDoesNotCountBoundaryReplayAsNewEvent(t *testing.T) {
 	}
 }
 
+// Добавление UUID блоков в rc82 не должно менять прежний отпечаток rc81.
+// Иначе после обновления граничное перечитывание возвращает старые записи в
+// «Не отправлены старше 30 минут» как будто это новые редакции.
+func TestClientServiceBlockMetadataKeepsRC81ContentDigest(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 27, 14, 0, 0, 0, time.UTC)
+	base := SourceItem{
+		Record:   domain.SourceRecord{ID: 345, UUID: "record-345", UpdatedAt: "2026-10-27 14:00:00"},
+		Position: domain.Position{UnitName: "1 аэмб 68 оаэмбр", Frequency: "119.009", GroupCode: "E2E"},
+		Content:  "10.39\n-Первый блок", Mode: domain.SourceModeNormal, ObservedAt: now,
+	}
+	service := ClientService{ClientID: "textile", Now: func() time.Time { return now }}
+	legacy, err := service.newEvent(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withUUID := base
+	withUUID.Blocks = []domain.ContentBlock{{UUID: "01a17-block", Key: "10.39", Sequence: 0, Text: base.Content, Hash: "hash", UpdatedAt: "2026-10-27T14:00:00Z"}}
+	modern, err := service.newEvent(withUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modern.ContentDigest != legacy.ContentDigest {
+		t.Fatalf("UUID блока изменил отпечаток rc81: %s != %s", modern.ContentDigest, legacy.ContentDigest)
+	}
+}
+
 // EAVC сохраняет новую карточку и её текст разными запросами. Пустой
 // промежуточный черновик нельзя считать отдельным перехватом: заполненная
 // версия той же записи будет найдена при повторном чтении граничной секунды.
