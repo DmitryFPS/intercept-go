@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +151,64 @@ func TestClientServiceCreatesIndependentEventForEveryTimeBlock(t *testing.T) {
 	}
 	if queue.events[0].Source.UUID != "record-375" || queue.events[1].Source.UUID != "record-375" {
 		t.Fatalf("исходная запись EAVC потеряна: %#v", queue.events)
+	}
+}
+
+// При закрытии смены EAVC переносит запись в архив и удаляет настоящие UUID
+// блоков. Тот же текст возвращается с синтетическими legacy-UUID и раньше
+// ошибочно становился новым Telegram-сообщением и новым DOCX.
+func TestClientServiceSuppressesSeenBlocksAfterSessionArchive(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []struct {
+		name         string
+		closureDelay time.Duration
+	}{
+		{name: "смена закрыта сразу", closureDelay: 5 * time.Second},
+		{name: "смена закрыта через произвольные семь часов", closureDelay: 7 * time.Hour},
+		{name: "смену забыли закрыть на сорок пять дней", closureDelay: 45 * 24 * time.Hour},
+	} {
+		scenario := scenario
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Date(2026, 10, 27, 20, 0, 0, 0, time.UTC)
+			item := SourceItem{
+				Record:   domain.SourceRecord{ID: 389, UUID: "record-389", UpdatedAt: "2026-10-27 19:45:00"},
+				Position: domain.Position{UnitName: "1 мб 155 омбр"}, Mode: domain.SourceModeNormal,
+				Content: "19.40\n-Первый блок\n19.45\n-Второй блок", ObservedAt: now,
+				Blocks: []domain.ContentBlock{
+					{UUID: "block-a", Text: "19.40\n-Первый блок", UpdatedAt: "2026-10-27T19:40:00Z"},
+					{UUID: "block-b", Text: "19.45\n-Второй блок", UpdatedAt: "2026-10-27T19:45:00Z"},
+				},
+			}
+			source := &replaySource{item: item}
+			queue := newMemoryClientState()
+			currentTime := now
+			service := ClientService{
+				ClientID: "textile", Source: source, Queue: queue, State: queue, Sender: &memorySender{},
+				KeyID: "key", Key: make([]byte, 32), BatchSize: 10, CatchUpExisting: true,
+				Now: func() time.Time { return currentTime },
+			}
+			if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 2 {
+				t.Fatalf("активные блоки не приняты: queued=%d err=%v", queued, err)
+			}
+			// Закрытие смены не меняет updated_at перехвата и может произойти в
+			// любой момент. Реальная EAVC меняет только формат этой отметки при
+			// архивном чтении и заменяет UUID блоков синтетическими legacy-UUID.
+			currentTime = now.Add(scenario.closureDelay)
+			source.item.ObservedAt = currentTime
+			source.item.Archived = true
+			source.item.Record.UpdatedAt = "2026-10-27T19:45:00Z"
+			source.item.Blocks = []domain.ContentBlock{
+				{UUID: "legacy-a", Text: "19.40\n-Первый блок", UpdatedAt: source.item.Record.UpdatedAt},
+				{UUID: "legacy-b", Text: "19.45\n-Второй блок", UpdatedAt: source.item.Record.UpdatedAt},
+			}
+			if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+				t.Fatalf("архивная копия стала новым перехватом: queued=%d err=%v", queued, err)
+			}
+			if len(queue.events) != 2 {
+				t.Fatalf("архив создал дубли: %#v", queue.events)
+			}
+		})
 	}
 }
 
@@ -468,6 +527,35 @@ func (state *memoryClientState) SeedBlockBaselinesFromLegacy(
 		}
 	}
 	if !known {
+		return false, nil
+	}
+	for _, event := range events {
+		state.baselines[sourceVersionKey(event)] = true
+	}
+	return true, nil
+}
+
+func (state *memoryClientState) SeedArchiveBaselinesFromSeenBlocks(
+	_ context.Context, sourceUUID, sourceVersion string, events []domain.Event,
+) (bool, error) {
+	prefix := sourceUUID + "|block:"
+	knownBlocks := make(map[string]struct{})
+	latestVersion := false
+	for _, existing := range state.events {
+		lineage := existing.SourceLineageKey()
+		if !strings.HasPrefix(lineage, prefix) {
+			continue
+		}
+		knownBlocks[lineage] = struct{}{}
+		if existing.SourceVersion() == sourceVersion {
+			latestVersion = true
+		}
+	}
+	expectedBlocks := make(map[string]struct{})
+	for _, event := range events {
+		expectedBlocks[event.SourceLineageKey()] = struct{}{}
+	}
+	if len(knownBlocks) < len(expectedBlocks) || !latestVersion {
 		return false, nil
 	}
 	for _, event := range events {

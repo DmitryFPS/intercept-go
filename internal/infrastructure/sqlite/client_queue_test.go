@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -175,6 +176,104 @@ func TestClientQueueSeedsBlockBaselinesFromLegacyRecord(t *testing.T) {
 			t.Fatalf("старый блок переиздан: %s inserted=%v err=%v", event.SourceBlockUUID, inserted, err)
 		}
 	}
+}
+
+func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	openQueue := func(t *testing.T) (*sql.DB, *ClientQueue) {
+		t.Helper()
+		db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		queue, err := NewClientQueue(ctx, db)
+		if err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		return db, queue
+	}
+	makeEvent := func(id, blockUUID, version, digest string) domain.Event {
+		text := "19.40\n-" + blockUUID
+		return domain.Event{
+			ID: id, ClientID: "textile", CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+			Source:   domain.SourceRecord{ID: 389, UUID: "source-389", UpdatedAt: "2026-10-27T19:45:00Z"},
+			Position: domain.Position{UnitName: "1 мб 155 омбр"}, Mode: domain.SourceModeNormal,
+			Content: text, ContentDigest: digest, SourceBlockUUID: blockUUID,
+			Blocks: []domain.ContentBlock{{UUID: blockUUID, Text: text, UpdatedAt: version}},
+		}
+	}
+	archive := []domain.Event{
+		makeEvent("archive-a", "legacy-a", "2026-10-27T19:45:00Z", "archive-digest-a"),
+		makeEvent("archive-b", "legacy-b", "2026-10-27T19:45:00Z", "archive-digest-b"),
+	}
+
+	t.Run("complete cleared history", func(t *testing.T) {
+		db, queue := openQueue(t)
+		defer db.Close()
+		active := []domain.Event{
+			makeEvent("active-a", "block-a", "2026-10-27T19:40:00Z", "active-digest-a"),
+			makeEvent("active-b", "block-b", "2026-10-27T19:45:00Z", "active-digest-b"),
+		}
+		for _, event := range active {
+			if inserted, err := queue.Enqueue(ctx, event); err != nil || !inserted {
+				t.Fatalf("активный блок не сохранён: inserted=%v err=%v", inserted, err)
+			}
+			if err := queue.MarkAcknowledged(ctx, event.ID, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if removed, err := queue.ClearTerminal(ctx, "acknowledged"); err != nil || removed != 2 {
+			t.Fatalf("история не очищена: removed=%d err=%v", removed, err)
+		}
+		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(
+			ctx, "source-389", "2026-10-27T19:45:00Z", archive,
+		)
+		if err != nil || !matched {
+			t.Fatalf("доказанный архивный повтор не распознан: matched=%v err=%v", matched, err)
+		}
+		for _, event := range archive {
+			if inserted, err := queue.Enqueue(ctx, event); err != nil || inserted {
+				t.Fatalf("архивный дубль попал в очередь: inserted=%v err=%v", inserted, err)
+			}
+		}
+	})
+
+	t.Run("partial history is not suppressed", func(t *testing.T) {
+		db, queue := openQueue(t)
+		defer db.Close()
+		partial := makeEvent("active-a", "block-a", "2026-10-27T19:45:00Z", "active-digest-a")
+		if inserted, err := queue.Enqueue(ctx, partial); err != nil || !inserted {
+			t.Fatal(err)
+		}
+		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(
+			ctx, "source-389", "2026-10-27T19:45:00Z", archive,
+		)
+		if err != nil || matched {
+			t.Fatalf("неполная история ошибочно подавлена: matched=%v err=%v", matched, err)
+		}
+	})
+
+	t.Run("missing latest version is not suppressed", func(t *testing.T) {
+		db, queue := openQueue(t)
+		defer db.Close()
+		for _, event := range []domain.Event{
+			makeEvent("active-a", "block-a", "2026-10-27T19:39:00Z", "active-digest-a"),
+			makeEvent("active-b", "block-b", "2026-10-27T19:40:00Z", "active-digest-b"),
+		} {
+			if inserted, err := queue.Enqueue(ctx, event); err != nil || !inserted {
+				t.Fatal(err)
+			}
+		}
+		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(
+			ctx, "source-389", "2026-10-27T19:45:00Z", archive,
+		)
+		if err != nil || matched {
+			t.Fatalf("неизвестная последняя версия ошибочно подавлена: matched=%v err=%v", matched, err)
+		}
+	})
 }
 
 func TestClientQueueCleansRC88ExpiredMigrationArtifact(t *testing.T) {

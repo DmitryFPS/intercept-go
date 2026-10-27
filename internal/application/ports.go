@@ -34,6 +34,7 @@ type SourceItem struct {
 	Content       string
 	Blocks        []domain.ContentBlock
 	DeletedBlocks []domain.ContentBlock
+	Archived      bool
 	UpdatedBy     string
 	ObservedAt    time.Time
 }
@@ -48,6 +49,12 @@ type ClientQueue interface {
 	// версию записи прежнего Клиента в поблочные идентичности. Это не создаёт
 	// сообщений и не позволяет обновлению повторно выдать старые блоки.
 	SeedBlockBaselinesFromLegacy(ctx context.Context, sourceUUID, sourceVersion string, events []domain.Event) (bool, error)
+	// SeedArchiveBaselinesFromSeenBlocks подавляет только доказанный повтор,
+	// который возникает при переносе закрытой смены EAVC в архив. EAVC удаляет
+	// UUID блоков при архивации, поэтому архивные legacy-UUID можно признать
+	// эквивалентными лишь когда ранее были замечены все блоки записи и её
+	// последняя версия. Неполная история возвращает false и не теряет данные.
+	SeedArchiveBaselinesFromSeenBlocks(ctx context.Context, sourceUUID, sourceVersion string, events []domain.Event) (bool, error)
 	Pending(ctx context.Context, limit int, now time.Time) ([]QueuedEvent, error)
 	MarkUploaded(ctx context.Context, eventID string, telegramMessageID int64) error
 	MarkAcknowledged(ctx context.Context, eventID string, at time.Time) error

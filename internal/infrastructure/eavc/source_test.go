@@ -311,7 +311,7 @@ func TestSourceReadsUnseenArchivedItems(t *testing.T) {
 	if err != nil {
 		t.Fatalf("archive scan: %v", err)
 	}
-	if len(items) != 1 || items[0].Record.ID != 11 || items[0].Position.UnitName != "Архивная" {
+	if len(items) != 1 || items[0].Record.ID != 11 || items[0].Position.UnitName != "Архивная" || !items[0].Archived {
 		t.Fatalf("архивная строка пропущена: %#v", items)
 	}
 	if next.ID != 11 {

@@ -389,6 +389,88 @@ func (queue *ClientQueue) SeedBlockBaselinesFromLegacy(
 	return true, nil
 }
 
+// SeedArchiveBaselinesFromSeenBlocks защищает от смены идентичности при
+// закрытии смены EAVC. Активная запись имеет настоящие UUID временных блоков,
+// но EAVC удаляет их при переносе записи в intercept_items_archive. Архивный
+// снимок поэтому получает синтетические legacy-UUID и без этой проверки был бы
+// принят как новый перехват.
+//
+// Подавление разрешено только при двух независимых доказательствах:
+//   - раньше замечено не меньше самостоятельных UUID блоков, чем есть в архиве;
+//   - среди них есть версия, равная последней версии архивной записи.
+//
+// Если Клиент успел увидеть лишь часть блоков либо пропустил последнюю правку,
+// метод возвращает false: архив будет обработан и данные не потеряются.
+func (queue *ClientQueue) SeedArchiveBaselinesFromSeenBlocks(
+	ctx context.Context, sourceUUID, sourceVersion string, events []domain.Event,
+) (bool, error) {
+	sourceUUID = strings.TrimSpace(sourceUUID)
+	sourceVersion = strings.TrimSpace(sourceVersion)
+	if sourceUUID == "" || sourceVersion == "" || len(events) == 0 {
+		return false, nil
+	}
+	expectedBlocks := make(map[string]struct{}, len(events))
+	for _, event := range events {
+		if err := event.Validate(); err != nil {
+			return false, fmt.Errorf("проверить архивную идентичность: %w", err)
+		}
+		blockUUID := strings.ToLower(strings.TrimSpace(event.SourceBlockUUID))
+		if blockUUID == "" || event.SourceBlockDeleted {
+			return false, nil
+		}
+		base := strings.TrimSpace(event.Source.UUID)
+		if base == "" {
+			base = fmt.Sprintf("id:%d", event.Source.ID)
+		}
+		if !strings.EqualFold(base, sourceUUID) {
+			return false, nil
+		}
+		expectedBlocks[blockUUID] = struct{}{}
+	}
+	if len(expectedBlocks) == 0 {
+		return false, nil
+	}
+	tx, err := queue.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("начать проверку архивного повтора: %w", err)
+	}
+	defer tx.Rollback()
+	prefix := sourceUUID + "|block:"
+	var knownBlocks, latestVersion int
+	err = tx.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT source_uuid),
+		       COALESCE(MAX(CASE WHEN source_version=? THEN 1 ELSE 0 END), 0)
+		FROM (
+			SELECT source_uuid, source_version FROM client_events
+			UNION ALL
+			SELECT source_uuid, source_version FROM client_cleared_events
+		)
+		WHERE substr(source_uuid, 1, length(?))=?`,
+		sourceVersion, prefix, prefix,
+	).Scan(&knownBlocks, &latestVersion)
+	if err != nil {
+		return false, fmt.Errorf("сверить архив с историей блоков: %w", err)
+	}
+	if knownBlocks < len(expectedBlocks) || latestVersion == 0 {
+		return false, nil
+	}
+	clearedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, event := range events {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO client_cleared_events(
+				source_uuid, source_version, content_digest, cleared_at
+			) VALUES(?, ?, ?, ?)`,
+			event.SourceLineageKey(), event.SourceVersion(), event.ContentDigest, clearedAt,
+		); err != nil {
+			return false, fmt.Errorf("сохранить идентичность архивного повтора: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("завершить подавление архивного повтора: %w", err)
+	}
+	return true, nil
+}
+
 // Pending выбирает только головы независимых очередей подразделений.
 func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time) ([]application.QueuedEvent, error) {
 	if limit <= 0 || limit > 1000 {

@@ -266,6 +266,7 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 			item.Mode = domain.SourceModeDeferred
 		}
 		item.Content = content.String
+		item.Archived = isArchive
 		item.UpdatedBy = updatedBy.String
 		item.ObservedAt = time.Now().UTC()
 		items = append(items, item)

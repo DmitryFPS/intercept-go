@@ -155,6 +155,23 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 				// следующая настоящая редакция затронет только изменённый блок.
 				continue
 			}
+			if item.Archived {
+				archivedReplay, archiveErr := service.Queue.SeedArchiveBaselinesFromSeenBlocks(
+					ctx, legacySourceUUID, strings.TrimSpace(item.Record.UpdatedAt), events,
+				)
+				if archiveErr != nil {
+					return queued, archiveErr
+				}
+				if archivedReplay {
+					if service.Logger != nil {
+						service.Logger.Info("архивная копия уже доставленных блоков EAVC подавлена",
+							"source_uuid", item.Record.UUID, "source_id", item.Record.ID,
+							"source_version", item.Record.UpdatedAt, "content_blocks", len(events),
+						)
+					}
+					continue
+				}
+			}
 		}
 		for _, event := range events {
 			inserted, err := service.Queue.Enqueue(ctx, event)
