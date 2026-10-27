@@ -18,6 +18,7 @@ type ServerStats struct {
 	Delivered       int `json:"delivered"`
 	Expired         int `json:"expired"`
 	Rejected        int `json:"rejected"`
+	TransportInbox  int `json:"transport_inbox_pending"`
 }
 
 // MaintenanceResult описывает только удалённые технические записи.
@@ -135,6 +136,7 @@ func (store *ServerStore) Stats(ctx context.Context) (ServerStats, error) {
 		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='delivered' AND delivered_at>?", []any{cutoffs["delivered"]}, &stats.Delivered},
 		{"SELECT COUNT(*) FROM delivery_jobs WHERE state='expired' AND expired_at>?", []any{cutoffs["expired"]}, &stats.Expired},
 		{"SELECT COUNT(*) FROM rejected_packets WHERE received_at>?", []any{cutoffs["rejected"]}, &stats.Rejected},
+		{"SELECT COUNT(*) FROM transport_inbox", nil, &stats.TransportInbox},
 	}
 	for _, item := range queries {
 		if err := store.db.QueryRowContext(ctx, item.query, item.args...).Scan(item.target); err != nil {

@@ -168,132 +168,242 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		status.Detail = "Получаем данные точек и выполняем маршруты."
 		status.TransportOK = true
 	})
-	// Перенастройка ждёт остановки старого цикла. Одновременные циклы могли бы
-	// выбрать одно задание до фиксации результата и отправить его дважды.
+	// Скачивание и разбор разделены долговечной локальной границей. Приёмник
+	// может быстро освободить суточную Telegram-очередь, даже если проверка,
+	// подтверждение или конечные получатели временно задерживаются.
+	transportContext, stopTransport := context.WithCancel(ctx)
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		server.transportInboxLoop(transportContext, receiver, reception)
+	}()
+	server.transportIntakeLoop(transportContext, receiver)
+	stopTransport()
+}
+
+func (server *Server) transportIntakeLoop(ctx context.Context, receiver *telegram.ServerReceiver) {
 	offset := int64(0)
-	recentAcknowledgements := make(map[string]time.Time)
-	if raw, exists, _ := server.Store.Value(ctx, serverOffsetName); exists {
-		offset, _ = strconv.ParseInt(raw, 10, 64)
+	for ctx.Err() == nil {
+		raw, exists, err := server.Store.Value(ctx, serverOffsetName)
+		if err != nil {
+			server.warn("Не удалось прочитать очередь Центра",
+				"Локальные данные сохранены; чтение будет повторено автоматически.", err)
+			if !waitForRetry(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
+		if exists {
+			parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil {
+				server.fail("Повреждено смещение Telegram", "Запуск остановлен для защиты от потери пакетов.", parseErr)
+				return
+			}
+			offset = parsed
+		}
+		break
 	}
 	for ctx.Err() == nil {
 		packets, next, err := receiver.Packets(ctx, offset)
 		if err != nil {
 			if ctx.Err() == nil {
-				server.warn(
-					"Telegram временно недоступен",
-					"Связь прервалась. Программа повторит запрос автоматически; настройки и очереди сохранены.",
-					err,
-				)
-				time.Sleep(5 * time.Second)
+				server.warn("Telegram временно недоступен",
+					"Связь прервалась. Программа повторит запрос автоматически; локальная очередь сохранена.", err)
+			}
+			if !waitForRetry(ctx, 5*time.Second) {
+				return
 			}
 			continue
 		}
+		if err := server.Store.PersistTransportBatch(ctx, serverOffsetName, next, packets); err != nil {
+			server.warn("Не удалось сохранить входящие пакеты",
+				"Telegram-смещение не изменено. Центр повторит скачивание без потери данных.", err)
+			if !waitForRetry(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
+		offset = next
+		if len(packets) > 0 {
+			server.Logger.Info("пакеты сохранены в локальной входной очереди",
+				"packets", len(packets), "next_transport_offset", next)
+		}
 		server.transportRecovered()
-		batchComplete := true
-		for _, packet := range packets {
-			if packet.ProbeID != "" {
-				client, clientErr := server.Store.Client(ctx, packet.ProbeClientID)
-				valid := clientErr == nil && client.Active &&
-					client.SenderBotID == packet.SenderBotID &&
-					strings.EqualFold(strings.TrimPrefix(client.SenderBotUsername, "@"), strings.TrimPrefix(packet.SenderBotUsername, "@")) &&
-					client.ChatID == packet.ChatID && client.ThreadID == packet.ThreadID &&
-					telegram.VerifyProbe(packet, client.Key) && recentTransportPacket(packet.SentAt, time.Now().UTC())
-				if !valid {
-					receiver.Observe(transportObservation(packet, "probe_packet", "probe_rejected",
-						"Контрольный пакет не прошёл проверку подлинности или свежести", "", "", false, 200))
-					server.Logger.Warn("отклонён недостоверный контрольный пакет",
-						"sender_bot", packet.SenderBotUsername, "error", clientErr)
-					server.deleteTransportPacket(ctx, receiver, packet.MessageID)
-					continue
-				}
-				if err := server.Store.RecordClientSignalByTransport(
-					ctx, packet.SenderBotID, packet.ChatID, packet.ThreadID, true, packet.SentAt,
-				); err != nil {
-					server.Logger.Warn("не удалось обновить состояние связи с точкой", "error", err)
-				}
-				if err := receiver.AcknowledgeProbe(ctx, packet.SenderBotUsername, packet.ProbeID, client.Key); err != nil {
-					server.Logger.Warn("не удалось подтвердить проверку связи",
-						"sender_bot", packet.SenderBotUsername, "error", err)
-				} else {
-					server.Logger.Info("двусторонняя связь с точкой проверена",
-						"sender_bot", packet.SenderBotUsername, "thread_id", packet.ThreadID)
-				}
-				receiver.Observe(transportObservation(packet, "probe_packet", "probe_valid",
-					"Проверка связи выполнена; рабочие счётчики не изменены", "", packet.ProbeClientID, false, 200))
-				server.deleteTransportPacket(ctx, receiver, packet.MessageID)
-				continue
-			}
-			result, err := reception.Receive(ctx, packet)
-			if err != nil {
-				if !application.IsPermanentPacketError(err) {
-					receiver.Observe(transportObservation(packet, "event_packet", "processing_retry",
-						"Временная ошибка обработки; пакет будет прочитан повторно", "", "", false, 30))
-					server.Logger.Warn("временная ошибка приёма пакета; пакет сохранён для повтора",
-						"error", err, "sender_bot_id", packet.SenderBotID)
-					batchComplete = false
-					break
-				}
-				receiver.Observe(transportObservation(packet, "event_packet", "quarantined",
-					"Пакет окончательно отклонён и помещён в карантин", "", "", false, 200))
-				server.Logger.Warn("пакет помещён в карантин", "error", err,
-					"sender_bot_id", packet.SenderBotID, "content_kind", "unverified")
-				if quarantineErr := server.Store.Quarantine(ctx, packet, err.Error()); quarantineErr != nil {
-					server.Logger.Error("не удалось сохранить пакет в карантин", "error", quarantineErr)
-					batchComplete = false
-					break
-				}
-				server.deleteTransportPacket(ctx, receiver, packet.MessageID)
-				continue
-			}
-			outcome := "processed_duplicate"
-			reason := "Повтор уже принятого события; рабочие счётчики не изменены"
-			if result.Status == "expired" {
-				outcome = "event_expired"
-				reason = "Пакет получен после допустимого срока; в рабочие события не добавлен"
-			} else if result.Accepted {
-				outcome = "event_accepted"
-				reason = "Создано новое принятое событие"
-			}
-			receiver.Observe(transportObservation(packet, "event_packet", outcome, reason,
-				result.EventID, result.ClientID, result.Accepted, 200))
-			if result.Accepted && recentTransportPacket(packet.SentAt, time.Now().UTC()) {
-				if err := server.Store.RecordClientSignalByTransport(
-					ctx, packet.SenderBotID, packet.ChatID, packet.ThreadID, false, packet.SentAt,
-				); err != nil {
-					server.Logger.Warn("не удалось обновить состояние связи с точкой", "error", err)
-				}
-			}
-			server.Logger.Info("транспортный пакет обработан",
-				"event_id", result.EventID, "trace_id", result.EventID,
-				"transport_message_id", packet.MessageID, "status", result.Status,
-				"new_event", result.Accepted, "sender_bot", result.ClientBotUsername,
-				"content_kind", result.ContentKind, "content_chars", result.ContentChars,
-				"content_blocks", result.ContentBlocks, "source_mode", result.SourceMode,
-			)
-			acknowledgedAt := time.Now().UTC()
-			if acknowledgementDue(recentAcknowledgements, result.EventID, acknowledgedAt) {
-				if err := receiver.Acknowledge(
-					ctx, result.ClientBotUsername, result.EventID, result.Status, result.AcknowledgementKey,
-				); err != nil {
-					server.Logger.Warn("не удалось подтвердить событие", "event_id", result.EventID,
-						"trace_id", result.EventID, "transport_message_id", packet.MessageID, "error", err)
-				} else {
-					recentAcknowledgements[result.EventID] = acknowledgedAt
-				}
-			}
-			server.deleteTransportPacket(ctx, receiver, packet.MessageID)
-			now := time.Now().UTC()
-			server.update(func(status *ServerStatus) { status.LastReceived = &now })
-			if packet.UpdateID >= offset {
-				offset = packet.UpdateID + 1
-			}
-		}
-		if batchComplete && next > offset {
-			offset = next
-		}
-		_ = server.Store.SaveValue(ctx, serverOffsetName, strconv.FormatInt(offset, 10))
-		server.retryTransportDeletions(ctx, receiver)
 	}
+}
+
+func (server *Server) transportInboxLoop(
+	ctx context.Context, receiver *telegram.ServerReceiver, reception *application.ServerService,
+) {
+	recentAcknowledgements := make(map[string]time.Time)
+	nextCleanupAt := time.Time{}
+	for ctx.Err() == nil {
+		items, err := server.Store.PendingTransportPackets(ctx, 25, time.Now().UTC())
+		if err != nil {
+			if ctx.Err() == nil {
+				server.Logger.Error("не удалось прочитать локальную входную очередь", "error", err)
+			}
+			if !waitForRetry(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
+		if len(items) == 0 {
+			now := time.Now().UTC()
+			if !now.Before(nextCleanupAt) {
+				server.retryTransportDeletions(ctx, receiver)
+				nextCleanupAt = now.Add(time.Minute)
+			}
+			if !waitForRetry(ctx, 250*time.Millisecond) {
+				return
+			}
+			continue
+		}
+		for _, item := range items {
+			if ctx.Err() != nil {
+				return
+			}
+			server.processTransportInboxItem(ctx, receiver, reception, item.Packet, item.Attempts, recentAcknowledgements)
+		}
+		server.retryTransportDeletions(ctx, receiver)
+		nextCleanupAt = time.Now().UTC().Add(time.Minute)
+	}
+}
+
+func (server *Server) processTransportInboxItem(
+	ctx context.Context,
+	receiver *telegram.ServerReceiver,
+	reception *application.ServerService,
+	packet application.IncomingPacket,
+	attempts int,
+	recentAcknowledgements map[string]time.Time,
+) {
+	retry := func(reason string, err error) {
+		next := time.Now().UTC().Add(transportInboxRetryDelay(attempts))
+		if retryErr := server.Store.MarkTransportRetry(ctx, packet.UpdateID, next, err.Error()); retryErr != nil {
+			server.Logger.Error("не удалось сохранить повтор входного пакета",
+				"transport_update_id", packet.UpdateID, "error", retryErr)
+		}
+		server.Logger.Warn(reason, "transport_update_id", packet.UpdateID,
+			"transport_message_id", packet.MessageID, "next_attempt_at", next, "error", err)
+	}
+	complete := func() bool {
+		if err := server.Store.CompleteTransportPacket(ctx, packet.UpdateID, packet.MessageID); err != nil {
+			retry("не удалось завершить локальный входной пакет", err)
+			return false
+		}
+		return true
+	}
+
+	if packet.ProbeID != "" {
+		client, err := server.Store.Client(ctx, packet.ProbeClientID)
+		if err != nil && !errors.Is(err, application.ErrClientNotFound) {
+			retry("временная ошибка проверки контрольного пакета", err)
+			return
+		}
+		valid := err == nil && client.Active &&
+			client.SenderBotID == packet.SenderBotID &&
+			strings.EqualFold(strings.TrimPrefix(client.SenderBotUsername, "@"), strings.TrimPrefix(packet.SenderBotUsername, "@")) &&
+			client.ChatID == packet.ChatID && client.ThreadID == packet.ThreadID &&
+			telegram.VerifyProbe(packet, client.Key) && recentTransportPacket(packet.SentAt, time.Now().UTC())
+		if !valid {
+			receiver.Observe(transportObservation(packet, "probe_packet", "probe_rejected",
+				"Контрольный пакет не прошёл проверку подлинности или свежести", "", "", false, 200))
+			server.Logger.Warn("отклонён недостоверный контрольный пакет",
+				"sender_bot", packet.SenderBotUsername, "error", err)
+			complete()
+			return
+		}
+		if err := server.Store.RecordClientSignalByTransport(
+			ctx, packet.SenderBotID, packet.ChatID, packet.ThreadID, true, packet.SentAt,
+		); err != nil {
+			server.Logger.Warn("не удалось обновить состояние связи с точкой", "error", err)
+		}
+		if err := receiver.AcknowledgeProbe(ctx, packet.SenderBotUsername, packet.ProbeID, client.Key); err != nil {
+			retry("не удалось подтвердить проверку связи", err)
+			return
+		}
+		server.Logger.Info("двусторонняя связь с точкой проверена",
+			"sender_bot", packet.SenderBotUsername, "thread_id", packet.ThreadID)
+		receiver.Observe(transportObservation(packet, "probe_packet", "probe_valid",
+			"Проверка связи выполнена; рабочие счётчики не изменены", "", packet.ProbeClientID, false, 200))
+		complete()
+		return
+	}
+
+	result, err := reception.Receive(ctx, packet)
+	if err != nil {
+		if !application.IsPermanentPacketError(err) {
+			receiver.Observe(transportObservation(packet, "event_packet", "processing_retry",
+				"Временная ошибка обработки; локальный пакет будет повторён", "", "", false, 30))
+			retry("временная ошибка приёма локального пакета", err)
+			return
+		}
+		receiver.Observe(transportObservation(packet, "event_packet", "quarantined",
+			"Пакет окончательно отклонён и помещён в карантин", "", "", false, 200))
+		server.Logger.Warn("пакет помещён в карантин", "error", err,
+			"sender_bot_id", packet.SenderBotID, "content_kind", "unverified")
+		if quarantineErr := server.Store.QuarantineTransportPacket(ctx, packet, err.Error()); quarantineErr != nil {
+			retry("не удалось сохранить пакет в карантин", quarantineErr)
+		}
+		return
+	}
+
+	outcome := "processed_duplicate"
+	reason := "Повтор уже принятого события; рабочие счётчики не изменены"
+	if result.Status == "expired" {
+		outcome = "event_expired"
+		reason = "Пакет скачан после допустимого срока; в рабочие события не добавлен"
+	} else if result.Accepted {
+		outcome = "event_accepted"
+		reason = "Создано новое принятое событие"
+	}
+	receiver.Observe(transportObservation(packet, "event_packet", outcome, reason,
+		result.EventID, result.ClientID, result.Accepted, 200))
+	if result.Accepted && recentTransportPacket(packet.SentAt, time.Now().UTC()) {
+		if err := server.Store.RecordClientSignalByTransport(
+			ctx, packet.SenderBotID, packet.ChatID, packet.ThreadID, false, packet.SentAt,
+		); err != nil {
+			server.Logger.Warn("не удалось обновить состояние связи с точкой", "error", err)
+		}
+	}
+	server.Logger.Info("локальный транспортный пакет обработан",
+		"event_id", result.EventID, "trace_id", result.EventID,
+		"transport_message_id", packet.MessageID, "transport_update_id", packet.UpdateID,
+		"downloaded_at", packet.ReceivedAt, "status", result.Status,
+		"new_event", result.Accepted, "sender_bot", result.ClientBotUsername,
+		"content_kind", result.ContentKind, "content_chars", result.ContentChars,
+		"content_blocks", result.ContentBlocks, "source_mode", result.SourceMode,
+	)
+	acknowledgedAt := time.Now().UTC()
+	if acknowledgementDue(recentAcknowledgements, result.EventID, acknowledgedAt) {
+		if err := receiver.Acknowledge(
+			ctx, result.ClientBotUsername, result.EventID, result.Status, result.AcknowledgementKey,
+		); err != nil {
+			retry("не удалось подтвердить событие рабочей точке", err)
+			return
+		}
+		recentAcknowledgements[result.EventID] = acknowledgedAt
+	}
+	if !complete() {
+		return
+	}
+	now := time.Now().UTC()
+	server.update(func(status *ServerStatus) { status.LastReceived = &now })
+}
+
+func transportInboxRetryDelay(attempts int) time.Duration {
+	if attempts < 0 {
+		attempts = 0
+	}
+	if attempts > 7 {
+		attempts = 7
+	}
+	delay := 5 * time.Second * time.Duration(1<<attempts)
+	if delay > 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return delay
 }
 
 func transportObservation(
@@ -338,7 +448,9 @@ func recentTransportPacket(sentAt, now time.Time) bool {
 func (server *Server) transportRecovered() {
 	server.update(func(status *ServerStatus) {
 		status.TransportOK = true
-		if status.State != "waiting" || status.Title != "Telegram временно недоступен" {
+		if status.State != "waiting" || (status.Title != "Telegram временно недоступен" &&
+			status.Title != "Не удалось сохранить входящие пакеты" &&
+			status.Title != "Не удалось прочитать очередь Центра") {
 			return
 		}
 		status.State = "running"

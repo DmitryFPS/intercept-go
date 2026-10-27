@@ -155,6 +155,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			return packets, offset, err
 		}
 		packet.Payload = payload
+		packet.ReceivedAt = time.Now().UTC()
 		if strings.HasSuffix(filename, ".icprobe") {
 			decoder := json.NewDecoder(strings.NewReader(string(payload)))
 			decoder.DisallowUnknownFields()

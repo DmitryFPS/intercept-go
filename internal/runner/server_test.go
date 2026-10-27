@@ -50,6 +50,16 @@ func TestDuplicateAcknowledgementIsSuppressedOnlyTemporarily(t *testing.T) {
 	}
 }
 
+func TestTransportInboxRetryDelayIsBounded(t *testing.T) {
+	t.Parallel()
+	if got := transportInboxRetryDelay(0); got != 5*time.Second {
+		t.Fatalf("первая задержка: %s", got)
+	}
+	if got := transportInboxRetryDelay(100); got != 10*time.Minute {
+		t.Fatalf("верхняя граница повтора: %s", got)
+	}
+}
+
 func TestClearDestinationThreads(t *testing.T) {
 	t.Parallel()
 	rules := domain.RuleSet{

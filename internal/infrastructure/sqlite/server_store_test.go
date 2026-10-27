@@ -131,6 +131,223 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestServerTransportInboxPersistsBatchAndOffsetAtomically(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	packets := []application.IncomingPacket{
+		{UpdateID: 10, ChatID: -1001, MessageID: 110, SenderBotID: 1, Payload: []byte("packet-10"), ReceivedAt: now},
+		{UpdateID: 11, ChatID: -1001, MessageID: 111, SenderBotID: 2, Payload: []byte("packet-11"), ReceivedAt: now},
+	}
+	if err := store.PersistTransportBatch(ctx, "telegram_offset", 12, packets); err != nil {
+		t.Fatal(err)
+	}
+	raw, exists, err := store.Value(ctx, "telegram_offset")
+	if err != nil || !exists || raw != "12" {
+		t.Fatalf("смещение не зафиксировано с пакетами: value=%q exists=%v err=%v", raw, exists, err)
+	}
+	var stored []byte
+	if err := db.QueryRowContext(ctx, "SELECT packet_json FROM transport_inbox WHERE update_id=10").Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(stored, []byte("packet-10")) || !bytes.HasPrefix(stored, protectedPrefix) {
+		t.Fatal("локальный входной пакет остался открытым в SQLite")
+	}
+	items, err := store.PendingTransportPackets(ctx, 25, now.Add(time.Minute))
+	if err != nil || len(items) != 2 || string(items[0].Packet.Payload) != "packet-10" ||
+		!items[0].Packet.ReceivedAt.Equal(now) {
+		t.Fatalf("пакеты не восстановлены: %#v err=%v", items, err)
+	}
+	if err := store.PersistTransportBatch(ctx, "telegram_offset", 12, packets); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_inbox").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("повтор создал дубли: count=%d err=%v", count, err)
+	}
+}
+
+func TestServerTransportInboxRollsBackWholeBatchWithOffset(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE TRIGGER reject_second_transport_packet BEFORE INSERT ON transport_inbox
+		WHEN NEW.update_id=2 BEGIN SELECT RAISE(ABORT, 'test rollback'); END`); err != nil {
+		t.Fatal(err)
+	}
+	err = store.PersistTransportBatch(ctx, "telegram_offset", 3, []application.IncomingPacket{
+		{UpdateID: 1, ChatID: -1001, MessageID: 101, Payload: []byte("one")},
+		{UpdateID: 2, ChatID: -1001, MessageID: 102, Payload: []byte("two")},
+	})
+	if err == nil {
+		t.Fatal("ошибка второй записи не откатила пакет")
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_inbox").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("часть пакета осталась после отката: count=%d err=%v", count, err)
+	}
+	if _, exists, err := store.Value(ctx, "telegram_offset"); err != nil || exists {
+		t.Fatalf("смещение продвинулось без всего пакета: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestServerTransportInboxRetryDoesNotBlockFollowingPacket(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := store.PersistTransportBatch(ctx, "telegram_offset", 3, []application.IncomingPacket{
+		{UpdateID: 1, ChatID: -1001, MessageID: 101, Payload: []byte("broken-temporarily")},
+		{UpdateID: 2, ChatID: -1001, MessageID: 102, Payload: []byte("ready")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkTransportRetry(ctx, 1, now.Add(time.Hour), "временный сбой"); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.PendingTransportPackets(ctx, 25, now.Add(time.Minute))
+	if err != nil || len(items) != 1 || items[0].Packet.UpdateID != 2 {
+		t.Fatalf("проблемный пакет остановил следующий: %#v err=%v", items, err)
+	}
+}
+
+func TestServerTransportInboxCompletionQueuesCleanupInSameTransaction(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := application.IncomingPacket{UpdateID: 7, ChatID: -1001, MessageID: 107, Payload: []byte("done")}
+	if err := store.PersistTransportBatch(ctx, "telegram_offset", 8, []application.IncomingPacket{packet}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteTransportPacket(ctx, packet.UpdateID, packet.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	var inbox, cleanup int
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_inbox").Scan(&inbox)
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup WHERE message_id=?", packet.MessageID).Scan(&cleanup)
+	if inbox != 0 || cleanup != 1 {
+		t.Fatalf("завершение неатомарно: inbox=%d cleanup=%d", inbox, cleanup)
+	}
+}
+
+func TestServerTransportInboxQuarantineIsAtomicAndDoesNotReturn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := application.IncomingPacket{
+		UpdateID: 17, ChatID: -1001, ThreadID: 9, MessageID: 117,
+		SenderBotID: 5, SenderBotUsername: "station_bot", Payload: []byte("invalid-envelope"),
+	}
+	if err := store.PersistTransportBatch(ctx, "telegram_offset", 18, []application.IncomingPacket{packet}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.QuarantineTransportPacket(ctx, packet, "неверная подпись"); err != nil {
+		t.Fatal(err)
+	}
+	// Повторный запуск обработчика уже не видит пакет, а очистка Telegram
+	// гарантированно поставлена вместе с карантином.
+	items, err := store.PendingTransportPackets(ctx, 25, time.Now().Add(time.Hour))
+	if err != nil || len(items) != 0 {
+		t.Fatalf("карантинный пакет вернулся в обработку: %#v err=%v", items, err)
+	}
+	var rejected, cleanup int
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets").Scan(&rejected)
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup WHERE message_id=?", packet.MessageID).Scan(&cleanup)
+	if rejected != 1 || cleanup != 1 {
+		t.Fatalf("неатомарный карантин: rejected=%d cleanup=%d", rejected, cleanup)
+	}
+}
+
+func TestServerTransportInboxRefusesOffsetRollback(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PersistTransportBatch(ctx, "telegram_offset", 100, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PersistTransportBatch(ctx, "telegram_offset", 99, nil); err == nil {
+		t.Fatal("смещение Telegram удалось откатить назад")
+	}
+	raw, _, err := store.Value(ctx, "telegram_offset")
+	if err != nil || raw != "100" {
+		t.Fatalf("смещение изменилось после отказа: %q err=%v", raw, err)
+	}
+}
+
+func TestServerStoreMigratesRc85DatabaseToTransportInbox(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := Migrate(ctx, db, []string{
+		serverMigration, serverDeliveryOrderMigration, serverStreamRepairMigration,
+		serverObservabilityMigration, serverIntegrityMigration, serverHistoryIndexesMigration,
+		serverDeliveryResultMigration, serverTransportAuditMigration,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewServerStore(ctx, db); err != nil {
+		t.Fatalf("обновление базы rc85 не прошло: %v", err)
+	}
+	var version int
+	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil || version != 9 {
+		t.Fatalf("миграция входной очереди не применена: version=%d err=%v", version, err)
+	}
+}
+
 // После изменения маршрутов сервер хранит предыдущую версию правил, чтобы её можно было восстановить.
 func TestServerStoreKeepsRuleHistoryForRestore(t *testing.T) {
 	t.Parallel()

@@ -123,6 +123,41 @@ func TestServerServiceStartsDeliveryWindowAfterAcceptance(t *testing.T) {
 	}
 }
 
+// Задержка уже скачанного пакета в локальной очереди не превращает своевременный
+// перехват в просроченный: граница свежести фиксируется при скачивании.
+func TestServerServiceUsesDurableIngressTimeForFreshness(t *testing.T) {
+	t.Parallel()
+	downloadedAt := time.Date(2026, 10, 27, 10, 29, 50, 0, time.UTC)
+	processedAt := downloadedAt.Add(20 * time.Minute)
+	key := bytes.Repeat([]byte{0x47}, 32)
+	event := serverServiceEvent()
+	event.ExpiresAt = downloadedAt.Add(10 * time.Second)
+	envelope, err := protocol.Seal(event, "key-1", key, downloadedAt, bytes.NewReader(make([]byte, 12)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(envelope)
+	store := &memoryServerStore{}
+	service := ServerService{
+		Clients: memoryRegistry{client: RegisteredClient{
+			ID: "textile", SenderBotID: 11, SenderBotUsername: "textile_bot",
+			ChatID: -1001, ThreadID: 42, KeyID: "key-1", Key: key, Active: true,
+		}},
+		Rules: memoryRules{rules: serverServiceRules()}, Store: store,
+		Now: func() time.Time { return processedAt }, DeliveryWindow: 10 * time.Minute,
+	}
+	result, err := service.Receive(context.Background(), IncomingPacket{
+		SenderBotID: 11, SenderBotUsername: "textile_bot", ChatID: -1001,
+		ThreadID: 42, Payload: payload, ReceivedAt: downloadedAt,
+	})
+	if err != nil || !result.Accepted || result.Status != "accepted" {
+		t.Fatalf("своевременно скачанный пакет потерян в локальной очереди: %#v, %v", result, err)
+	}
+	if !store.event.ExpiresAt.Equal(processedAt.Add(10 * time.Minute)) {
+		t.Fatalf("внешнее окно не началось после обработки: %s", store.event.ExpiresAt)
+	}
+}
+
 // Если первое подтверждение потерялось, сервер повторно подтверждает уже
 // сохранённое событие, даже когда его исходные 30 минут успели закончиться.
 func TestServerServiceAcknowledgesKnownEventAfterTransportDeadline(t *testing.T) {

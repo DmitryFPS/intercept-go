@@ -25,11 +25,15 @@ type IncomingPacket struct {
 	ThreadID          int64
 	MessageID         int64
 	SentAt            time.Time
-	Payload           []byte
-	ProbeID           string
-	ProbeClientID     string
-	ProbeSentAt       time.Time
-	ProbeMAC          string
+	// ReceivedAt фиксируется сразу после скачивания файла Telegram. Проверка
+	// исходной свежести опирается на этот момент, а не на возможную задержку
+	// последующей обработки локальной очереди Центра.
+	ReceivedAt    time.Time
+	Payload       []byte
+	ProbeID       string
+	ProbeClientID string
+	ProbeSentAt   time.Time
+	ProbeMAC      string
 }
 
 // TransportObservation описывает только технический след Telegram-обновления.
@@ -145,6 +149,10 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 		service.Now = time.Now
 	}
 	now := service.Now().UTC()
+	freshnessAt := now
+	if !packet.ReceivedAt.IsZero() && !packet.ReceivedAt.After(now.Add(time.Minute)) {
+		freshnessAt = packet.ReceivedAt.UTC()
+	}
 	// Подтверждаем уже сохранённый пакет даже после истечения исходных 30 минут.
 	// Такое возможно, если первое подтверждение Telegram потерялось. Проверка
 	// дайджеста не позволяет подменить содержимое под известным UUID.
@@ -161,7 +169,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 			SourceMode: string(event.Mode),
 		}, nil
 	}
-	if event.Expired(now) {
+	if event.Expired(freshnessAt) {
 		return PacketResult{
 			EventID: event.ID, ClientID: client.ID, ClientBotUsername: client.SenderBotUsername,
 			AcknowledgementKey: append([]byte(nil), client.Key...),

@@ -212,7 +212,7 @@ func TestServerReceiverRecognizesTransportProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(packets) != 1 || packets[0].ProbeID != probeID || !VerifyProbe(packets[0], key) {
+	if len(packets) != 1 || packets[0].ProbeID != probeID || packets[0].ReceivedAt.IsZero() || !VerifyProbe(packets[0], key) {
 		t.Fatalf("проверка не распознана: %#v", packets)
 	}
 }

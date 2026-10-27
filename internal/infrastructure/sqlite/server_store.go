@@ -26,7 +26,7 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 	if err := Migrate(ctx, db, []string{
 		serverMigration, serverDeliveryOrderMigration, serverStreamRepairMigration,
 		serverObservabilityMigration, serverIntegrityMigration, serverHistoryIndexesMigration,
-		serverDeliveryResultMigration, serverTransportAuditMigration,
+		serverDeliveryResultMigration, serverTransportAuditMigration, serverTransportInboxMigration,
 	}); err != nil {
 		return nil, err
 	}
@@ -36,6 +36,7 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 		{"delivery_jobs", "delivery_json"},
 		{"delivery_jobs", "result_json"},
 		{"rejected_packets", "payload"},
+		{"transport_inbox", "packet_json"},
 	} {
 		if err := protectExistingColumn(ctx, db, item.table, item.column); err != nil {
 			return nil, fmt.Errorf("защитить хранилище сервера: %w", err)

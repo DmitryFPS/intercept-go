@@ -186,3 +186,23 @@ CREATE TABLE transport_audit (
 CREATE INDEX transport_audit_time_idx ON transport_audit(last_seen_at DESC);
 CREATE INDEX transport_audit_event_idx ON transport_audit(event_id) WHERE event_id<>'';
 `
+
+// Входной Telegram-пакет сначала фиксируется локально вместе со смещением.
+// Поэтому исчезновение сообщения из Telegram или перезапуск Центра после
+// скачивания уже не могут потерять пакет. Содержимое защищается так же, как
+// принятые события и карантин.
+const serverTransportInboxMigration = `
+CREATE TABLE transport_inbox (
+	update_id INTEGER PRIMARY KEY,
+	chat_id INTEGER NOT NULL,
+	message_id INTEGER NOT NULL,
+	packet_json BLOB NOT NULL,
+	attempts INTEGER NOT NULL DEFAULT 0,
+	next_attempt_at TEXT NOT NULL,
+	last_error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	UNIQUE(chat_id, message_id)
+);
+CREATE INDEX transport_inbox_due_idx
+	ON transport_inbox(next_attempt_at, update_id);
+`
