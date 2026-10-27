@@ -53,6 +53,7 @@ func (handler Handler) Routes() http.Handler {
 	})
 	mux.HandleFunc("GET /api/history/{kind}", handler.history)
 	mux.HandleFunc("DELETE /api/history/{kind}", handler.clearHistory)
+	mux.HandleFunc("POST /api/deliveries/{event}/destinations/{destination}/blocks/{block}/republish", handler.republishTelegramBlock)
 	mux.HandleFunc("POST /api/setup", handler.setup)
 	mux.HandleFunc("GET /api/clients", handler.clients)
 	mux.HandleFunc("POST /api/clients", handler.addClient)
@@ -79,6 +80,15 @@ func (handler Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/update/status", handler.updateStatus)
 	mux.HandleFunc("POST /api/update", handler.installUpdate)
 	return localui.SecurityHeaders(mux)
+}
+
+func (handler Handler) republishTelegramBlock(writer http.ResponseWriter, request *http.Request) {
+	err := handler.Server.RepublishTelegramBlock(request.Context(), request.PathValue("event"), request.PathValue("destination"), request.PathValue("block"))
+	if err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось повторно опубликовать выбранный перехват.", err)
+		return
+	}
+	localui.WriteJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (handler Handler) updateStatus(writer http.ResponseWriter, _ *http.Request) {

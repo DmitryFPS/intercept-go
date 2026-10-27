@@ -136,10 +136,21 @@ type DeliveryGateway interface {
 // Telegram может разбить длинный перехват на несколько сообщений, поэтому ID
 // хранится списком. Для Word и других направлений результат может быть пустым.
 type DeliveryReceipt struct {
-	Kind       string  `json:"kind"`
-	ChatID     int64   `json:"chat_id,omitempty"`
-	ThreadID   int64   `json:"thread_id,omitempty"`
-	MessageIDs []int64 `json:"message_ids,omitempty"`
+	Kind       string                 `json:"kind"`
+	ChatID     int64                  `json:"chat_id,omitempty"`
+	ThreadID   int64                  `json:"thread_id,omitempty"`
+	MessageIDs []int64                `json:"message_ids,omitempty"`
+	Blocks     []DeliveryBlockReceipt `json:"blocks,omitempty"`
+}
+
+// DeliveryBlockReceipt связывает бизнес-перехват с конечной публикацией.
+// Удалённый вручную блок остаётся видимым в аудите, но не попадает в очередь.
+type DeliveryBlockReceipt struct {
+	BlockUUID         string  `json:"block_uuid"`
+	MessageIDs        []int64 `json:"message_ids,omitempty"`
+	DeletedMessageIDs []int64 `json:"deleted_message_ids,omitempty"`
+	Suppressed        bool    `json:"suppressed,omitempty"`
+	SuppressedReason  string  `json:"suppressed_reason,omitempty"`
 }
 
 // DeliveryReceiptProvider сообщает фактические ID только после успешной

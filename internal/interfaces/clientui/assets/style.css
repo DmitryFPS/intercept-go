@@ -168,6 +168,14 @@ h1 { margin: 4px 0 0; font-size: 25px; }
 
 footer { padding: 14px 28px 18px; margin-top: 14px; border-top: 1px solid #edf0f4; color: #6b7688; font-size: 12px; }
 
+.app-confirm{width:min(500px,calc(100vw - 32px));padding:0;border:0;border-radius:18px;background:transparent;box-shadow:0 24px 70px rgba(18,31,54,.28)}
+.app-confirm::backdrop{background:rgba(17,29,49,.56);backdrop-filter:blur(2px)}
+.app-confirm-card{display:grid;grid-template-columns:44px 1fr;gap:16px;padding:24px;background:#fff;border:1px solid #e4e9f0;border-radius:18px;color:#17233a}
+.app-confirm-card h2{margin:1px 0 8px;font-size:19px}.app-confirm-card p{margin:0;color:#68768c;line-height:1.5}
+.app-confirm-icon{display:grid;place-items:center;width:42px;height:42px;border-radius:13px;background:#eaf8f0;color:#117348;font-size:20px;font-weight:900}
+.app-confirm-icon.danger{background:#fff0f0;color:#c2252d}.app-confirm-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
+.app-confirm-actions .danger{background:#c92a32}.app-confirm-actions .danger:hover{background:#ad1f27}
+
 @media (max-width: 900px) {
   .shell { width: calc(100% - 24px); margin: 12px auto; }
   .identity { grid-template-columns: 1fr 1fr; }

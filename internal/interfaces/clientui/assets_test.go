@@ -76,3 +76,21 @@ func TestQueueHistoryExplainsContentAndRestoresClearButton(t *testing.T) {
 		}
 	}
 }
+
+func TestBrowserDialogsAreReplacedWithBrandedModal(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	javascript := string(application)
+	for _, native := range []string{"confirm(", "prompt(", "alert("} {
+		if strings.Contains(javascript, native) {
+			t.Errorf("остался системный диалог браузера: %s", native)
+		}
+	}
+	for _, expected := range []string{"function appConfirm", "dialog.showModal()", "dialog.addEventListener('cancel'", "Очистить список?"} {
+		if !strings.Contains(javascript, expected) {
+			t.Errorf("фирменное модальное окно неполно: нет %q", expected)
+		}
+	}
+}

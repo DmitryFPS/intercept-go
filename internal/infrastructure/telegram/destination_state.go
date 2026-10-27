@@ -21,11 +21,15 @@ type destinationItem struct {
 }
 
 type destinationBlock struct {
-	Hash       string  `json:"hash"`
-	SourceHash string  `json:"source_hash,omitempty"`
-	MessageIDs []int64 `json:"message_ids"`
-	Sequence   int     `json:"sequence"`
-	Recovering bool    `json:"recovering,omitempty"`
+	Hash              string  `json:"hash"`
+	SourceHash        string  `json:"source_hash,omitempty"`
+	MessageIDs        []int64 `json:"message_ids"`
+	DeletedMessageIDs []int64 `json:"deleted_message_ids,omitempty"`
+	Sequence          int     `json:"sequence"`
+	Recovering        bool    `json:"recovering,omitempty"`
+	Suppressed        bool    `json:"suppressed,omitempty"`
+	SuppressedAt      string  `json:"suppressed_at,omitempty"`
+	SuppressedReason  string  `json:"suppressed_reason,omitempty"`
 }
 
 func loadDestinationState(path string) (destinationState, error) {

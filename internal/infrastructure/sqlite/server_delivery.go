@@ -292,60 +292,62 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 	return jobs, rows.Err()
 }
 
-// RequeueDeletedTelegramEdits переводит в восстановление только последнюю
-// версию записи, которая была завершена старым Центром из-за отсутствующего
-// message_id. Более ранние версии и существующие, но нередактируемые сообщения
-// не возвращаются: это предотвращает устаревшие публикации и дубли.
-func (store *ServerStore) RequeueDeletedTelegramEdits(
-	ctx context.Context, destinationIDs []string, now time.Time, deliveryWindow time.Duration,
-) (int, error) {
-	if len(destinationIDs) == 0 {
-		return 0, nil
+// DeliveryJobByID загружает ровно одно ранее сохранённое задание для явного
+// операторского действия. Метод не меняет состояние очереди.
+func (store *ServerStore) DeliveryJobByID(ctx context.Context, eventID, destinationID string) (application.DeliveryJob, error) {
+	var eventPayload, deliveryPayload []byte
+	var job application.DeliveryJob
+	err := store.db.QueryRowContext(ctx, `
+		SELECT e.payload_json, j.delivery_json, j.attempts
+		FROM delivery_jobs j JOIN received_events e ON e.event_id=j.event_id
+		WHERE j.event_id=? AND j.destination_id=?`, eventID, destinationID,
+	).Scan(&eventPayload, &deliveryPayload, &job.Attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return job, errors.New("доставка не найдена")
 	}
-	if deliveryWindow <= 0 {
-		deliveryWindow = 120 * time.Minute
+	if err != nil {
+		return job, fmt.Errorf("прочитать доставку: %w", err)
 	}
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(destinationIDs)), ",")
-	args := []any{
-		now.UTC().Format(time.RFC3339Nano),
-		now.UTC().Add(deliveryWindow).Format(time.RFC3339Nano),
-		now.UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano),
+	eventPlain, err := unprotectDatabaseValue(eventPayload)
+	if err != nil {
+		return job, err
 	}
-	for _, id := range destinationIDs {
-		args = append(args, id)
+	deliveryPlain, err := unprotectDatabaseValue(deliveryPayload)
+	if err != nil {
+		return job, err
+	}
+	if err := json.Unmarshal(eventPlain, &job.Event); err != nil {
+		return job, errors.New("сохранённое событие повреждено")
+	}
+	if err := json.Unmarshal(deliveryPlain, &job.Delivery); err != nil {
+		return job, errors.New("сохранённое задание повреждено")
+	}
+	return job, nil
+}
+
+// ReplaceDeliveryReceipt сохраняет результат явной повторной публикации, не
+// возвращая историческое задание в общую очередь.
+func (store *ServerStore) ReplaceDeliveryReceipt(ctx context.Context, eventID, destinationID string, at time.Time, receipt application.DeliveryReceipt) error {
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		return fmt.Errorf("кодировать результат доставки: %w", err)
+	}
+	protected, err := protectDatabaseValue(payload)
+	if err != nil {
+		return fmt.Errorf("защитить результат доставки: %w", err)
 	}
 	result, err := store.db.ExecContext(ctx, `
-		UPDATE delivery_jobs AS target
-		SET state='pending', attempts=0, next_attempt_at=?, expires_at=?, expired_at=NULL,
-			last_error='Ожидается автоматическое восстановление отсутствующего Telegram-сообщения'
-		WHERE target.state='expired'
-		  AND target.expired_at>=?
-		  AND target.destination_id IN (`+placeholders+`)
-		  AND (
-			lower(target.last_error) LIKE '%message to edit not found%'
-			OR lower(target.last_error) LIKE '%message_id_invalid%'
-		  )
-		  AND EXISTS (
-			SELECT 1 FROM received_events current
-			WHERE current.event_id=target.event_id
-			  AND NOT EXISTS (
-				SELECT 1
-				FROM received_events later
-				JOIN delivery_jobs later_job ON later_job.event_id=later.event_id
-				WHERE later.rowid>current.rowid
-				  AND later_job.destination_id=target.destination_id
-				  AND later.client_id=current.client_id
-				  AND later.source_uuid=current.source_uuid
-			  )
-		  )`, args...)
+		UPDATE delivery_jobs SET state='delivered', delivered_at=?, expired_at=NULL,
+			last_error='', result_json=? WHERE event_id=? AND destination_id=?`,
+		at.UTC().Format(time.RFC3339Nano), protected, eventID, destinationID)
 	if err != nil {
-		return 0, fmt.Errorf("вернуть удалённые Telegram-сообщения в восстановление: %w", err)
+		return fmt.Errorf("сохранить повторную публикацию: %w", err)
 	}
 	count, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("посчитать восстанавливаемые Telegram-сообщения: %w", err)
+	if err != nil || count != 1 {
+		return errors.New("доставка для повторной публикации не найдена")
 	}
-	return int(count), nil
+	return nil
 }
 
 // MarkDelivered окончательно фиксирует успешную доставку одному получателю.

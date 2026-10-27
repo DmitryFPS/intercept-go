@@ -391,6 +391,54 @@ func (server *Server) ClearHistory(ctx context.Context, kind string) error {
 	return nil
 }
 
+// RepublishTelegramBlock повторно создаёт только явно выбранный удалённый
+// временной блок. ID берётся исключительно из ответа бота: сообщения других
+// участников группы никогда не используются как привязка.
+func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, destinationID, blockUUID string) error {
+	server.adminMu.Lock()
+	defer server.adminMu.Unlock()
+	job, err := server.Store.DeliveryJobByID(ctx, strings.TrimSpace(eventID), strings.TrimSpace(destinationID))
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, block := range job.Event.Blocks {
+		if block.Identity() == strings.TrimSpace(blockUUID) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.New("выбранный временной блок не найден в перехвате")
+	}
+	server.mu.RLock()
+	cfg := cloneServerConfig(server.config)
+	server.mu.RUnlock()
+	gateway, ok := server.gateways(cfg)[job.Delivery.Destination.ID].(*telegram.Destination)
+	if !ok {
+		return errors.New("для этой доставки не настроен Telegram")
+	}
+	allowed, err := gateway.AllowRepublish(blockUUID)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return errors.New("блок не отмечен как удалённый в Telegram")
+	}
+	if err := gateway.Deliver(ctx, job.Event, job.Delivery); err != nil {
+		return fmt.Errorf("повторно опубликовать блок: %w", err)
+	}
+	receipt, err := gateway.DeliveryReceipt(job.Event, job.Delivery)
+	if err != nil {
+		return fmt.Errorf("прочитать ID повторной публикации: %w", err)
+	}
+	if err := server.Store.ReplaceDeliveryReceipt(ctx, job.Event.ID, job.Delivery.Destination.ID, time.Now().UTC(), receipt); err != nil {
+		return err
+	}
+	server.Logger.Info("временной блок повторно опубликован оператором", "event_id", job.Event.ID, "destination_id", destinationID, "block_uuid", blockUUID)
+	return nil
+}
+
 // ClientConfig повторно выдаёт защищённо сохранённую конфигурацию точки.
 func (server *Server) ClientConfig(ctx context.Context, clientID string) ([]byte, application.RegisteredClient, error) {
 	client, err := server.Store.Client(ctx, strings.TrimSpace(clientID))

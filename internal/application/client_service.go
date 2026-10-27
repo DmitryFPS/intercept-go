@@ -350,6 +350,7 @@ func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 	digest := sha256.Sum256([]byte(strings.Join([]string{
 		content, domain.NormalizeUnitName(item.Position.UnitName),
 		strings.TrimSpace(item.Position.Frequency), strings.TrimSpace(item.Position.GroupCode),
+		"blocks-v2", blockContractDigest(item.Blocks),
 	}, "\x01")))
 	event := domain.Event{
 		ID: id, ClientID: service.ClientID, CreatedAt: now, ObservedAt: item.ObservedAt,
@@ -359,6 +360,14 @@ func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 		ContentDigest: hex.EncodeToString(digest[:]),
 	}
 	return event, event.Validate()
+}
+
+func blockContractDigest(blocks []domain.ContentBlock) string {
+	parts := make([]string, 0, len(blocks)*4)
+	for _, block := range blocks {
+		parts = append(parts, block.Identity(), strconv.Itoa(block.Sequence), block.Hash, block.UpdatedAt)
+	}
+	return strings.Join(parts, "\x00")
 }
 
 func normalizeContent(content string) string {

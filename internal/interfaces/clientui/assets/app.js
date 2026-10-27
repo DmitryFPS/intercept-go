@@ -13,6 +13,37 @@ let searchController;
 let lastStatus;
 let operationBusy = false;
 
+function appConfirm({ title, message, confirmLabel = 'Продолжить', danger = false }) {
+  return new Promise(resolve => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'app-confirm';
+    dialog.innerHTML = `
+      <form method="dialog" class="app-confirm-card">
+        <div class="app-confirm-icon ${danger ? 'danger' : ''}" aria-hidden="true">${danger ? '!' : '✓'}</div>
+        <div><h2></h2><p></p></div>
+        <div class="app-confirm-actions">
+          <button class="secondary" value="cancel">Отмена</button>
+          <button class="primary ${danger ? 'danger' : ''}" value="confirm"></button>
+        </div>
+      </form>`;
+    dialog.querySelector('h2').textContent = title;
+    dialog.querySelector('p').textContent = message;
+    dialog.querySelector('[value="confirm"]').textContent = confirmLabel;
+    let finished = false;
+    const finish = answer => {
+      if (finished) return;
+      finished = true;
+      dialog.remove();
+      resolve(answer);
+    };
+    dialog.addEventListener('cancel', event => { event.preventDefault(); finish(false); });
+    dialog.addEventListener('close', () => finish(dialog.returnValue === 'confirm'));
+    document.body.append(dialog);
+    dialog.showModal();
+    dialog.querySelector('[value="cancel"]').focus();
+  });
+}
+
 function setDisabled(id, disabled) {
   const control = element(id);
   control.disabled = disabled;
@@ -222,7 +253,11 @@ element('closeQueue').addEventListener('click', () => element('queueDialog').clo
 element('queuePrev').addEventListener('click', () => loadQueuePage(queueOffset - queuePageSize));
 element('queueNext').addEventListener('click', () => loadQueuePage(queueOffset + queuePageSize));
 element('clearQueue').addEventListener('click', async () => {
-  if (!confirm('Очистить этот завершённый список? Ожидающие доставки сообщения затронуты не будут.')) return;
+  if (!await appConfirm({
+    title: 'Очистить список?',
+    message: 'Будут удалены только завершённые записи. Ожидающие доставки останутся в очереди.',
+    confirmLabel: 'Очистить', danger: true
+  })) return;
   const button = element('clearQueue');
   const label = button.textContent;
   button.disabled = true;
@@ -342,7 +377,11 @@ element('downloadDiagnostics').addEventListener('click', async () => {
 element('updateFile').addEventListener('change', async event => {
   const file = event.target.files[0];
   if (!file) return;
-  if (!confirm('Установить выбранное обновление? Программа проверит подпись, перезапустится и автоматически вернёт предыдущую версию при ошибке.')) {
+  if (!await appConfirm({
+    title: 'Установить обновление?',
+    message: 'Клиент проверит обновление, перезапустится и вернёт предыдущую версию, если проверка не пройдёт.',
+    confirmLabel: 'Установить'
+  })) {
     event.target.value = '';
     return;
   }

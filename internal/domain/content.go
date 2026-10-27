@@ -24,11 +24,25 @@ type Callsign struct {
 
 // ContentBlock — одна самостоятельная временная часть бланка EAVC.
 type ContentBlock struct {
+	UUID      string     `json:"uuid,omitempty"`
 	Key       string     `json:"key"`
 	Sequence  int        `json:"sequence"`
 	Text      string     `json:"text"`
 	Hash      string     `json:"hash"`
+	UpdatedAt string     `json:"updated_at,omitempty"`
 	Callsigns []Callsign `json:"callsigns,omitempty"`
+}
+
+// Identity возвращает стабильный ключ блока. Современная EAVC выдаёт UUIDv7;
+// Key остаётся совместимым запасным вариантом для архивных и старых пакетов.
+func (block ContentBlock) Identity() string {
+	if value := strings.TrimSpace(block.UUID); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(block.Key); value != "" {
+		return value
+	}
+	return "block-" + strconv.Itoa(block.Sequence+1)
 }
 
 // SplitContentBlocks повторяет разбиение рабочей Python-версии.

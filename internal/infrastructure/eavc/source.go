@@ -2,6 +2,7 @@ package eavc
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -19,6 +20,11 @@ import (
 var requiredColumns = []string{
 	"id", "session_id", "session_uuid", "unit_name", "frequency",
 	"group_code", "uuid", "content", "updated_by", "updated_at",
+}
+
+var requiredBlockColumns = []string{
+	"uuid", "item_uuid", "item_id", "time_key", "day_offset", "ord",
+	"header", "body", "text_hash", "updated_at", "deleted_at",
 }
 
 // maxBoundaryReplay ограничивает повторное чтение записей с одной секундой
@@ -48,12 +54,14 @@ func (source *Source) allItemsQuery() string {
 	}
 	query := fmt.Sprintf(`
 		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
-			uuid, content, updated_by, updated_at, %s AS catalog_uuid, %s AS source_mode
+			uuid, content, updated_by, updated_at, %s AS catalog_uuid, %s AS source_mode,
+			0 AS is_archive
 		FROM intercept_items`, catalogExpression, modeExpression)
 	if source.hasArchive {
 		query += ` UNION ALL
 		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
-			uuid, content, updated_by, updated_at, '' AS catalog_uuid, 'unknown' AS source_mode
+			uuid, content, updated_by, updated_at, '' AS catalog_uuid, 'unknown' AS source_mode,
+			1 AS is_archive
 		FROM intercept_items_archive`
 	}
 	return query
@@ -107,6 +115,31 @@ func Open(ctx context.Context, path string) (*Source, error) {
 		db.Close()
 		sort.Strings(missing)
 		return nil, fmt.Errorf("схема EAVC не поддерживается, отсутствуют поля: %s", strings.Join(missing, ", "))
+	}
+	hasBlocks, err := hasTable(ctx, db, "intercept_blocks")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if !hasBlocks {
+		db.Close()
+		return nil, errors.New("схема EAVC не поддерживается: отсутствует таблица intercept_blocks")
+	}
+	blockColumns, err := tableColumns(ctx, db, "intercept_blocks")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	missing = missing[:0]
+	for _, column := range requiredBlockColumns {
+		if !blockColumns[column] {
+			missing = append(missing, column)
+		}
+	}
+	if len(missing) != 0 {
+		db.Close()
+		sort.Strings(missing)
+		return nil, fmt.Errorf("схема блоков EAVC не поддерживается, отсутствуют поля: %s", strings.Join(missing, ", "))
 	}
 	hasCallsigns, err := hasTable(ctx, db, "intercept_callsigns")
 	if err != nil {
@@ -175,7 +208,7 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 			LIMIT ?
 		)
 		SELECT id, session_id, session_uuid, unit_name, frequency, group_code,
-			uuid, content, updated_by, updated_at, catalog_uuid, source_mode, is_boundary
+			uuid, content, updated_by, updated_at, catalog_uuid, source_mode, is_archive, is_boundary
 		FROM (
 			SELECT *, 0 AS is_boundary FROM newer
 			UNION ALL
@@ -194,6 +227,7 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 
 	cursor := after
 	var items []application.SourceItem
+	var archived []bool
 	boundaryCount := 0
 	for rows.Next() {
 		var item application.SourceItem
@@ -203,10 +237,10 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		var sessionUUID, unitName, frequency, groupCode, sourceUUID sql.NullString
 		var content, updatedBy, catalogUUID sql.NullString
 		var id int64
-		var isBoundary bool
+		var isArchive, isBoundary bool
 		if err := rows.Scan(
 			&id, &sessionID, &sessionUUID, &unitName, &frequency, &groupCode,
-			&sourceUUID, &content, &updatedBy, &updatedAt, &catalogUUID, &mode, &isBoundary,
+			&sourceUUID, &content, &updatedBy, &updatedAt, &catalogUUID, &mode, &isArchive, &isBoundary,
 		); err != nil {
 			return nil, after, fmt.Errorf("декодировать запись EAVC: %w", err)
 		}
@@ -235,6 +269,7 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		item.UpdatedBy = updatedBy.String
 		item.ObservedAt = time.Now().UTC()
 		items = append(items, item)
+		archived = append(archived, isArchive)
 		cursor = application.Cursor{UpdatedAt: updatedAt, ID: id}
 	}
 	if err := rows.Err(); err != nil {
@@ -244,7 +279,15 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		return nil, after, fmt.Errorf("закрыть чтение EAVC: %w", err)
 	}
 	for index := range items {
-		items[index].Blocks = domain.SplitContentBlocks(items[index].Content)
+		if archived[index] {
+			items[index].Blocks = legacyArchiveBlocks(items[index])
+		} else {
+			blocks, err := source.readActiveBlocks(ctx, items[index])
+			if err != nil {
+				return nil, after, err
+			}
+			items[index].Blocks = blocks
+		}
 		if source.hasCallsigns {
 			if err := source.enrichCallsigns(ctx, &items[index]); err != nil {
 				return nil, after, err
@@ -252,6 +295,92 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		}
 	}
 	return items, cursor, nil
+}
+
+func (source *Source) readActiveBlocks(ctx context.Context, item application.SourceItem) ([]domain.ContentBlock, error) {
+	rows, err := source.db.QueryContext(ctx, `
+		SELECT uuid, item_uuid, item_id, time_key, day_offset, ord,
+			header, body, text_hash, updated_at
+		FROM intercept_blocks
+		WHERE item_id=? AND deleted_at IS NULL
+		ORDER BY day_offset, (time_key IS NULL), time_key, ord`, item.Record.ID)
+	if err != nil {
+		return nil, fmt.Errorf("прочитать блоки EAVC для записи %d: %w", item.Record.ID, err)
+	}
+	defer rows.Close()
+	blocks := make([]domain.ContentBlock, 0)
+	texts := make([]string, 0)
+	for rows.Next() {
+		var uuid, itemUUID, header, body, storedHash, updatedAt string
+		var itemID int64
+		var timeKey sql.NullInt64
+		var dayOffset, order int
+		if err := rows.Scan(&uuid, &itemUUID, &itemID, &timeKey, &dayOffset, &order,
+			&header, &body, &storedHash, &updatedAt); err != nil {
+			return nil, fmt.Errorf("декодировать блок EAVC для записи %d: %w", item.Record.ID, err)
+		}
+		if strings.TrimSpace(uuid) == "" || itemID != item.Record.ID ||
+			(strings.TrimSpace(item.Record.UUID) != "" && itemUUID != item.Record.UUID) {
+			return nil, fmt.Errorf("нарушен контракт EAVC: блок записи %d имеет неверную связь с исходным перехватом", item.Record.ID)
+		}
+		text := strings.TrimSpace(strings.TrimSpace(header) + "\n" + strings.TrimSpace(body))
+		digest := sha256.Sum256([]byte(text))
+		hash := fmt.Sprintf("%x", digest[:])
+		if storedHash != "" && !strings.EqualFold(storedHash, hash) {
+			return nil, fmt.Errorf("нарушен контракт EAVC: хеш блока %s не соответствует его тексту", uuid)
+		}
+		key := strings.TrimSpace(header)
+		if key == "" {
+			key = "без времени"
+		}
+		blocks = append(blocks, domain.ContentBlock{
+			UUID: uuid, Key: key, Sequence: len(blocks), Text: text, Hash: hash, UpdatedAt: updatedAt,
+		})
+		texts = append(texts, text)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("прочитать блоки EAVC для записи %d: %w", item.Record.ID, err)
+	}
+	if normalizeSnapshot(strings.Join(texts, "\n")) != normalizeSnapshot(item.Content) {
+		return nil, fmt.Errorf("нарушен контракт EAVC: текст записи %d и таблица intercept_blocks временно расходятся", item.Record.ID)
+	}
+	return blocks, nil
+}
+
+func legacyArchiveBlocks(item application.SourceItem) []domain.ContentBlock {
+	blocks := domain.SplitContentBlocks(item.Content)
+	for index := range blocks {
+		seed := fmt.Sprintf("%s|%d|%d|%s", item.Record.UUID, item.Record.ID, index, blocks[index].Hash)
+		digest := sha256.Sum256([]byte(seed))
+		blocks[index].UUID = fmt.Sprintf("legacy-%x", digest[:16])
+		blocks[index].UpdatedAt = item.Record.UpdatedAt
+	}
+	return blocks
+}
+
+func normalizeSnapshot(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	lines := strings.Split(value, "\n")
+	compact := make([]string, 0, len(lines))
+	empty := false
+	for _, line := range lines {
+		line = strings.TrimRight(line, " \t")
+		if strings.TrimSpace(line) == "" {
+			if len(compact) == 0 || empty {
+				continue
+			}
+			empty = true
+			compact = append(compact, "")
+			continue
+		}
+		empty = false
+		compact = append(compact, line)
+	}
+	for len(compact) > 0 && compact[len(compact)-1] == "" {
+		compact = compact[:len(compact)-1]
+	}
+	return strings.Join(compact, "\n")
 }
 
 func (source *Source) enrichCallsigns(ctx context.Context, item *application.SourceItem) error {

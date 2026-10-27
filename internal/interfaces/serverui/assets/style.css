@@ -58,3 +58,13 @@
 @media(max-width:760px){.history-head{align-items:flex-start;flex-direction:column}.route-modal{width:min(100% - 16px,900px)}.route-modal form{padding:17px}.route-control{grid-template-columns:1fr}.route-modal .modal-actions{flex-wrap:wrap}}
 .route-filters{display:flex;align-items:end;gap:10px;flex-wrap:wrap}.route-toolbar-meta{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}.route-filter{display:grid;gap:5px;min-width:240px;color:#68768c;font-size:11px;font-weight:750}.route-filter select{width:100%;border:1px solid #ccd5e1;border-radius:10px;padding:9px 11px;background:#fbfcfe;color:#17233a}.route-filter select:focus{outline:3px solid rgba(36,94,234,.13);border-color:#5f89ee}.route-list.empty-state:empty:before{content:attr(data-empty-message)}
 @media(max-width:760px){.route-filters,.route-toolbar-meta{width:100%;justify-content:flex-start}.route-filter{min-width:0;width:100%}}
+.app-confirm{width:min(520px,calc(100vw - 32px));padding:0;border:0;border-radius:18px;background:transparent;box-shadow:0 24px 70px rgba(18,31,54,.3)}
+.app-confirm::backdrop{background:rgba(17,29,49,.58);backdrop-filter:blur(2px)}
+.app-confirm-card{display:grid;grid-template-columns:44px 1fr;gap:16px;padding:24px;background:#fff;border:1px solid #e4e9f0;border-radius:18px;color:#17233a}
+.app-confirm-card h2{margin:1px 0 8px;font-size:19px}.app-confirm-card p{margin:0;color:#68768c;line-height:1.5}
+.app-confirm-icon{display:grid;place-items:center;width:42px;height:42px;border-radius:13px;background:#eaf8f0;color:#117348;font-size:20px;font-weight:900}
+.app-confirm-icon.danger{background:#fff0f0;color:#c2252d}.app-confirm-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
+.app-confirm-actions .danger{background:#c92a32}.app-confirm-actions .danger:hover{background:#ad1f27}
+.app-confirm-code{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:14px}.app-confirm-code input{min-width:0;padding:11px 12px;border:1px solid #ccd5e1;border-radius:10px;background:#f7f9fc;color:#17233a;font:600 13px/1.3 Consolas,"Courier New",monospace}
+@media(max-width:560px){.app-confirm-card{grid-template-columns:1fr}.app-confirm-icon{display:none}.app-confirm-code{grid-template-columns:1fr}.app-confirm-actions{flex-direction:column-reverse}.app-confirm-actions .button{width:100%}}
+.telegram-suppressed{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:11px 12px;border:1px solid #f0c5c7;border-radius:10px;background:#fff4f4;color:#92252b;font-size:12px}.telegram-suppressed span{overflow-wrap:anywhere}.telegram-suppressed .button{flex:0 0 auto}

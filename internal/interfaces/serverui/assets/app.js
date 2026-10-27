@@ -43,6 +43,61 @@ let incidentData = null;
 let incidentFilters = { q: '', client: '' };
 let serviceOperationBusy = false;
 
+function appDialog({ title, message, confirmLabel = 'Продолжить', danger = false, code = '' }) {
+  return new Promise(resolve => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'app-confirm';
+    dialog.innerHTML = `
+      <form method="dialog" class="app-confirm-card">
+        <div class="app-confirm-icon ${danger ? 'danger' : ''}" aria-hidden="true">${danger ? '!' : '✓'}</div>
+        <div><h2></h2><p></p><div class="app-confirm-code hidden"><input readonly><button type="button" class="button ghost">Скопировать</button></div></div>
+        <div class="app-confirm-actions">
+          <button class="button ghost cancel" value="cancel">Отмена</button>
+          <button class="button primary ${danger ? 'danger' : ''}" value="confirm"></button>
+        </div>
+      </form>`;
+    dialog.querySelector('h2').textContent = title;
+    dialog.querySelector('p').textContent = message;
+    dialog.querySelector('[value="confirm"]').textContent = confirmLabel;
+    if (code) {
+      const codeBox = dialog.querySelector('.app-confirm-code');
+      const input = codeBox.querySelector('input');
+      codeBox.classList.remove('hidden');
+      dialog.querySelector('.cancel').classList.add('hidden');
+      input.value = code;
+      codeBox.querySelector('button').addEventListener('click', async event => {
+        try {
+          await navigator.clipboard.writeText(code);
+          event.currentTarget.textContent = 'Скопировано';
+        } catch (_) {
+          input.select();
+          document.execCommand('copy');
+          event.currentTarget.textContent = 'Скопировано';
+        }
+      });
+    }
+    let finished = false;
+    const finish = answer => {
+      if (finished) return;
+      finished = true;
+      dialog.remove();
+      resolve(answer);
+    };
+    dialog.addEventListener('cancel', event => { event.preventDefault(); finish(false); });
+    dialog.addEventListener('close', () => finish(dialog.returnValue === 'confirm'));
+    document.body.append(dialog);
+    dialog.showModal();
+    dialog.querySelector(code ? '[value="confirm"]' : '[value="cancel"]').focus();
+  });
+}
+
+const appConfirm = options => appDialog(options);
+const showActivationCode = code => appDialog({
+  title: 'Код активации',
+  message: 'Сохраните код отдельно. Он понадобится один раз при первом запуске рабочей точки.',
+  confirmLabel: 'Готово', code
+});
+
 const historySections = {
   clients: ['Рабочие точки', 'Текущее качество связи и последние сигналы от каждой рабочей точки.'],
   received: ['Получено', 'События, которые центр надёжно принял от рабочих точек.'],
@@ -94,7 +149,7 @@ async function downloadAPI(url, fallbackName) {
   link.click();
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 	if (activationCode) {
-		prompt('Сохраните код отдельно от скачанного файла. Он потребуется один раз при первом запуске рабочей точки:', activationCode);
+		await showActivationCode(activationCode);
 	}
 }
 
@@ -252,7 +307,7 @@ $('downloadDiagnostics').addEventListener('click', async () => {
 $('updateFile').addEventListener('change', async event => {
   const file = event.target.files[0];
   if (!file) return;
-  if (!confirm('Установить выбранное обновление? Центр проверит подпись, перезапустится и автоматически восстановит предыдущую версию при ошибке.')) {
+  if (!await appConfirm({ title: 'Установить обновление?', message: 'Центр проверит обновление, перезапустится и вернёт предыдущую версию, если проверка не пройдёт.', confirmLabel: 'Установить' })) {
     event.target.value = '';
     return;
   }
@@ -497,6 +552,7 @@ function openHistoryItem(index) {
     historyMetaEntry('Принято / обработано', formatDate(item.occurred_at)),
     historyMetaEntry('Запись EAVC', item.source_record ? `№ ${item.source_record}` : ''),
     historyMetaEntry('UUID записи EAVC', item.source_uuid),
+    historyMetaEntry('UUID временных блоков', (item.block_uuids || []).join(', ')),
     historyMetaEntry('Версия записи EAVC', item.source_version),
     historyMetaEntry('Отпечаток содержимого', item.content_digest),
     historyMetaEntry('Режим', item.source_mode === 'deferred' ? 'Отложенный' : (item.source_mode ? 'Обычный' : '')),
@@ -520,15 +576,37 @@ function openHistoryItem(index) {
   $('historyItemContent').textContent = historyContent(item);
   const telegramURLs = item.telegram_message_urls || [];
   const telegramIDs = item.telegram_message_ids || [];
-  $('historyTelegramResult').classList.toggle('hidden', telegramIDs.length === 0);
+  const suppressedBlocks = (item.telegram_blocks || []).filter(block => block.suppressed);
+  $('historyTelegramResult').classList.toggle('hidden', telegramIDs.length === 0 && suppressedBlocks.length === 0);
   $('historyTelegramLinks').innerHTML = telegramIDs.map((messageID, messageIndex) => {
     const url = telegramURLs[messageIndex];
     return url
       ? `<a class="button secondary" href="${escapeHTML(url)}" target="_blank" rel="noreferrer">Открыть сообщение ${escapeHTML(messageID)}</a>`
       : `<span class="badge">message_id ${escapeHTML(messageID)}</span>`;
-  }).join('');
+  }).join('') + suppressedBlocks.map(block => `
+    <div class="telegram-suppressed">
+      <span>Сообщение удалено в Telegram · UUID ${escapeHTML(block.block_uuid)}</span>
+      <button class="button danger" data-republish-block="${escapeHTML(block.block_uuid)}" data-event-id="${escapeHTML(item.id)}" data-destination-id="${escapeHTML(item.destination_id)}">Опубликовать снова</button>
+    </div>`).join('');
   openDialog('historyItemDialog');
 }
+
+$('historyTelegramLinks').addEventListener('click', async event => {
+  const button = event.target.closest('[data-republish-block]');
+  if (!button) return;
+  if (!await appConfirm({ title: 'Опубликовать снова?', message: 'Центр создаст новое Telegram-сообщение только для этого удалённого перехвата. Сообщения других участников затронуты не будут.', confirmLabel: 'Опубликовать' })) return;
+  setButtonBusy(button, true, 'Отправляем…');
+  try {
+    const url = `/api/deliveries/${encodeURIComponent(button.dataset.eventId)}/destinations/${encodeURIComponent(button.dataset.destinationId)}/blocks/${encodeURIComponent(button.dataset.republishBlock)}/republish`;
+    await post(url, {});
+    closeDialog('historyItemDialog');
+    await openHistory(historyKind, historyOffset, true);
+    notify('Перехват опубликован заново и привязан к новому message_id.', true);
+  } catch (error) {
+    notify(error.message);
+    setButtonBusy(button, false);
+  }
+});
 
 function renderHistory() {
   const data = historyData || {};
@@ -616,7 +694,7 @@ $('incidentSearch').addEventListener('keydown', event => {
   }
 });
 $('incidentClear').addEventListener('click', async event => {
-  if (!confirm('Очистить историю сбоев и восстановлений? Текущее состояние рабочих точек не изменится.')) return;
+  if (!await appConfirm({ title: 'Очистить историю связи?', message: 'Записи о сбоях и восстановлениях будут удалены. Текущее состояние рабочих точек сохранится.', confirmLabel: 'Очистить', danger: true })) return;
   const button = event.currentTarget;
   setButtonBusy(button, true, 'Очищаем…');
   try {
@@ -651,7 +729,7 @@ $('historySearch').addEventListener('keydown', event => {
 });
 $('historyClear').addEventListener('click', async event => {
   const label = historySections[historyKind]?.[0] || 'этого раздела';
-  if (!confirm(`Очистить видимую историю «${label}»? Активные очереди и настройки не изменятся.`)) return;
+  if (!await appConfirm({ title: `Очистить «${label}»?`, message: 'Будет удалена только видимая история. Активные очереди и настройки сохранятся.', confirmLabel: 'Очистить', danger: true })) return;
   const button = event.currentTarget;
   setButtonBusy(button, true, 'Очищаем…');
   try {
@@ -837,8 +915,8 @@ $('destinationsList').addEventListener('click', async event => {
   if (button.dataset.action === 'edit') showDestinationDialog(id);
   if (button.dataset.action === 'delete') {
     const name = destinations[id]?.name || 'этого получателя';
-    if (!confirm(`Удалить «${name}»? Получатель будет убран из всех маршрутов.`)) return;
-    if (!discardDraftForRecipientChange()) return;
+    if (!await appConfirm({ title: `Удалить «${name}»?`, message: 'Получатель будет убран из всех маршрутов.', confirmLabel: 'Удалить', danger: true })) return;
+    if (!await discardDraftForRecipientChange()) return;
     const hadDraft = rulesDirty;
     setButtonBusy(button, true, 'Удаляем…');
     try {
@@ -861,7 +939,7 @@ $('destinationForm').addEventListener('submit', async event => {
   const form = event.currentTarget;
   const data = new FormData(form);
   const button = form.querySelector('button[value="save"]');
-  if (!discardDraftForRecipientChange()) return;
+  if (!await discardDraftForRecipientChange()) return;
   const hadDraft = rulesDirty;
   setButtonBusy(button, true, 'Проверяем…');
   try {
@@ -894,9 +972,9 @@ $('destinationForm').addEventListener('submit', async event => {
   }
 });
 
-function discardDraftForRecipientChange() {
+async function discardDraftForRecipientChange() {
   if (!rulesDirty) return true;
-  return confirm('Есть неопубликованный черновик маршрутов. Отменить его и продолжить изменение получателей?');
+  return appConfirm({ title: 'Отменить черновик?', message: 'Есть неопубликованные изменения маршрутов. Чтобы изменить получатей, их нужно отменить.', confirmLabel: 'Отменить черновик', danger: true });
 }
 
 async function loadClients() {
@@ -956,7 +1034,7 @@ $('clientForm').addEventListener('submit', async event => {
     link.click();
     URL.revokeObjectURL(link.href);
 		if (activationCode) {
-			prompt('Сохраните код отдельно от файла. Он потребуется один раз при первом запуске рабочей точки:', activationCode);
+			await showActivationCode(activationCode);
 		}
     closeDialog('clientDialog');
     await loadClients();
@@ -1163,7 +1241,7 @@ $('positionsList').addEventListener('click', async event => {
   const key = row.dataset.positionKey;
   if (button.dataset.action === 'edit') showPositionDialog(key);
   if (button.dataset.action === 'delete') {
-    if (!confirm(`Удалить позицию «${positionName(key)}» из черновика?`)) return;
+    if (!await appConfirm({ title: `Удалить «${positionName(key)}»?`, message: 'Позиция будет удалена из черновика маршрутов.', confirmLabel: 'Удалить', danger: true })) return;
     const previous = cloneRules(rules);
     delete rules.positions[key];
     setButtonBusy(button, true, 'Удаляем…');
@@ -1231,7 +1309,7 @@ $('positionForm').addEventListener('submit', async event => {
 
 $('publishRules').addEventListener('click', async event => {
   if (!rulesDirty || !rules) return;
-  if (!confirm('Опубликовать черновик? Новые маршруты сразу начнут применяться к следующим событиям.')) return;
+  if (!await appConfirm({ title: 'Опубликовать маршруты?', message: 'Новые правила сразу начнут применяться к следующим перехватам.', confirmLabel: 'Опубликовать' })) return;
   const button = event.currentTarget;
   setButtonBusy(button, true, 'Публикуем…');
   try {
@@ -1273,7 +1351,7 @@ $('rulesHistory').addEventListener('click', async event => {
   const row = event.target.closest('[data-rule-version]');
   if (!button || !row) return;
   const version = Number(row.dataset.ruleVersion);
-  if (!confirm(`Восстановить настройки из версии ${version}? Текущая версия останется в истории.`)) return;
+  if (!await appConfirm({ title: `Восстановить версию ${version}?`, message: 'Текущие настройки останутся в истории, а выбранная версия станет новой активной.', confirmLabel: 'Восстановить' })) return;
   setButtonBusy(button, true, 'Восстанавливаем…');
   try {
     await post(`/api/rule-versions/${version}/restore`, {});

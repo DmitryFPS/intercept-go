@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -252,9 +253,9 @@ func TestFormatDeferredEventKeepsMarkerAndOriginalDate(t *testing.T) {
 	}
 }
 
-// При изменении перехвата одно объединённое сообщение редактируется, а
-// исчезнувший временной блок не оставляет отдельный дубликат.
-func TestDestinationEditsCombinedRecordWithoutDuplicates(t *testing.T) {
+// Каждый UUID-блок публикуется отдельно. Правка одного блока редактирует только
+// его message_id, а удаление соседнего не создаёт нового сообщения.
+func TestDestinationKeepsIndependentBlocksWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 	var methods []string
 	var texts []string
@@ -291,38 +292,39 @@ func TestDestinationEditsCombinedRecordWithoutDuplicates(t *testing.T) {
 		SourceAt: time.Date(2026, 10, 21, 8, 40, 3, 0, time.UTC),
 		Position: domain.Position{UnitName: "позиция"},
 		Blocks: []domain.ContentBlock{
-			{Key: "12.00", Sequence: 0, Text: "12.00\n-Первое"},
-			{Key: "12.01", Sequence: 1, Text: "12.01\n-Второе"},
+			{UUID: "block-1", Key: "12.00", Sequence: 0, Text: "12.00\n-Первое"},
+			{UUID: "block-2", Key: "12.01", Sequence: 1, Text: "12.01\n-Второе"},
 		},
 	}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
-	if len(texts) != 1 || !strings.Contains(texts[0], "<b>12:00</b>") || !strings.Contains(texts[0], "<b>12:01</b>") {
-		t.Fatalf("временные блоки не объединены в первом сообщении: %#v", texts)
+	if len(texts) != 2 || !strings.Contains(texts[0], "<b>12:00</b>") ||
+		strings.Contains(texts[0], "<b>12:01</b>") || !strings.Contains(texts[1], "<b>12:01</b>") {
+		t.Fatalf("UUID-блоки не разделены: %#v", texts)
 	}
 	if strings.Contains(texts[0], "(отредактировано") {
 		t.Fatalf("у первой отправки не должно быть отметки редактирования: %q", texts[0])
 	}
-	event.Blocks = []domain.ContentBlock{{Key: "12.00", Sequence: 0, Text: "12.00\n-Первое исправлено"}}
+	event.Blocks = []domain.ContentBlock{{UUID: "block-1", Key: "12.00", Sequence: 0, Text: "12.00\n-Первое исправлено"}}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"sendMessage", "editMessageText"}
+	want := []string{"sendMessage", "sendMessage", "editMessageText", "deleteMessage"}
 	if strings.Join(methods, ",") != strings.Join(want, ",") {
 		t.Fatalf("неожиданные действия Telegram: %v", methods)
 	}
-	if len(texts) != 2 || !strings.Contains(texts[1], "Первое исправлено") ||
-		!strings.HasSuffix(texts[1], "(отредактировано 11:40:03)") {
+	if len(texts) != 3 || !strings.Contains(texts[2], "Первое исправлено") ||
+		!strings.HasSuffix(texts[2], "(отредактировано 11:40:03)") {
 		t.Fatalf("исправленный текст не передан через editMessageText: %#v", texts)
 	}
-	if !strings.Contains(texts[1], "Первое исправлено\n\n(отредактировано 11:40:03)") {
-		t.Fatalf("перед отметкой редактирования должна быть одна пустая строка: %q", texts[1])
+	if !strings.Contains(texts[2], "Первое исправлено\n\n(отредактировано 11:40:03)") {
+		t.Fatalf("перед отметкой редактирования должна быть одна пустая строка: %q", texts[2])
 	}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
-	if len(methods) != 2 {
+	if len(methods) != 4 {
 		t.Fatalf("неизменённая запись после правки отправлена повторно: %v", methods)
 	}
 	if len(destination.locks) != 0 {
@@ -330,10 +332,9 @@ func TestDestinationEditsCombinedRecordWithoutDuplicates(t *testing.T) {
 	}
 }
 
-// Удалённая вручную публикация восстанавливается ровно один раз. Параллельная
-// обработка той же версии не создаёт вторую замену, а следующая версия снова
-// редактирует уже сохранённый новый message_id.
-func TestDestinationRestoresDeletedMessageOnce(t *testing.T) {
+// Удалённая вручную публикация не восстанавливается автоматически. Её UUID
+// подавляется, а параллельная обработка не создаёт повторов и не блокирует очередь.
+func TestDestinationSuppressesManuallyDeletedMessage(t *testing.T) {
 	t.Parallel()
 	var sends, edits, deletes atomic.Int32
 	var nextID atomic.Int64
@@ -413,56 +414,42 @@ func TestDestinationRestoresDeletedMessageOnce(t *testing.T) {
 			t.Fatalf("восстановление завершилось ошибкой: %v", deliveryErr)
 		}
 	}
-	if sends.Load() != 2 || edits.Load() != 1 || deletes.Load() != 1 {
-		t.Fatalf("ожидалась одна замена: sends=%d edits=%d deletes=%d", sends.Load(), edits.Load(), deletes.Load())
+	if sends.Load() != 1 || edits.Load() != 1 || deletes.Load() != 1 {
+		t.Fatalf("удалённое сообщение не должно восстанавливаться: sends=%d edits=%d deletes=%d", sends.Load(), edits.Load(), deletes.Load())
 	}
 	current, err := loadDestinationState(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	block := current.Items["point-01|source-1"].Blocks["__record__"]
-	if block.Recovering || len(block.MessageIDs) != 1 || block.MessageIDs[0] != 102 {
-		t.Fatalf("новый message_id не зафиксирован: %#v", block)
+	block := current.Items["point-01|source-1"].Blocks["12.00"]
+	if !block.Suppressed || len(block.MessageIDs) != 0 || len(block.DeletedMessageIDs) != 1 || block.DeletedMessageIDs[0] != 101 {
+		t.Fatalf("удалённый message_id не зафиксирован как подавленный: %#v", block)
 	}
-	if !strings.Contains(logs.String(), "Telegram-сообщение автоматически восстановлено") {
-		t.Fatalf("в журнале нет результата восстановления: %s", logs.String())
+	if !strings.Contains(logs.String(), "не будет восстановлена автоматически") {
+		t.Fatalf("в журнале нет результата подавления: %s", logs.String())
 	}
 	event.Blocks[0].Text = "12.00\n-Третья редакция"
 	event.SourceAt = event.SourceAt.Add(time.Minute)
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
-	if sends.Load() != 2 || edits.Load() != 2 {
-		t.Fatalf("следующая версия не отредактировала замену: sends=%d edits=%d", sends.Load(), edits.Load())
+	if sends.Load() != 1 || edits.Load() != 1 {
+		t.Fatalf("следующая версия восстановила удалённое сообщение: sends=%d edits=%d", sends.Load(), edits.Load())
 	}
 }
 
-// Флаг восстановления и очищенная старая привязка сохраняются до отправки.
-// После перезапуска повтор продолжает восстановление, а не возвращается к
-// навсегда удалённому message_id.
-func TestDestinationResumesDeletedMessageRecoveryAfterRestart(t *testing.T) {
+// Подавление удалённого сообщения переживает перезапуск. Даже новая редакция
+// того же block_uuid не создаёт публикацию, пока оператор явно не разрешит её.
+func TestDestinationKeepsDeletedMessageSuppressedAfterRestart(t *testing.T) {
 	t.Parallel()
-	var sends atomic.Int32
-	replacementUnavailable := atomic.Bool{}
-	replacementUnavailable.Store(true)
-	var lastText atomic.Value
+	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
-		var body map[string]any
-		_ = json.NewDecoder(request.Body).Decode(&body)
+		methods = append(methods, method)
 		switch method {
 		case "sendMessage":
-			call := sends.Add(1)
-			lastText.Store(body["text"].(string))
-			if call == 2 && replacementUnavailable.Load() {
-				writer.WriteHeader(http.StatusServiceUnavailable)
-				_ = json.NewEncoder(writer).Encode(map[string]any{
-					"ok": false, "error_code": 503, "description": "Service Unavailable",
-				})
-				return
-			}
 			_ = json.NewEncoder(writer).Encode(map[string]any{
-				"ok": true, "result": map[string]any{"message_id": 100 + call},
+				"ok": true, "result": map[string]any{"message_id": 101},
 			})
 		case "editMessageText":
 			_ = json.NewEncoder(writer).Encode(map[string]any{
@@ -487,32 +474,99 @@ func TestDestinationResumesDeletedMessageRecoveryAfterRestart(t *testing.T) {
 		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
 		SourceAt: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
 		Position: domain.Position{UnitName: "позиция"},
-		Blocks:   []domain.ContentBlock{{Key: "12.00", Text: "12.00\n-Первое"}},
+		Blocks:   []domain.ContentBlock{{UUID: "block-1", Key: "12.00", Text: "12.00\n-Первое"}},
 	}
 	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
 	event.Blocks[0].Text = "12.00\n-Первое исправлено"
-	event.SourceAt = event.SourceAt.Add(time.Minute)
-	if err := destination.Deliver(context.Background(), event, delivery); err == nil {
-		t.Fatal("временная ошибка замены должна оставить задание для повтора")
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
 	}
-	intermediate, err := loadDestinationState(statePath)
+	restarted := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	event.Blocks[0].Text = "12.00\n-Третья редакция"
+	if err := restarted.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"sendMessage", "editMessageText", "deleteMessage"}
+	if !reflect.DeepEqual(methods, want) {
+		t.Fatalf("после перезапуска удалённая публикация восстановлена: %v", methods)
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil || !current.Items["point-01|source-1"].Blocks["block-1"].Suppressed {
+		t.Fatalf("подавление не сохранено: %#v err=%v", current, err)
+	}
+}
+
+func TestDestinationRepublishesOnlyExplicitlySelectedBlock(t *testing.T) {
+	t.Parallel()
+	var methods []string
+	nextID := int64(100)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		methods = append(methods, method)
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		switch method {
+		case "sendMessage":
+			nextID++
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": nextID}})
+		case "editMessageText":
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found",
+			})
+		case "deleteMessage":
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": false, "error_code": 400, "description": "Bad Request: message to delete not found",
+			})
+		}
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	block := intermediate.Items["point-01|source-1"].Blocks["__record__"]
-	if !block.Recovering || len(block.MessageIDs) != 0 {
-		t.Fatalf("состояние восстановления не сохранено: %#v", block)
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	event := domain.Event{
+		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
+		Position: domain.Position{UnitName: "позиция"},
+		Blocks: []domain.ContentBlock{
+			{UUID: "block-1", Sequence: 0, Text: "12.00\n-Первое"},
+			{UUID: "block-2", Sequence: 1, Text: "12.01\n-Второе"},
+		},
 	}
-	replacementUnavailable.Store(false)
-	restarted := Destination{API: api, ChatID: -1001, StatePath: statePath}
-	if err := restarted.Deliver(context.Background(), event, delivery); err != nil {
-		t.Fatalf("восстановление после перезапуска не продолжилось: %v", err)
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
 	}
-	if text, _ := lastText.Load().(string); !strings.Contains(text, "(отредактировано 15:01:00)") {
-		t.Fatalf("восстановленная редакция потеряла отметку: %q", text)
+	event.Blocks[0].Text = "12.00\n-Первое исправлено"
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := destination.AllowRepublish("block-1")
+	if err != nil || !allowed {
+		t.Fatalf("повторная публикация не разрешена: allowed=%v err=%v", allowed, err)
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := current.Items["point-01|source-1"].Blocks["block-1"]
+	second := current.Items["point-01|source-1"].Blocks["block-2"]
+	if first.Suppressed || !reflect.DeepEqual(first.MessageIDs, []int64{103}) ||
+		!reflect.DeepEqual(second.MessageIDs, []int64{102}) {
+		t.Fatalf("неверная привязка после ручной публикации: first=%#v second=%#v", first, second)
+	}
+	want := []string{"sendMessage", "sendMessage", "editMessageText", "deleteMessage", "sendMessage"}
+	if !reflect.DeepEqual(methods, want) {
+		t.Fatalf("чужой блок затронут при повторной публикации: %v", methods)
 	}
 }
 
@@ -787,7 +841,9 @@ func TestDestinationReceiptReturnsFinalTelegramMessageIDs(t *testing.T) {
 		Items: map[string]destinationItem{"textile|source-1": {
 			ThreadID: 17,
 			Blocks: map[string]destinationBlock{
-				"__record__": {MessageIDs: []int64{701, 702}},
+				"block-2": {Sequence: 1, MessageIDs: []int64{702}},
+				"block-1": {Sequence: 0, MessageIDs: []int64{701}},
+				"block-3": {Sequence: 2, MessageIDs: []int64{703}, Suppressed: true},
 			},
 		}},
 	}); err != nil {
@@ -798,5 +854,60 @@ func TestDestinationReceiptReturnsFinalTelegramMessageIDs(t *testing.T) {
 	if err != nil || receipt.Kind != "telegram" || receipt.ChatID != destination.ChatID ||
 		receipt.ThreadID != 17 || len(receipt.MessageIDs) != 2 || receipt.MessageIDs[0] != 701 {
 		t.Fatalf("неверный результат Telegram-доставки: %#v err=%v", receipt, err)
+	}
+}
+
+func TestDestinationMigratesRC81CombinedMessageToUUIDBlocks(t *testing.T) {
+	t.Parallel()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {ThreadID: 17, Blocks: map[string]destinationBlock{
+			"__record__": {Hash: "old", SourceHash: "old", MessageIDs: []int64{701}},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		methods = append(methods, method)
+		if method == "sendMessage" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": 702}})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	event := domain.Event{
+		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
+		Position: domain.Position{UnitName: "позиция"},
+		Blocks: []domain.ContentBlock{
+			{UUID: "block-1", Sequence: 0, Text: "12.00\n-Первое"},
+			{UUID: "block-2", Sequence: 1, Text: "12.01\n-Второе"},
+		},
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 17}}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(methods, []string{"editMessageText", "sendMessage"}) {
+		t.Fatalf("неверная миграция rc81: %v", methods)
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := current.Items["point-01|source-1"].Blocks
+	if _, exists := blocks["__record__"]; exists ||
+		!reflect.DeepEqual(blocks["block-1"].MessageIDs, []int64{701}) ||
+		!reflect.DeepEqual(blocks["block-2"].MessageIDs, []int64{702}) {
+		t.Fatalf("message_id потеряны при миграции: %#v", blocks)
 	}
 }

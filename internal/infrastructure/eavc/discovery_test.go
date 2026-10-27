@@ -104,6 +104,11 @@ func createDiscoveryDatabase(t *testing.T, path string) {
 		id INTEGER, session_id INTEGER, session_uuid TEXT, unit_name TEXT,
 		frequency TEXT, group_code TEXT, uuid TEXT, content TEXT,
 		updated_by TEXT, updated_at TEXT
+	);
+	CREATE TABLE intercept_blocks (
+		uuid TEXT PRIMARY KEY, item_uuid TEXT, item_id INTEGER, time_key INTEGER,
+		day_offset INTEGER, ord INTEGER, header TEXT, body TEXT, text_hash TEXT,
+		updated_at TEXT, deleted_at TEXT
 	)`)
 	if err != nil {
 		t.Fatal(err)

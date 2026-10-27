@@ -36,6 +36,8 @@ type itemLockEntry struct {
 	refs  int
 }
 
+var errTelegramPublicationMissing = errors.New("публикация Telegram удалена вручную")
+
 // Deliver создаёт, редактирует и удаляет сообщения так, чтобы Telegram отражал
 // текущее состояние записи EAVC без дубликатов.
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
@@ -90,9 +92,8 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	}
 	item.ThreadID = threadID
 
-	const recordStateKey = "__record__"
-	baseChunks := formatEventChunks(event, delivery, destination.Network, destination.Protection, destination.MessageTemplate)
-	if len(baseChunks) == 0 {
+	blocks := eventBlocks(event)
+	if len(blocks) == 0 {
 		if err := destination.deleteAll(ctx, item.Blocks); err != nil {
 			return err
 		}
@@ -104,57 +105,118 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		}
 		return nil
 	}
-	stored, combinedState := item.Blocks[recordStateKey]
-	if !combinedState {
-		// Состояние старых версий хранило отдельные сообщения для каждого
-		// времени. Переиспользуем их идентификаторы при первом обновлении, чтобы
-		// переход не создавал дубликаты и не терял возможность редактирования.
-		stored.MessageIDs = legacyMessageIDs(item.Blocks)
-	}
-	baseHash := hashChunks(baseChunks)
-	storedBaseHash := stored.SourceHash
-	if storedBaseHash == "" {
-		// Состояние до появления явной отметки хранило только итоговый текст.
-		storedBaseHash = stored.Hash
-	}
-	if combinedState && storedBaseHash == baseHash {
-		return nil
-	}
-	chunks := baseChunks
-	if combinedState && (len(stored.MessageIDs) > 0 || stored.Recovering) {
-		editedAt := event.SourceAt
-		if editedAt.IsZero() {
-			editedAt = time.Now().UTC()
+	const recordStateKey = "__record__"
+	combined, hasCombined := item.Blocks[recordStateKey]
+	active := make(map[string]bool, len(blocks))
+	for index, block := range blocks {
+		blockKey := block.Identity()
+		active[blockKey] = true
+		stored, exists := item.Blocks[blockKey]
+		if !exists && index == 0 && hasCombined {
+			// rc81 хранил всю запись под __record__. Первый блок принимает прежний
+			// message_id, остальные публикуются отдельно. Маркер удаляется только
+			// после успешного завершения миграции, поэтому перезапуск её продолжит.
+			stored = combined
+			exists = true
 		}
-		chunks = formatEventChunksWithEditedAt(
-			event, delivery, destination.Network, destination.Protection,
-			destination.MessageTemplate, editedAt,
+		baseChunks := formatBlockChunks(
+			event, block, delivery, destination.Network, destination.Protection, destination.MessageTemplate,
 		)
+		if len(baseChunks) == 0 {
+			continue
+		}
+		baseHash := hashChunks(baseChunks)
+		storedBaseHash := stored.SourceHash
+		if storedBaseHash == "" {
+			storedBaseHash = stored.Hash
+		}
+		if exists && storedBaseHash == baseHash {
+			stored.Sequence = block.Sequence
+			item.Blocks[blockKey] = stored
+			continue
+		}
+		if stored.Suppressed {
+			stored.Hash = baseHash
+			stored.SourceHash = baseHash
+			stored.Sequence = block.Sequence
+			item.Blocks[blockKey] = stored
+			if err := destination.saveItem(itemKey, item, false); err != nil {
+				return err
+			}
+			continue
+		}
+		chunks := baseChunks
+		if exists && (len(stored.MessageIDs) > 0 || stored.Recovering) {
+			editedAt := event.SourceAt
+			if editedAt.IsZero() {
+				editedAt = time.Now().UTC()
+			}
+			chunks = formatBlockChunksWithEditedAt(
+				event, block, delivery, destination.Network, destination.Protection,
+				destination.MessageTemplate, editedAt,
+			)
+		}
+		renderHash := hashChunks(chunks)
+		progress := func(messageIDs []int64, recovering bool) error {
+			stored.MessageIDs = append([]int64(nil), messageIDs...)
+			stored.Recovering = recovering
+			stored.Sequence = block.Sequence
+			item.Blocks[blockKey] = stored
+			return destination.saveItem(itemKey, item, false)
+		}
+		oldIDs := append([]int64(nil), stored.MessageIDs...)
+		messageIDs, _, err := destination.upsertBlock(
+			ctx, event.ID, itemKey, threadID, stored.MessageIDs, chunks, progress,
+		)
+		if errors.Is(err, errTelegramPublicationMissing) {
+			stored.DeletedMessageIDs = appendUniqueIDs(stored.DeletedMessageIDs, oldIDs...)
+			stored.MessageIDs = nil
+			stored.Hash = renderHash
+			stored.SourceHash = baseHash
+			stored.Sequence = block.Sequence
+			stored.Recovering = false
+			stored.Suppressed = true
+			stored.SuppressedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			stored.SuppressedReason = "сообщение удалено вручную в Telegram"
+			item.Blocks[blockKey] = stored
+			if saveErr := destination.saveItem(itemKey, item, false); saveErr != nil {
+				return saveErr
+			}
+			if destination.Logger != nil {
+				destination.Logger.Warn("удалённая вручную публикация Telegram не будет восстановлена автоматически",
+					"event_id", event.ID, "trace_id", event.ID, "block_uuid", blockKey,
+					"item_key", itemKey, "chat_id", destination.ChatID, "thread_id", threadID,
+					"deleted_message_ids", oldIDs,
+				)
+			}
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("синхронизировать блок %s: %w", blockKey, err)
+		}
+		item.Blocks[blockKey] = destinationBlock{
+			Hash: renderHash, SourceHash: baseHash, MessageIDs: messageIDs, Sequence: block.Sequence,
+		}
+		if err := destination.saveItem(itemKey, item, false); err != nil {
+			return err
+		}
 	}
-	renderHash := hashChunks(chunks)
-	progress := func(messageIDs []int64, recovering bool) error {
-		stored.MessageIDs = append([]int64(nil), messageIDs...)
-		stored.Recovering = recovering
-		item.Blocks = map[string]destinationBlock{recordStateKey: stored}
-		return destination.saveItem(itemKey, item, false)
+	for key, obsolete := range item.Blocks {
+		if key == recordStateKey || active[key] {
+			continue
+		}
+		if err := destination.deleteMessages(ctx, obsolete.MessageIDs); err != nil {
+			return err
+		}
+		delete(item.Blocks, key)
 	}
-	messageIDs, recovered, err := destination.upsertBlock(
-		ctx, event.ID, itemKey, threadID, stored.MessageIDs, chunks, progress,
-	)
-	if err != nil {
-		return fmt.Errorf("синхронизировать запись: %w", err)
-	}
-	item.Blocks = map[string]destinationBlock{
-		recordStateKey: {Hash: renderHash, SourceHash: baseHash, MessageIDs: messageIDs, Sequence: 0},
-	}
-	if err := destination.saveItem(itemKey, item, false); err != nil {
+	delete(item.Blocks, recordStateKey)
+	if len(item.Blocks) == 0 {
+		if err := destination.saveItem(itemKey, destinationItem{}, true); err != nil {
+			return err
+		}
+	} else if err := destination.saveItem(itemKey, item, false); err != nil {
 		return err
-	}
-	if recovered && destination.Logger != nil {
-		destination.Logger.Info("отсутствующее Telegram-сообщение автоматически восстановлено",
-			"event_id", event.ID, "trace_id", event.ID, "item_key", itemKey, "chat_id", destination.ChatID,
-			"thread_id", threadID, "message_ids", messageIDs, "final_message_ids", messageIDs,
-		)
 	}
 	if migratedLegacy {
 		return destination.saveItem(legacyItemKey, destinationItem{}, true)
@@ -176,12 +238,115 @@ func (destination *Destination) DeliveryReceipt(
 	if err != nil {
 		return application.DeliveryReceipt{}, err
 	}
-	const recordStateKey = "__record__"
-	block := item.Blocks[recordStateKey]
+	type orderedBlock struct {
+		key   string
+		block destinationBlock
+	}
+	ordered := make([]orderedBlock, 0, len(item.Blocks))
+	for key, block := range item.Blocks {
+		ordered = append(ordered, orderedBlock{key: key, block: block})
+	}
+	sort.SliceStable(ordered, func(left, right int) bool { return ordered[left].block.Sequence < ordered[right].block.Sequence })
+	messageIDs := make([]int64, 0)
+	blockReceipts := make([]application.DeliveryBlockReceipt, 0, len(ordered))
+	for _, entry := range ordered {
+		block := entry.block
+		if !block.Suppressed {
+			messageIDs = append(messageIDs, block.MessageIDs...)
+		}
+		blockReceipts = append(blockReceipts, application.DeliveryBlockReceipt{
+			BlockUUID: entry.key, MessageIDs: append([]int64(nil), block.MessageIDs...),
+			DeletedMessageIDs: append([]int64(nil), block.DeletedMessageIDs...),
+			Suppressed:        block.Suppressed, SuppressedReason: block.SuppressedReason,
+		})
+	}
 	return application.DeliveryReceipt{
 		Kind: "telegram", ChatID: destination.ChatID,
-		ThreadID: item.ThreadID, MessageIDs: append([]int64(nil), block.MessageIDs...),
+		ThreadID: item.ThreadID, MessageIDs: messageIDs, Blocks: blockReceipts,
 	}, nil
+}
+
+// AllowRepublish снимает только явное подавление выбранного UUID-блока.
+// Следующий обычный проход доставки создаст новое сообщение и сохранит точный
+// message_id из ответа Telegram; соседние и пользовательские сообщения не
+// участвуют в выборе.
+func (destination *Destination) AllowRepublish(blockUUID string) (bool, error) {
+	blockUUID = strings.TrimSpace(blockUUID)
+	if blockUUID == "" {
+		return false, errors.New("не задан UUID блока для повторной публикации")
+	}
+	destination.mu.Lock()
+	current, err := destination.loadState()
+	if err != nil {
+		destination.mu.Unlock()
+		return false, err
+	}
+	itemKey := ""
+	for key, item := range current.Items {
+		if block, exists := item.Blocks[blockUUID]; exists && (block.Suppressed || (len(block.MessageIDs) == 0 && len(block.DeletedMessageIDs) > 0)) {
+			itemKey = key
+			break
+		}
+	}
+	destination.mu.Unlock()
+	if itemKey == "" {
+		return false, nil
+	}
+	unlock := destination.lockItem(itemKey)
+	defer unlock()
+	item, err := destination.loadItem(itemKey)
+	if err != nil {
+		return false, err
+	}
+	block, exists := item.Blocks[blockUUID]
+	if !exists || (!block.Suppressed && (len(block.MessageIDs) > 0 || len(block.DeletedMessageIDs) == 0)) {
+		return false, nil
+	}
+	block.Suppressed = false
+	block.SuppressedAt = ""
+	block.SuppressedReason = ""
+	block.Hash = ""
+	block.SourceHash = ""
+	block.MessageIDs = nil
+	block.Recovering = false
+	item.Blocks[blockUUID] = block
+	if err := destination.saveItem(itemKey, item, false); err != nil {
+		return false, err
+	}
+	if destination.Logger != nil {
+		destination.Logger.Info("оператор разрешил повторную публикацию Telegram",
+			"block_uuid", blockUUID, "item_key", itemKey, "chat_id", destination.ChatID,
+			"deleted_message_ids", block.DeletedMessageIDs,
+		)
+	}
+	return true, nil
+}
+
+func eventBlocks(event domain.Event) []domain.ContentBlock {
+	blocks := append([]domain.ContentBlock(nil), event.Blocks...)
+	if len(blocks) == 0 {
+		blocks = domain.SplitContentBlocks(event.Content)
+	}
+	filtered := blocks[:0]
+	for _, block := range blocks {
+		if strings.TrimSpace(block.Text) != "" {
+			filtered = append(filtered, block)
+		}
+	}
+	sort.SliceStable(filtered, func(left, right int) bool { return filtered[left].Sequence < filtered[right].Sequence })
+	return filtered
+}
+
+func appendUniqueIDs(existing []int64, values ...int64) []int64 {
+	seen := make(map[int64]bool, len(existing)+len(values))
+	result := make([]int64, 0, len(existing)+len(values))
+	for _, value := range append(append([]int64(nil), existing...), values...) {
+		if value != 0 && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func legacyMessageIDs(blocks map[string]destinationBlock) []int64 {
@@ -296,7 +461,7 @@ func (destination *Destination) upsertBlock(
 			}
 			if missingEditError(err) {
 				if destination.Logger != nil {
-					destination.Logger.Warn("Telegram-сообщение отсутствует; выполняется автоматическое восстановление",
+					destination.Logger.Warn("Telegram-сообщение отсутствует; автоматическое восстановление отключено",
 						"event_id", eventID, "trace_id", eventID, "item_key", itemKey, "chat_id", destination.ChatID,
 						"thread_id", threadID, "message_id", ids[index], "final_message_id", ids[index], "error", err,
 					)
@@ -309,13 +474,12 @@ func (destination *Destination) upsertBlock(
 					}
 				}
 				ids = nil
-				recovered = true
 				if progress != nil {
-					if progressErr := progress(ids, true); progressErr != nil {
+					if progressErr := progress(ids, false); progressErr != nil {
 						return nil, false, progressErr
 					}
 				}
-				break
+				return nil, false, errTelegramPublicationMissing
 			}
 			if !terminalEditError(err) {
 				return nil, false, err

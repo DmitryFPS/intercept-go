@@ -50,40 +50,42 @@ type ConnectionIncident struct {
 // карантина содержимое намеренно недоступно: отклонённый пакет мог не пройти
 // проверку подписи и его нельзя выдавать за достоверный перехват.
 type ServerHistoryItem struct {
-	ID                 string     `json:"id"`
-	ClientID           string     `json:"client_id,omitempty"`
-	ClientName         string     `json:"client_name,omitempty"`
-	UnitName           string     `json:"unit_name,omitempty"`
-	Frequency          string     `json:"frequency,omitempty"`
-	GroupCode          string     `json:"group_code,omitempty"`
-	DestinationID      string     `json:"destination_id,omitempty"`
-	Destination        string     `json:"destination,omitempty"`
-	State              string     `json:"state"`
-	OccurredAt         time.Time  `json:"occurred_at"`
-	SourceAt           *time.Time `json:"source_at,omitempty"`
-	SourceRecord       int64      `json:"source_record,omitempty"`
-	SourceUUID         string     `json:"source_uuid,omitempty"`
-	SourceVersion      string     `json:"source_version,omitempty"`
-	ContentDigest      string     `json:"content_digest,omitempty"`
-	SourceMode         string     `json:"source_mode,omitempty"`
-	NextAttemptAt      *time.Time `json:"next_attempt_at,omitempty"`
-	Attempts           int        `json:"attempts,omitempty"`
-	Reason             string     `json:"reason,omitempty"`
-	UpdatedBy          string     `json:"updated_by,omitempty"`
-	Content            string     `json:"content,omitempty"`
-	ContentReady       bool       `json:"content_ready"`
-	ContentKind        string     `json:"content_kind"`
-	ContentNote        string     `json:"content_note,omitempty"`
-	TelegramChat       string     `json:"telegram_chat_id,omitempty"`
-	TelegramTopic      int64      `json:"telegram_thread_id,omitempty"`
-	TelegramIDs        []int64    `json:"telegram_message_ids,omitempty"`
-	TelegramURLs       []string   `json:"telegram_message_urls,omitempty"`
-	TransportUpdateID  int64      `json:"transport_update_id,omitempty"`
-	TransportMessageID int64      `json:"transport_message_id,omitempty"`
-	TransportKind      string     `json:"transport_kind,omitempty"`
-	TransportOutcome   string     `json:"transport_outcome,omitempty"`
-	TransportSeen      int        `json:"transport_seen,omitempty"`
-	Counted            bool       `json:"counted"`
+	ID                 string                             `json:"id"`
+	ClientID           string                             `json:"client_id,omitempty"`
+	ClientName         string                             `json:"client_name,omitempty"`
+	UnitName           string                             `json:"unit_name,omitempty"`
+	Frequency          string                             `json:"frequency,omitempty"`
+	GroupCode          string                             `json:"group_code,omitempty"`
+	DestinationID      string                             `json:"destination_id,omitempty"`
+	Destination        string                             `json:"destination,omitempty"`
+	State              string                             `json:"state"`
+	OccurredAt         time.Time                          `json:"occurred_at"`
+	SourceAt           *time.Time                         `json:"source_at,omitempty"`
+	SourceRecord       int64                              `json:"source_record,omitempty"`
+	SourceUUID         string                             `json:"source_uuid,omitempty"`
+	SourceVersion      string                             `json:"source_version,omitempty"`
+	ContentDigest      string                             `json:"content_digest,omitempty"`
+	SourceMode         string                             `json:"source_mode,omitempty"`
+	NextAttemptAt      *time.Time                         `json:"next_attempt_at,omitempty"`
+	Attempts           int                                `json:"attempts,omitempty"`
+	Reason             string                             `json:"reason,omitempty"`
+	UpdatedBy          string                             `json:"updated_by,omitempty"`
+	Content            string                             `json:"content,omitempty"`
+	ContentReady       bool                               `json:"content_ready"`
+	ContentKind        string                             `json:"content_kind"`
+	ContentNote        string                             `json:"content_note,omitempty"`
+	TelegramChat       string                             `json:"telegram_chat_id,omitempty"`
+	TelegramTopic      int64                              `json:"telegram_thread_id,omitempty"`
+	TelegramIDs        []int64                            `json:"telegram_message_ids,omitempty"`
+	TelegramURLs       []string                           `json:"telegram_message_urls,omitempty"`
+	BlockUUIDs         []string                           `json:"block_uuids,omitempty"`
+	TelegramBlocks     []application.DeliveryBlockReceipt `json:"telegram_blocks,omitempty"`
+	TransportUpdateID  int64                              `json:"transport_update_id,omitempty"`
+	TransportMessageID int64                              `json:"transport_message_id,omitempty"`
+	TransportKind      string                             `json:"transport_kind,omitempty"`
+	TransportOutcome   string                             `json:"transport_outcome,omitempty"`
+	TransportSeen      int                                `json:"transport_seen,omitempty"`
+	Counted            bool                               `json:"counted"`
 }
 
 // ServerHistoryPage объединяет текущую связь и постраничную историю.
@@ -564,6 +566,9 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 	item.SourceMode = string(event.Mode)
 	item.UpdatedBy = event.UpdatedBy
 	item.Content = event.Content
+	for _, block := range event.Blocks {
+		item.BlockUUIDs = append(item.BlockUUIDs, block.Identity())
+	}
 	item.ContentReady = true
 	item.ContentKind = "text"
 	if strings.TrimSpace(event.Content) == "" {
@@ -605,6 +610,7 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 				item.TelegramChat = strconv.FormatInt(receipt.ChatID, 10)
 				item.TelegramTopic = receipt.ThreadID
 				item.TelegramIDs = append([]int64(nil), receipt.MessageIDs...)
+				item.TelegramBlocks = append([]application.DeliveryBlockReceipt(nil), receipt.Blocks...)
 				for _, messageID := range receipt.MessageIDs {
 					if link := telegramMessageURL(receipt.ChatID, messageID); link != "" {
 						item.TelegramURLs = append(item.TelegramURLs, link)
@@ -630,6 +636,7 @@ func serverHistoryItemMatches(item ServerHistoryItem, query string) bool {
 		item.Frequency, item.GroupCode, item.DestinationID, item.Destination,
 		item.Reason, item.UpdatedBy, item.Content,
 		item.TelegramChat, fmt.Sprint(item.TelegramTopic), fmt.Sprint(item.TelegramIDs),
+		fmt.Sprint(item.BlockUUIDs), fmt.Sprint(item.TelegramBlocks),
 		item.SourceUUID, item.SourceVersion, item.ContentDigest,
 		fmt.Sprint(item.TransportMessageID), fmt.Sprint(item.TransportUpdateID),
 		fmt.Sprintf("%d", item.SourceRecord),

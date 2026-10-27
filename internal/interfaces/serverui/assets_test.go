@@ -82,7 +82,7 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	if !strings.Contains(javascript, "$('historyDialog').close()") {
 		t.Error("история сбоев должна открываться отдельно от текущего состояния точек")
 	}
-	if !strings.Contains(javascript, "Активные очереди и настройки не изменятся") {
+	if !strings.Contains(javascript, "Активные очереди и настройки сохранятся") {
 		t.Error("интерфейс не объясняет безопасные границы очистки")
 	}
 	if strings.Contains(javascript, "`ID: ${item.id}`") {
@@ -123,6 +123,24 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	if strings.Count(javascript, "const button = event.currentTarget;") < 2 ||
 		strings.Count(javascript, "setButtonBusy(button, false);") < 2 {
 		t.Error("обе кнопки очистки должны сохранять ссылку и восстанавливаться после запроса")
+	}
+}
+
+func TestBrowserDialogsAreReplacedWithBrandedModal(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	javascript := string(application)
+	for _, native := range []string{"confirm(", "prompt(", "alert("} {
+		if strings.Contains(javascript, native) {
+			t.Errorf("остался системный диалог браузера: %s", native)
+		}
+	}
+	for _, expected := range []string{"function appDialog", "const appConfirm", "showActivationCode", "navigator.clipboard.writeText", "dialog.showModal()"} {
+		if !strings.Contains(javascript, expected) {
+			t.Errorf("фирменное модальное окно неполно: нет %q", expected)
+		}
 	}
 }
 

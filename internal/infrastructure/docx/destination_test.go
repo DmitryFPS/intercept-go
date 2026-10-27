@@ -131,9 +131,9 @@ func TestBuildUsesLocalCallsignNumberAndEAVCDescription(t *testing.T) {
 	}
 }
 
-// Все временные блоки одного перехвата остаются в одном Word-документе, а
+// Каждый временной UUID-блок получает самостоятельный Word-документ, а
 // повторная обработка не порождает копий.
-func TestDestinationBuildsOneDocumentForAllTimeBlocksWithoutDuplicates(t *testing.T) {
+func TestDestinationBuildsOneDocumentPerBlockWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -156,29 +156,17 @@ func TestDestinationBuildsOneDocumentForAllTimeBlocksWithoutDuplicates(t *testin
 		t.Fatalf("duplicate deliver: %v", err)
 	}
 	files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
-	if len(files) != 1 {
-		t.Fatalf("ожидался один документ без дублей: %#v", files)
+	if len(files) != 2 {
+		t.Fatalf("ожидалось два документа без дублей: %#v", files)
 	}
 	numbers, err := StateNumbers(destination.StatePath)
-	if err != nil || len(numbers) != 1 || numbers[0] != 1 {
+	if err != nil || !reflect.DeepEqual(numbers, []int{1, 2}) {
 		t.Fatalf("номера: %#v %v", numbers, err)
 	}
-	archive, err := zip.OpenReader(files[0])
-	if err != nil {
-		t.Fatalf("open docx: %v", err)
-	}
-	defer archive.Close()
-	for _, file := range archive.File {
-		if file.Name != "word/document.xml" {
-			continue
-		}
-		reader, _ := file.Open()
-		payload, _ := io.ReadAll(reader)
-		reader.Close()
-		for _, expected := range []string{"1 мб 155 омбр", "10:00", "Первый", "10:05", "Второй"} {
-			if !strings.Contains(string(payload), expected) {
-				t.Fatalf("в объединённый документ не попало %q", expected)
-			}
+	all := documentXML(t, files[0]) + documentXML(t, files[1])
+	for _, expected := range []string{"1 мб 155 омбр", "10:00", "Первый", "10:05", "Второй"} {
+		if !strings.Contains(all, expected) {
+			t.Fatalf("в отдельных документах нет %q", expected)
 		}
 	}
 }
@@ -217,7 +205,7 @@ func TestDestinationResetsStateWhenFolderScopeChanges(t *testing.T) {
 	}
 }
 
-func TestDestinationKeepsSharedLocalNumbersAcrossTimeBlocks(t *testing.T) {
+func TestDestinationAssignsSequentialNumbersAcrossTimeBlocks(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	template := filepath.Join(root, "template.docx")
@@ -244,17 +232,20 @@ func TestDestinationKeepsSharedLocalNumbersAcrossTimeBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
-	if len(files) != 1 {
-		t.Fatalf("вместо одного документа созданы: %#v", files)
+	if len(files) != 3 {
+		t.Fatalf("вместо трёх документов созданы: %#v", files)
 	}
-	runs := documentRuns(t, documentXML(t, files[0]))
+	var runs []string
+	for _, file := range files {
+		runs = append(runs, documentRuns(t, documentXML(t, file))...)
+	}
 	for _, expected := range []string{
 		"1.«", "Торба", "2.«", "Монако",
 		"11:02", "/1/ Первый доклад.", "/2/ Ответ.",
-		"11:09", "/1/ Повтор.", "11:16", "/2/ Подтверждаю.",
+		"11:09", "/1/ Повтор.", "11:16", "/1/ Подтверждаю.",
 	} {
 		if !slices.Contains(runs, expected) {
-			t.Fatalf("в объединённом Word нет %q: %#v", expected, runs)
+			t.Fatalf("в отдельных Word нет %q: %#v", expected, runs)
 		}
 	}
 }
@@ -290,15 +281,65 @@ func TestDestinationMigratesLegacyBlockDocumentsWithoutEditedMarker(t *testing.T
 		t.Fatal(err)
 	}
 	files, _ := filepath.Glob(filepath.Join(folder, "*.docx"))
-	if len(files) != 1 || !strings.HasPrefix(filepath.Base(files[0]), "СТНД7 ") {
-		t.Fatalf("миграция не сохранила первый номер: %#v", files)
+	if len(files) != 2 || !strings.HasPrefix(filepath.Base(files[0]), "СТНД7 ") ||
+		!strings.HasPrefix(filepath.Base(files[1]), "СТНД8 ") {
+		t.Fatalf("миграция не сохранила номера блоков: %#v", files)
 	}
-	if xml := documentXML(t, files[0]); strings.Contains(xml, "(отредактировано") {
-		t.Fatal("техническое объединение ошибочно помечено как редакция оператора")
+	for _, file := range files {
+		if xml := documentXML(t, file); strings.Contains(xml, "(отредактировано") {
+			t.Fatal("техническая миграция ошибочно помечена как редакция оператора")
+		}
 	}
 	numbers, err := StateNumbers(statePath)
-	if err != nil || !reflect.DeepEqual(numbers, []int{7}) {
+	if err != nil || !reflect.DeepEqual(numbers, []int{7, 8}) {
 		t.Fatalf("состояние после миграции: %#v, %v", numbers, err)
+	}
+}
+
+func TestDestinationMigratesRC81CombinedDocumentToUUIDBlocks(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	folder := filepath.Join(root, "out")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(root, "state", "word.json")
+	combinedName := "СТНД7 позиция - 313.docx"
+	if err := os.WriteFile(filepath.Join(folder, combinedName), []byte("rc81"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveState(statePath, state{LastNumber: 7, Blocks: map[string]blockRecord{
+		"point-01|source-1|record": {Number: 7, Filename: combinedName, Render: "rc81"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{TemplatePath: template, Folder: folder, StatePath: statePath, Network: "313", Prefix: "СТНД"}
+	event := domain.Event{
+		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"},
+		Position: domain.Position{UnitName: "позиция"}, SourceAt: time.Now(),
+		Blocks: []domain.ContentBlock{
+			{UUID: "block-1", Sequence: 0, Text: "12.00\n-Первое"},
+			{UUID: "block-2", Sequence: 1, Text: "12.01\n-Второе"},
+		},
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := filepath.Glob(filepath.Join(folder, "*.docx"))
+	if len(files) != 2 || !strings.HasPrefix(filepath.Base(files[0]), "СТНД7 ") ||
+		!strings.HasPrefix(filepath.Base(files[1]), "СТНД8 ") {
+		t.Fatalf("неверная миграция rc81 Word: %#v", files)
+	}
+	current, err := loadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := current.Blocks["point-01|source-1|record"]; exists ||
+		current.Blocks["point-01|source-1|block-1"].Number != 7 ||
+		current.Blocks["point-01|source-1|block-2"].Number != 8 {
+		t.Fatalf("номера rc81 потеряны: %#v", current.Blocks)
 	}
 }
 
@@ -445,8 +486,8 @@ func TestDestinationUpdatesAndRemovesDocumentsAfterEAVCEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
-	if len(before) != 1 {
-		t.Fatalf("до правки ожидался один документ: %#v", before)
+	if len(before) != 2 {
+		t.Fatalf("до правки ожидалось два документа: %#v", before)
 	}
 	firstName := filepath.Base(before[0])
 	event.SourceAt = time.Date(2026, 10, 19, 6, 47, 31, 0, time.UTC)

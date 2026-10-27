@@ -157,6 +157,32 @@ func formatEventChunks(event domain.Event, delivery domain.PlannedDelivery, netw
 	return formatEventChunksWithEditedAt(event, delivery, network, protection, template, time.Time{})
 }
 
+func formatBlockChunks(
+	event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery,
+	network, protection, template string,
+) []string {
+	return formatBlockChunksWithEditedAt(event, block, delivery, network, protection, template, time.Time{})
+}
+
+func formatBlockChunksWithEditedAt(
+	event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery,
+	network, protection, template string, editedAt time.Time,
+) []string {
+	suffix := ""
+	if !editedAt.IsZero() {
+		suffix = "\n\n(отредактировано " + editedAt.In(time.FixedZone("MSK", 3*60*60)).Format("15:04:05") + ")"
+	}
+	message := formatBlock(event, block, delivery, network, protection, template, suffix)
+	parts := splitHTMLMessage(message, maxTelegramMessageRunes-48)
+	if len(parts) <= 1 {
+		return parts
+	}
+	for index := range parts {
+		parts[index] += fmt.Sprintf("\n\n(часть %d из %d)", index+1, len(parts))
+	}
+	return parts
+}
+
 // formatEventChunksWithEditedAt добавляет служебную отметку в самый конец
 // перехвата. Она не является репликой корреспондента и остаётся видимой даже
 // в клиентах Telegram, которые не показывают собственный признак правки.
@@ -166,19 +192,9 @@ func formatEventChunksWithEditedAt(
 	network, protection, template string,
 	editedAt time.Time,
 ) []string {
-	suffix := ""
-	if !editedAt.IsZero() {
-		suffix = "\n\n(отредактировано " + editedAt.In(time.FixedZone("MSK", 3*60*60)).Format("15:04:05") + ")"
-	}
-	message := formatBlock(event, combinedEventBlock(event), delivery, network, protection, template, suffix)
-	parts := splitHTMLMessage(message, maxTelegramMessageRunes-48)
-	if len(parts) <= 1 {
-		return parts
-	}
-	for index := range parts {
-		parts[index] += fmt.Sprintf("\n\n(часть %d из %d)", index+1, len(parts))
-	}
-	return parts
+	return formatBlockChunksWithEditedAt(
+		event, combinedEventBlock(event), delivery, network, protection, template, editedAt,
+	)
 }
 
 func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.PlannedDelivery, network, protection, template, suffix string) string {
