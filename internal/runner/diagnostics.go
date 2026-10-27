@@ -93,6 +93,7 @@ var diagnosticAllowedKeys = map[string]bool{
 	"client_ref": true, "destination_ref": true, "chat_ref": true, "thread_ref": true,
 	"message_ref": true, "telegram_message_ref": true,
 	"sender_bot_ref": true, "sender_bot_id_ref": true,
+	"error": true,
 }
 
 var diagnosticReferenceKeys = map[string]string{
@@ -209,7 +210,11 @@ func allowDiagnosticValue(value any, updateDetails bool, redactor *diagnosticRed
 				continue
 			}
 			if text, ok := nested.(string); ok {
-				item[key] = observability.SafeText(text)
+				if lower == "error" {
+					item[key] = safeDiagnosticError(text)
+				} else {
+					item[key] = observability.SafeText(text)
+				}
 				continue
 			}
 			allowDiagnosticValue(nested, updateDetails, redactor)
@@ -223,4 +228,14 @@ func allowDiagnosticValue(value any, updateDetails bool, redactor *diagnosticRed
 			allowDiagnosticValue(nested, updateDetails, redactor)
 		}
 	}
+}
+
+func safeDiagnosticError(value string) string {
+	fields := strings.Fields(observability.SafeText(value))
+	for index, field := range fields {
+		if strings.Contains(field, `:\`) || strings.HasPrefix(field, `\\`) {
+			fields[index] = "[PATH]"
+		}
+	}
+	return strings.Join(fields, " ")
 }

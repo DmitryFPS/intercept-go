@@ -15,10 +15,13 @@ func TestDiagnosticLogRedactsOperationalIdentifiers(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, secret := range []string{"secret-uuid", "event-secret", "telegram-secret", "secret_bot", "Текстиль", "1 мб 155 омбр", "https://t.me/+secret", `C:\\secret\\main.sqlite`, `"source_id"`, `"thread_id"`, `"error"`} {
+	for _, secret := range []string{"secret-uuid", "event-secret", "telegram-secret", "secret_bot", "Текстиль", "1 мб 155 омбр", "https://t.me/+secret", `C:\\secret\\main.sqlite`, `"source_id"`, `"thread_id"`} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("диагностический журнал содержит %q: %s", secret, text)
 		}
+	}
+	if !strings.Contains(output.String(), `"error":"open [PATH] denied"`) {
+		t.Fatalf("обезличенная причина ошибки потеряна: %s", output.String())
 	}
 	if !strings.Contains(text, `"queue":3`) || !strings.Contains(text, `"msg":"received"`) {
 		t.Fatalf("полезные технические поля потеряны: %s", text)

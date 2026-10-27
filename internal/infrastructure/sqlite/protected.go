@@ -52,7 +52,10 @@ func protectExistingColumn(ctx context.Context, db *sql.DB, table, column string
 			rows.Close()
 			return err
 		}
-		if !bytes.HasPrefix(item.payload, protectedPrefix) {
+		// Пустое значение обозначает отсутствие необязательного результата.
+		// Windows DPAPI не принимает пустой буфер, и попытка защитить его
+		// блокировала обновление базы с уже завершёнными доставками.
+		if len(item.payload) > 0 && !bytes.HasPrefix(item.payload, protectedPrefix) {
 			entries = append(entries, item)
 		}
 	}

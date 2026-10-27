@@ -12,6 +12,44 @@ import (
 	"intercept/internal/domain"
 )
 
+func TestProtectExistingColumnKeepsOptionalEmptyValue(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "protected.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE optional_values(value BLOB NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO optional_values(value) VALUES(X''), (X'0102')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := protectExistingColumn(ctx, db, "optional_values", "value"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.QueryContext(ctx, `SELECT value FROM optional_values ORDER BY rowid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var values [][]byte
+	for rows.Next() {
+		var value []byte
+		if err := rows.Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		values = append(values, value)
+	}
+	if len(values) != 2 || len(values[0]) != 0 {
+		t.Fatalf("пустое необязательное значение изменено: %#v", values)
+	}
+	if !bytes.HasPrefix(values[1], protectedPrefix) {
+		t.Fatal("непустое значение не было защищено")
+	}
+}
+
 // Повторно полученный пакет учитывается один раз, а незавершённый приём не оставляет половину данных.
 func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	t.Parallel()
