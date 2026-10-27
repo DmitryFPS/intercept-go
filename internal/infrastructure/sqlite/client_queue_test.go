@@ -416,6 +416,9 @@ func TestClientQueuePurgesOnlyOldTerminalEvents(t *testing.T) {
 	if err != nil || removed != 1 {
 		t.Fatalf("очистка: removed=%d err=%v", removed, err)
 	}
+	if inserted, err := queue.Enqueue(ctx, makeEvent("old")); err != nil || inserted {
+		t.Fatalf("автоматически очищенная версия вернулась: inserted=%v err=%v", inserted, err)
+	}
 	stats, err := queue.Stats(ctx)
 	if err != nil || stats.Acknowledged != 1 || stats.Pending != 1 {
 		t.Fatalf("неверные остатки очереди: %+v err=%v", stats, err)
@@ -500,7 +503,8 @@ func TestClientQueuePagesAndProtectsActiveMessagesFromDeletion(t *testing.T) {
 	}
 	for _, state := range []string{"pending", "uploaded", "acknowledged", "expired"} {
 		items, total, err := queue.EventsPage(ctx, state, 20, 0)
-		if err != nil || total != 1 || len(items) != 1 || items[0].Content != "текст "+state {
+		if err != nil || total != 1 || len(items) != 1 || items[0].Content != "текст "+state ||
+			items[0].ContentKind != "text" || items[0].ContentNote == "" {
 			t.Fatalf("неверная страница %s: total=%d items=%#v err=%v", state, total, items, err)
 		}
 	}
@@ -518,6 +522,54 @@ func TestClientQueuePagesAndProtectsActiveMessagesFromDeletion(t *testing.T) {
 	stats, err := queue.Stats(ctx)
 	if err != nil || stats.Pending != 1 || stats.Uploaded != 1 || stats.Acknowledged != 0 || stats.Expired != 0 {
 		t.Fatalf("очистка затронула активную очередь: %+v err=%v", stats, err)
+	}
+}
+
+// После ручной очистки повторное чтение той же граничной версии EAVC не должно
+// возвращать её в архив. Новая редакция той же исходной записи принимается.
+func TestClientQueueDoesNotRestoreClearedTerminalVersion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "expired-original", ClientID: "client", CreatedAt: now, ObservedAt: now,
+		SourceAt: now.Add(-time.Hour), ExpiresAt: now.Add(-30 * time.Minute),
+		Source:   domain.SourceRecord{UUID: "source-cleared", UpdatedAt: "2026-10-27 10:00:00"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "исходный текст", ContentDigest: "digest-original",
+	}
+	if inserted, err := queue.Enqueue(ctx, event); err != nil || !inserted {
+		t.Fatalf("поставить просроченную версию: inserted=%v err=%v", inserted, err)
+	}
+	if removed, err := queue.ClearTerminal(ctx, "expired"); err != nil || removed != 1 {
+		t.Fatalf("очистить версию: removed=%d err=%v", removed, err)
+	}
+	repeated := event
+	repeated.ID = "expired-repeat"
+	if inserted, err := queue.Enqueue(ctx, repeated); err != nil || inserted {
+		t.Fatalf("очищенная версия вернулась: inserted=%v err=%v", inserted, err)
+	}
+	stats, err := queue.Stats(ctx)
+	if err != nil || stats.Expired != 0 {
+		t.Fatalf("очищенный архив снова заполнен: %+v err=%v", stats, err)
+	}
+
+	edited := event
+	edited.ID = "expired-edited"
+	edited.Source.UpdatedAt = "2026-10-27 10:01:00"
+	edited.Content = "исправленный текст"
+	edited.ContentDigest = "digest-edited"
+	if inserted, err := queue.Enqueue(ctx, edited); err != nil || !inserted {
+		t.Fatalf("новая редакция ошибочно подавлена: inserted=%v err=%v", inserted, err)
 	}
 }
 

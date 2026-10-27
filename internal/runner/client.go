@@ -83,6 +83,9 @@ func (client *Client) ClearQueueEvents(ctx context.Context, state string) (int, 
 	if statsErr == nil {
 		client.update(func(status *ClientStatus) { status.Queue = stats })
 	}
+	if client.Logger != nil {
+		client.Logger.Info("история очереди клиента очищена", "state", state, "removed", count)
+	}
 	return count, nil
 }
 

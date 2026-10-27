@@ -116,3 +116,17 @@ UPDATE client_events SET stream_key='';
 const clientSourceStreamMigration = `
 UPDATE client_events SET stream_key='';
 `
+
+// Очищенная оператором завершённая версия не должна снова появляться при
+// повторном чтении граничной строки EAVC. Здесь хранится только техническая
+// идентичность версии, без текста перехвата и транспортных данных.
+const clientClearedEventsMigration = `
+CREATE TABLE client_cleared_events (
+	source_uuid TEXT NOT NULL,
+	source_version TEXT NOT NULL,
+	content_digest TEXT NOT NULL,
+	cleared_at TEXT NOT NULL,
+	PRIMARY KEY(source_uuid, source_version, content_digest)
+);
+CREATE INDEX client_cleared_events_time_idx ON client_cleared_events(cleared_at);
+`

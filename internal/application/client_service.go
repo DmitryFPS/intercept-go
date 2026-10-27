@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"intercept/internal/domain"
 	"intercept/internal/protocol"
@@ -137,7 +138,9 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 				"event_id", event.ID, "source_uuid", event.Source.UUID,
 				"source_id", event.Source.ID, "position", event.Position.UnitName,
 				"source_at", event.SourceAt, "expires_at", event.ExpiresAt,
-				"reason", event.FreshnessIssue,
+				"reason", event.FreshnessIssue, "content_kind", eventContentKind(event),
+				"content_chars", utf8.RuneCountInString(event.Content),
+				"content_blocks", len(event.Blocks), "source_mode", string(event.Mode),
 			)
 		}
 		queued++

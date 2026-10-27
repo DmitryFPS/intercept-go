@@ -127,7 +127,9 @@ h1 { margin: 4px 0 0; font-size: 25px; }
 .expired-list { display: grid; gap: 10px; margin-top: 16px; }
 .expired-list article { border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
 .expired-list article p { color: #5d687a; margin: 8px 0; font-size: 13px; }
+.expired-list article .content-note { margin-bottom: 6px; color: #334e7d; }
 .expired-list pre { margin: 0; padding: 12px; border-radius: 9px; background: #f5f7fb; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.45 "Segoe UI", Arial, sans-serif; }
+.expired-list .event-id { display: block; margin-top: 8px; color: var(--muted); overflow-wrap: anywhere; }
 .expired-meta span { color: var(--muted); font-size: 12px; }
 .dialog-pages { justify-content: center; flex-wrap: wrap; margin-top: 16px; }
 .empty-expired { padding: 28px; text-align: center; color: var(--muted); }

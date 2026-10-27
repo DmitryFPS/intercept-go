@@ -56,3 +56,22 @@ func TestCenterConfirmationIndicatorAcceptsTransportCheck(t *testing.T) {
 		t.Error("индикатор подтверждения центра должен загораться после успешной проверки связи")
 	}
 }
+
+func TestQueueHistoryExplainsContentAndRestoresClearButton(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(application)
+	for _, expected := range []string{
+		"item.content_kind === 'text'",
+		"Текст перехвата отсутствует",
+		"ID пакета:",
+		"button.textContent = 'Очистка…'",
+		"button.textContent = label",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Errorf("в истории очереди отсутствует защита интерфейса: %s", expected)
+		}
+	}
+}

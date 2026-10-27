@@ -37,13 +37,15 @@ type ClientStats struct {
 // QueueEvent описывает сообщение очереди для локального экрана точки.
 // Токены, ключи и транспортные идентификаторы сюда намеренно не входят.
 type QueueEvent struct {
-	EventID  string            `json:"event_id"`
-	Position string            `json:"position"`
-	SourceAt time.Time         `json:"source_at"`
-	StatusAt time.Time         `json:"status_at"`
-	Reason   string            `json:"reason"`
-	Content  string            `json:"content"`
-	Mode     domain.SourceMode `json:"mode"`
+	EventID     string            `json:"event_id"`
+	Position    string            `json:"position"`
+	SourceAt    time.Time         `json:"source_at"`
+	StatusAt    time.Time         `json:"status_at"`
+	Reason      string            `json:"reason"`
+	Content     string            `json:"content"`
+	ContentKind string            `json:"content_kind"`
+	ContentNote string            `json:"content_note"`
+	Mode        domain.SourceMode `json:"mode"`
 }
 
 // EventsPage возвращает одну страницу выбранного состояния очереди. Содержимое
@@ -90,9 +92,11 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 		if err != nil {
 			return nil, 0, fmt.Errorf("разобрать время сообщения: %w", err)
 		}
+		kind, note := clientQueueContentDescription(event.Content)
 		result = append(result, QueueEvent{
 			EventID: eventID, Position: event.Position.UnitName, SourceAt: event.SourceAt,
-			StatusAt: statusAt, Reason: reason, Content: event.Content, Mode: event.Mode,
+			StatusAt: statusAt, Reason: reason, Content: event.Content,
+			ContentKind: kind, ContentNote: note, Mode: event.Mode,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -101,19 +105,40 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 	return result, total, nil
 }
 
+func clientQueueContentDescription(content string) (string, string) {
+	if strings.TrimSpace(content) == "" {
+		return "empty_text", "EAVC передал запись без текста. Вложения по текущему контракту EAVC → Клиент не передаются, поэтому определить их тип невозможно."
+	}
+	return "text", "Текст перехвата, прочитанный Клиентом из EAVC."
+}
+
 // ClearTerminal удаляет подтверждённые либо просроченные сообщения по явной
 // команде оператора. Активные состояния этим методом удалить невозможно.
 func (queue *ClientQueue) ClearTerminal(ctx context.Context, state string) (int, error) {
 	if state != "acknowledged" && state != "expired" {
 		return 0, errors.New("активную очередь очищать запрещено")
 	}
-	result, err := queue.db.ExecContext(ctx, "DELETE FROM client_events WHERE state=?", state)
+	tx, err := queue.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("начать очистку завершённых сообщений: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO client_cleared_events(source_uuid, source_version, content_digest, cleared_at)
+		SELECT source_uuid, source_version, content_digest, ? FROM client_events WHERE state=?`,
+		time.Now().UTC().Format(time.RFC3339Nano), state); err != nil {
+		return 0, fmt.Errorf("запомнить очищенные сообщения: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM client_events WHERE state=?", state)
 	if err != nil {
 		return 0, fmt.Errorf("очистить завершённые сообщения: %w", err)
 	}
 	count, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("определить число очищенных сообщений: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("завершить очистку сообщений: %w", err)
 	}
 	return int(count), nil
 }
@@ -126,17 +151,39 @@ func (queue *ClientQueue) PurgeTerminal(ctx context.Context, before time.Time) (
 		return 0, fmt.Errorf("начать очистку клиента: %w", err)
 	}
 	defer tx.Rollback()
+	cutoff := before.UTC().Format(time.RFC3339Nano)
+	clearedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO client_cleared_events(source_uuid, source_version, content_digest, cleared_at)
+		SELECT source_uuid, source_version, content_digest, ? FROM client_events
+		WHERE (state='acknowledged' AND acknowledged_at IS NOT NULL AND acknowledged_at < ?)
+		   OR (state='expired' AND expired_at IS NOT NULL AND expired_at < ?)`,
+		clearedAt, cutoff, cutoff); err != nil {
+		return 0, fmt.Errorf("запомнить автоматически очищенные события клиента: %w", err)
+	}
 	result, err := tx.ExecContext(ctx, `
 		DELETE FROM client_events
 		WHERE (state='acknowledged' AND acknowledged_at IS NOT NULL AND acknowledged_at < ?)
 		   OR (state='expired' AND expired_at IS NOT NULL AND expired_at < ?)`,
-		before.UTC().Format(time.RFC3339Nano), before.UTC().Format(time.RFC3339Nano))
+		cutoff, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("очистить завершённые события клиента: %w", err)
 	}
 	count, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("определить число очищенных событий клиента: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO client_cleared_events(source_uuid, source_version, content_digest, cleared_at)
+		SELECT source_uuid, source_version, content_digest, ? FROM client_events
+		WHERE state IN ('acknowledged','expired')
+		  AND event_id NOT IN (
+			SELECT event_id FROM client_events
+			WHERE state IN ('acknowledged','expired')
+			ORDER BY COALESCE(acknowledged_at, expired_at, created_at) DESC, event_id DESC
+			LIMIT ?
+		  )`, clearedAt, clientTerminalRecordLimit); err != nil {
+		return 0, fmt.Errorf("запомнить ограниченные события клиента: %w", err)
 	}
 	overflow, err := tx.ExecContext(ctx, `
 		DELETE FROM client_events
@@ -208,13 +255,18 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) (bool
 		INSERT INTO client_events(
 			event_id, source_uuid, source_version, stream_key, content_digest, payload_json, state,
 			next_attempt_at, expires_at, created_at, expired_at, last_error
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM client_cleared_events
+			WHERE source_uuid=? AND source_version=? AND content_digest=?
+		)
 		ON CONFLICT(source_uuid, source_version, content_digest) DO NOTHING`,
 		event.ID, sourceKey, sourceVersion, clientStreamKey(event), event.ContentDigest, payload, state,
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
 		expiresAt.Format(time.RFC3339Nano),
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
-		expiredAt, lastError,
+		expiredAt, lastError, sourceKey, sourceVersion, event.ContentDigest,
 	)
 	if err != nil {
 		return false, fmt.Errorf("поставить событие в очередь: %w", err)

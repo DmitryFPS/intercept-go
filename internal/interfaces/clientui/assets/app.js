@@ -184,7 +184,10 @@ async function loadQueuePage(offset = 0) {
   } else {
     list.innerHTML = data.items.map(item => `<article>
       <div class="expired-meta"><strong>${escapeHTML(item.position || 'Позиция не указана')}</strong><span>${escapeHTML(formatTime(item.source_at || item.status_at))}</span></div>
-      <p>${escapeHTML(item.reason)}</p><pre>${escapeHTML(item.content || 'Текст отсутствует')}</pre>
+      <p>${escapeHTML(item.reason)}</p>
+      <p class="content-note">${escapeHTML(item.content_note || (item.content ? 'Текст перехвата, прочитанный Клиентом из EAVC.' : 'EAVC передал запись без текста.'))}</p>
+      <pre>${escapeHTML(item.content_kind === 'text' ? item.content : 'Текст перехвата отсутствует')}</pre>
+      <small class="event-id">ID пакета: ${escapeHTML(item.event_id)}</small>
     </article>`).join('');
   }
   const current = data.total ? Math.floor(data.offset / data.limit) + 1 : 1;
@@ -212,6 +215,10 @@ element('queuePrev').addEventListener('click', () => loadQueuePage(queueOffset -
 element('queueNext').addEventListener('click', () => loadQueuePage(queueOffset + queuePageSize));
 element('clearQueue').addEventListener('click', async () => {
   if (!confirm('Очистить этот завершённый список? Ожидающие доставки сообщения затронуты не будут.')) return;
+  const button = element('clearQueue');
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Очистка…';
   try {
     const result = await requestJSON(`/api/queue/${queueState}`, {method: 'DELETE'});
     showMessage(`Удалено записей: ${result.removed}.`, 'success');
@@ -219,6 +226,9 @@ element('clearQueue').addEventListener('click', async () => {
     await refresh();
   } catch (error) {
     showMessage(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
   }
 });
 
