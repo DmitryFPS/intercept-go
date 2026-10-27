@@ -131,6 +131,96 @@ func TestClientQueueSeparatesBlocksButPreservesRecordOrder(t *testing.T) {
 	}
 }
 
+func TestClientQueueSeedsBlockBaselinesFromLegacyRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := domain.Event{
+		ID: "legacy", ClientID: "textile", CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source:   domain.SourceRecord{ID: 386, UUID: "source-386", UpdatedAt: "2026-10-27 15:59:29"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "15.57\n-Первый\n15.59\n-Второй", ContentDigest: "legacy-digest",
+	}
+	if inserted, err := queue.Enqueue(ctx, legacy); err != nil || !inserted {
+		t.Fatalf("legacy enqueue: inserted=%v err=%v", inserted, err)
+	}
+	makeBlock := func(id, uuid, version string) domain.Event {
+		text := version + "\n-Блок"
+		return domain.Event{
+			ID: id, ClientID: "textile", CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+			Source: legacy.Source, Position: legacy.Position, Mode: legacy.Mode,
+			Content: text, ContentDigest: "digest-" + uuid, SourceBlockUUID: uuid,
+			Blocks: []domain.ContentBlock{{UUID: uuid, Text: text, UpdatedAt: version}},
+		}
+	}
+	blocks := []domain.Event{
+		makeBlock("block-event-a", "block-a", "2026-10-27 15:57:00"),
+		makeBlock("block-event-b", "block-b", "2026-10-27 15:59:29"),
+	}
+	migrated, err := queue.SeedBlockBaselinesFromLegacy(ctx, "source-386", legacy.Source.UpdatedAt, blocks)
+	if err != nil || !migrated {
+		t.Fatalf("поблочная база не создана: migrated=%v err=%v", migrated, err)
+	}
+	for _, event := range blocks {
+		if inserted, err := queue.Enqueue(ctx, event); err != nil || inserted {
+			t.Fatalf("старый блок переиздан: %s inserted=%v err=%v", event.SourceBlockUUID, inserted, err)
+		}
+	}
+}
+
+func TestClientQueueCleansRC88ExpiredMigrationArtifact(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := domain.Event{
+		ID: "legacy", ClientID: "textile", CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source:   domain.SourceRecord{ID: 386, UUID: "source-386", UpdatedAt: "2026-10-27 15:59:29"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "15.59\n-Старый перехват", ContentDigest: "legacy-digest",
+	}
+	if inserted, err := queue.Enqueue(ctx, legacy); err != nil || !inserted {
+		t.Fatal(err)
+	}
+	artifact := domain.Event{
+		ID: "rc88-artifact", ClientID: "textile", CreatedAt: now, ObservedAt: now,
+		SourceAt: now.Add(-time.Hour), ExpiresAt: now.Add(-30 * time.Minute), FreshnessIssue: domain.FreshnessExpired,
+		Source: legacy.Source, Position: legacy.Position, Mode: legacy.Mode,
+		Content: "15.59\n-Старый перехват", ContentDigest: "block-digest", SourceBlockUUID: "block-a",
+		Blocks: []domain.ContentBlock{{UUID: "block-a", Text: "15.59\n-Старый перехват", UpdatedAt: "2026-10-27 15:59:29"}},
+	}
+	if inserted, err := queue.Enqueue(ctx, artifact); err != nil || !inserted {
+		t.Fatalf("не создан тестовый остаток rc88: inserted=%v err=%v", inserted, err)
+	}
+	if _, err := NewClientQueue(ctx, db); err != nil {
+		t.Fatalf("повторное открытие очереди: %v", err)
+	}
+	var expired, baseline int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_events WHERE event_id=?", artifact.ID).Scan(&expired); err != nil || expired != 0 {
+		t.Fatalf("ложный остаток не очищен: count=%d err=%v", expired, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM client_cleared_events WHERE source_uuid=?`, artifact.SourceLineageKey()).Scan(&baseline); err != nil || baseline != 1 {
+		t.Fatalf("идентичность очищенного блока потеряна: count=%d err=%v", baseline, err)
+	}
+}
+
 // Пока ранняя версия записи ждёт повтора, более поздняя версия той же записи
 // не должна её обогнать, в том числе после исправления названия подразделения.
 func TestClientQueueDoesNotLetLaterEventOvertakeRetry(t *testing.T) {

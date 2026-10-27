@@ -336,6 +336,59 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) (bool
 	return inserted > 0, nil
 }
 
+// SeedBlockBaselinesFromLegacy запоминает поблочные отпечатки только если
+// цельная версия той же записи уже присутствует в очереди прежней версии или
+// в журнале очищенных идентичностей. Проверка и запись выполняются одной
+// транзакцией, поэтому параллельный цикл сбора не создаст миграционный дубль.
+func (queue *ClientQueue) SeedBlockBaselinesFromLegacy(
+	ctx context.Context, sourceUUID, sourceVersion string, events []domain.Event,
+) (bool, error) {
+	sourceUUID = strings.TrimSpace(sourceUUID)
+	sourceVersion = strings.TrimSpace(sourceVersion)
+	if sourceUUID == "" || sourceVersion == "" || len(events) == 0 {
+		return false, nil
+	}
+	tx, err := queue.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("начать миграцию поблочных идентичностей: %w", err)
+	}
+	defer tx.Rollback()
+	var known int
+	err = tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM client_events WHERE source_uuid=? AND source_version=?
+			UNION ALL
+			SELECT 1 FROM client_cleared_events WHERE source_uuid=? AND source_version=?
+		)`, sourceUUID, sourceVersion, sourceUUID, sourceVersion).Scan(&known)
+	if err != nil {
+		return false, fmt.Errorf("проверить цельную версию прежнего клиента: %w", err)
+	}
+	if known == 0 {
+		return false, nil
+	}
+	clearedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, event := range events {
+		if strings.TrimSpace(event.SourceBlockUUID) == "" {
+			continue
+		}
+		if err := event.Validate(); err != nil {
+			return false, fmt.Errorf("проверить поблочную миграцию: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO client_cleared_events(
+				source_uuid, source_version, content_digest, cleared_at
+			) VALUES(?, ?, ?, ?)`,
+			event.SourceLineageKey(), event.SourceVersion(), event.ContentDigest, clearedAt,
+		); err != nil {
+			return false, fmt.Errorf("сохранить поблочную идентичность прежней версии: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("завершить миграцию поблочных идентичностей: %w", err)
+	}
+	return true, nil
+}
+
 // Pending выбирает только головы независимых очередей подразделений.
 func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time) ([]application.QueuedEvent, error) {
 	if limit <= 0 || limit > 1000 {

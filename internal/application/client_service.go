@@ -138,6 +138,24 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 			}
 			continue
 		}
+		if len(item.Blocks) > 0 || len(item.DeletedBlocks) > 0 {
+			legacySourceUUID := strings.TrimSpace(item.Record.UUID)
+			if legacySourceUUID == "" {
+				legacySourceUUID = fmt.Sprintf("id:%d", item.Record.ID)
+			}
+			migrated, migrateErr := service.Queue.SeedBlockBaselinesFromLegacy(
+				ctx, legacySourceUUID, strings.TrimSpace(item.Record.UpdatedAt), events,
+			)
+			if migrateErr != nil {
+				return queued, migrateErr
+			}
+			if migrated {
+				// Эта точная версия уже была принята старым Клиентом единым
+				// событием. Поблочные отпечатки сохранены без повторной отправки;
+				// следующая настоящая редакция затронет только изменённый блок.
+				continue
+			}
+		}
 		for _, event := range events {
 			inserted, err := service.Queue.Enqueue(ctx, event)
 			if err != nil {

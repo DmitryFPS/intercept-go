@@ -44,6 +44,10 @@ type ClientQueue interface {
 	// сохранена. Повторное чтение одной и той же версии из EAVC не считается
 	// новой постановкой в очередь.
 	Enqueue(ctx context.Context, event domain.Event) (bool, error)
+	// SeedBlockBaselinesFromLegacy атомарно переносит уже обработанную цельную
+	// версию записи прежнего Клиента в поблочные идентичности. Это не создаёт
+	// сообщений и не позволяет обновлению повторно выдать старые блоки.
+	SeedBlockBaselinesFromLegacy(ctx context.Context, sourceUUID, sourceVersion string, events []domain.Event) (bool, error)
 	Pending(ctx context.Context, limit int, now time.Time) ([]QueuedEvent, error)
 	MarkUploaded(ctx context.Context, eventID string, telegramMessageID int64) error
 	MarkAcknowledged(ctx context.Context, eventID string, at time.Time) error

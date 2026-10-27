@@ -153,6 +153,52 @@ func TestClientServiceCreatesIndependentEventForEveryTimeBlock(t *testing.T) {
 	}
 }
 
+// После обновления с цельной модели rc87 текущая версия уже была доставлена.
+// Клиент должен молча создать поблочные отпечатки, а при следующей редакции
+// поставить в очередь только действительно изменённый блок.
+func TestClientServiceMigratesLegacyRecordWithoutExpiredReplay(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 27, 19, 34, 0, 0, time.UTC)
+	item := SourceItem{
+		Record:   domain.SourceRecord{ID: 386, UUID: "record-386", UpdatedAt: "2026-10-27 15:59:29"},
+		Position: domain.Position{UnitName: "1 мб 155 омбр"}, Mode: domain.SourceModeNormal,
+		Content: "15.57\n-Первый блок\n15.59\n-Второй блок", ObservedAt: now,
+		Blocks: []domain.ContentBlock{
+			{UUID: "block-a", Key: "15.57", Text: "15.57\n-Первый блок", UpdatedAt: "2026-10-27 15:57:00"},
+			{UUID: "block-b", Key: "15.59", Sequence: 1, Text: "15.59\n-Второй блок", UpdatedAt: "2026-10-27 15:59:29"},
+		},
+	}
+	queue := newMemoryClientState()
+	service := ClientService{
+		ClientID: "textile", Source: &replaySource{item: item}, Queue: queue, State: queue,
+		Sender: &memorySender{}, KeyID: "key", Key: make([]byte, 32), BatchSize: 10,
+		CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	legacy, err := service.newEvent(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := queue.Enqueue(context.Background(), legacy); err != nil || !inserted {
+		t.Fatalf("не создана исходная запись rc87: inserted=%v err=%v", inserted, err)
+	}
+	queue.states[legacy.ID] = "acknowledged"
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 || len(queue.events) != 1 {
+		t.Fatalf("старая цельная версия переиздана блоками: queued=%d events=%d err=%v", queued, len(queue.events), err)
+	}
+
+	source := service.Source.(*replaySource)
+	source.item.Record.UpdatedAt = "2026-10-27 19:35:00"
+	source.item.Content = "15.57\n-Первый блок исправлен\n15.59\n-Второй блок"
+	source.item.Blocks[0].Text = "15.57\n-Первый блок исправлен"
+	source.item.Blocks[0].UpdatedAt = "2026-10-27 19:35:00"
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("редакция после миграции не выделила один блок: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 2 || queue.events[1].SourceBlockUUID != "block-a" {
+		t.Fatalf("после миграции отправлен неверный набор: %#v", queue.events)
+	}
+}
+
 func TestClientServiceQueuesOnlyChangedBlockAndDeletionTombstone(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 27, 19, 0, 0, 0, time.UTC)
@@ -404,19 +450,43 @@ func (sender *memorySender) Acknowledgements(_ context.Context, offset int64) ([
 }
 
 type memoryClientState struct {
-	events  []domain.Event
-	states  map[string]string
-	cursors map[string]Cursor
-	values  map[string]string
+	events    []domain.Event
+	states    map[string]string
+	cursors   map[string]Cursor
+	values    map[string]string
+	baselines map[string]bool
+}
+
+func (state *memoryClientState) SeedBlockBaselinesFromLegacy(
+	_ context.Context, sourceUUID, sourceVersion string, events []domain.Event,
+) (bool, error) {
+	known := false
+	for _, existing := range state.events {
+		if existing.SourceBlockUUID == "" && existing.SourceLineageKey() == sourceUUID && existing.SourceVersion() == sourceVersion {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return false, nil
+	}
+	for _, event := range events {
+		state.baselines[sourceVersionKey(event)] = true
+	}
+	return true, nil
 }
 
 func newMemoryClientState() *memoryClientState {
 	return &memoryClientState{
 		states: make(map[string]string), cursors: make(map[string]Cursor), values: make(map[string]string),
+		baselines: make(map[string]bool),
 	}
 }
 
 func (state *memoryClientState) Enqueue(_ context.Context, event domain.Event) (bool, error) {
+	if state.baselines[sourceVersionKey(event)] {
+		return false, nil
+	}
 	for _, existing := range state.events {
 		if sourceVersionKey(existing) == sourceVersionKey(event) {
 			return false, nil
