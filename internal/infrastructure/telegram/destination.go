@@ -245,7 +245,13 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 				)
 			}
 		}
-		if exists && storedBaseHash == baseHash && telegramBlockPublicationComplete(stored, len(baseChunks)) {
+		storedExpectedMessageCount := stored.ExpectedMessageCount
+		if storedExpectedMessageCount <= 0 {
+			// Совместимость с состоянием rc97: до появления отдельного поля
+			// полностью опубликованный набор определялся по исходным частям.
+			storedExpectedMessageCount = len(baseChunks)
+		}
+		if exists && storedBaseHash == baseHash && telegramBlockPublicationComplete(stored, storedExpectedMessageCount) {
 			stored.Sequence = block.Sequence
 			stored.ThreadID = threadID
 			storeTelegramRevision(&stored, event)

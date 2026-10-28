@@ -788,6 +788,77 @@ func TestDestinationResumesMissingChunksWithoutCompletingPartialPublication(t *t
 	}
 }
 
+func TestDestinationUsesStoredEditedChunkCountAtTelegramBoundary(t *testing.T) {
+	t.Parallel()
+	editedAt := time.Date(2026, 10, 28, 15, 45, 30, 0, time.UTC)
+	event := domain.Event{
+		ID: "event-boundary", ClientID: "point-01", CreatedAt: editedAt, SourceAt: editedAt,
+		Source: domain.SourceRecord{UUID: "source-boundary"}, Position: domain.Position{UnitName: "позиция"},
+		SourceBlockUUID: "block-boundary", HasActiveBlocks: true,
+		Blocks: []domain.ContentBlock{{UUID: "block-boundary", Sequence: 0, UpdatedAt: "2026-10-28 15:45:30"}},
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	var baseChunks, editedChunks []string
+	for runes := 3000; runes <= 5000; runes++ {
+		event.Blocks[0].Text = "15.45\n-" + strings.Repeat("А", runes) + " (10001)"
+		baseChunks = formatBlockChunks(event, event.Blocks[0], delivery, "", "", "")
+		editedChunks = formatBlockChunksWithEditedAt(event, event.Blocks[0], delivery, "", "", "", editedAt)
+		if len(baseChunks) == 1 && len(editedChunks) == 2 {
+			break
+		}
+	}
+	if len(baseChunks) != 1 || len(editedChunks) != 2 {
+		t.Fatalf("не найдена контрольная граница Telegram: base=%d edited=%d", len(baseChunks), len(editedChunks))
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-boundary": {ThreadID: 42, Blocks: map[string]destinationBlock{
+			"block-boundary": {
+				Hash: hashChunks(editedChunks), SourceHash: hashChunks(baseChunks),
+				SourceVersion: event.SourceVersion(), SourceEventAt: event.CreatedAt,
+				ThreadID: 42, MessageIDs: []int64{701}, ExpectedMessageCount: 2,
+			},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var sends atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		if method == "editMessageText" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+			return
+		}
+		if method == "sendMessage" {
+			sends.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"message_id": 702},
+			})
+			return
+		}
+		http.Error(writer, "неожиданный метод", http.StatusNotFound)
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatalf("пограничный хвост не продолжен: %v", err)
+	}
+	if sends.Load() != 1 {
+		t.Fatalf("ожидалась ровно одна недостающая часть, отправлено %d", sends.Load())
+	}
+	receipt, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(receipt.Blocks) != 1 || !receipt.Blocks[0].Complete ||
+		!reflect.DeepEqual(receipt.Blocks[0].MessageIDs, []int64{701, 702}) {
+		t.Fatalf("пограничная публикация не завершена: %#v err=%v", receipt, err)
+	}
+}
+
 func TestDestinationScopedEventNeverChangesSiblingBlock(t *testing.T) {
 	t.Parallel()
 	var methods []string
