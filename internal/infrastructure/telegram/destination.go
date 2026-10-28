@@ -245,12 +245,9 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 				)
 			}
 		}
-		storedExpectedMessageCount := stored.ExpectedMessageCount
-		if storedExpectedMessageCount <= 0 {
-			// Совместимость с состоянием rc97: до появления отдельного поля
-			// полностью опубликованный набор определялся по исходным частям.
-			storedExpectedMessageCount = len(baseChunks)
-		}
+		storedExpectedMessageCount := destination.expectedMessageCountForBlock(
+			event, delivery, block, stored, baseChunks,
+		)
 		if exists && storedBaseHash == baseHash && telegramBlockPublicationComplete(stored, storedExpectedMessageCount) {
 			stored.Sequence = block.Sequence
 			stored.ThreadID = threadID
@@ -463,24 +460,43 @@ func (destination *Destination) expectedMessageCount(
 		chunks := formatBlockChunks(
 			event, block, delivery, destination.Network, destination.Protection, destination.MessageTemplate,
 		)
-		if len(chunks) == 0 {
-			return 0
-		}
-		baseHash := hashChunks(chunks)
-		if stored.SourceHash != "" && stored.SourceHash != baseHash {
-			return 0
-		}
-		if stored.ExpectedMessageCount > 0 {
-			return stored.ExpectedMessageCount
-		}
-		// В старом состоянии количество не сохранялось. Совпадение SourceHash
-		// (либо Hash у ещё более старой версии) доказывает, что это те же части.
-		if stored.SourceHash == baseHash || stored.Hash == baseHash {
-			return len(chunks)
-		}
-		return 0
+		return destination.expectedMessageCountForBlock(event, delivery, block, stored, chunks)
 	}
 	return stored.ExpectedMessageCount
+}
+
+func (destination *Destination) expectedMessageCountForBlock(
+	event domain.Event, delivery domain.PlannedDelivery, block domain.ContentBlock,
+	stored destinationBlock, baseChunks []string,
+) int {
+	if len(baseChunks) == 0 {
+		return 0
+	}
+	baseHash := hashChunks(baseChunks)
+	if stored.SourceHash != "" && stored.SourceHash != baseHash {
+		return 0
+	}
+	if stored.ExpectedMessageCount > 0 {
+		return stored.ExpectedMessageCount
+	}
+	if stored.Hash == baseHash || (stored.Hash == "" && stored.SourceHash == baseHash) {
+		return len(baseChunks)
+	}
+	// rc97 не сохранял ожидаемое количество, однако Hash уже содержал хеш
+	// варианта с отметкой редактирования. Воспроизводим его, чтобы суффикс на
+	// границе лимита Telegram не спрятал последнюю часть.
+	if stored.Hash != "" && !event.SourceAt.IsZero() {
+		editedChunks := formatBlockChunksWithEditedAt(
+			event, block, delivery, destination.Network, destination.Protection,
+			destination.MessageTemplate, event.SourceAt,
+		)
+		if stored.Hash == hashChunks(editedChunks) {
+			return len(editedChunks)
+		}
+	}
+	// Неизвестный старый Hash нельзя считать доказательством полной отправки.
+	// Повторный Deliver сверит известные ID и сохранит точное количество.
+	return 0
 }
 
 func telegramBlockPublicationComplete(block destinationBlock, expectedMessageCount int) bool {

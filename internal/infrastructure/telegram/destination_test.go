@@ -788,7 +788,7 @@ func TestDestinationResumesMissingChunksWithoutCompletingPartialPublication(t *t
 	}
 }
 
-func TestDestinationUsesStoredEditedChunkCountAtTelegramBoundary(t *testing.T) {
+func TestDestinationRecoversRC97EditedChunkCountAtTelegramBoundary(t *testing.T) {
 	t.Parallel()
 	editedAt := time.Date(2026, 10, 28, 15, 45, 30, 0, time.UTC)
 	event := domain.Event{
@@ -816,7 +816,9 @@ func TestDestinationUsesStoredEditedChunkCountAtTelegramBoundary(t *testing.T) {
 			"block-boundary": {
 				Hash: hashChunks(editedChunks), SourceHash: hashChunks(baseChunks),
 				SourceVersion: event.SourceVersion(), SourceEventAt: event.CreatedAt,
-				ThreadID: 42, MessageIDs: []int64{701}, ExpectedMessageCount: 2,
+				// rc97 сохранял хеш отредактированных частей, но ещё не имел
+				// ExpectedMessageCount. После обновления хвост обязан продолжиться.
+				ThreadID: 42, MessageIDs: []int64{701},
 			},
 		}},
 	}}); err != nil {
