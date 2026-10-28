@@ -141,6 +141,7 @@ func TestClientShiftHistoryUsesAlignedOperatorLayout(t *testing.T) {
 		`<div class="shift-history"><small>Смены</small>`,
 		`class="shift-row"`,
 		`class="shift-period"`,
+		`client.recent_shifts || shiftHistory.filter(item => item.client_id === client.client_id)`,
 		`const currentShift = clientShiftHistory.find(item => item.current) || clientShiftHistory[0];`,
 		`const recentShifts = [currentShift, previousClosedShift].filter(Boolean);`,
 		`'по н.в.'`,

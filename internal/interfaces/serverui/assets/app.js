@@ -626,7 +626,7 @@ function renderHistory() {
   healthList.classList.toggle('hidden', historyKind !== 'clients');
   healthList.innerHTML = clients.map(client => {
     const currentShifts = client.shifts || [];
-    const clientShiftHistory = shiftHistory.filter(item => item.client_id === client.client_id);
+    const clientShiftHistory = client.recent_shifts || shiftHistory.filter(item => item.client_id === client.client_id);
     const currentShift = clientShiftHistory.find(item => item.current) || clientShiftHistory[0];
     const previousClosedShift = clientShiftHistory.find(item =>
       item.closed_at && (!currentShift || item.session_uuid !== currentShift.session_uuid));

@@ -38,6 +38,7 @@ type ClientHealth struct {
 	LastShiftProbeAt   *time.Time           `json:"last_shift_probe_at,omitempty"`
 	LastShiftSuccessAt *time.Time           `json:"last_shift_success_at,omitempty"`
 	Shifts             []ClientShiftSession `json:"shifts,omitempty"`
+	RecentShifts       []ClientShiftSession `json:"recent_shifts,omitempty"`
 }
 
 // ClientShiftSession is one deduplicated EAVC shift lifecycle. Repeated
@@ -314,6 +315,18 @@ func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, o
 		if err != nil {
 			warnings = append(warnings, fmt.Errorf("прочитать историю смен: %w", err))
 			shiftHistory = nil
+		}
+		recentShifts, err := store.recentClientShifts(ctx)
+		if err != nil {
+			warnings = append(warnings, fmt.Errorf("прочитать последние смены точек: %w", err))
+		} else {
+			byClient := make(map[string][]ClientShiftSession, len(clients))
+			for _, shift := range recentShifts {
+				byClient[shift.ClientID] = append(byClient[shift.ClientID], shift)
+			}
+			for index := range clients {
+				clients[index].RecentShifts = byClient[clients[index].ClientID]
+			}
 		}
 		page.Clients, page.Incidents, page.ShiftHistory, page.Total = clients, incidents, shiftHistory, total
 		if len(warnings) > 0 {

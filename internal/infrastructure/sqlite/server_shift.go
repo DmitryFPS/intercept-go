@@ -187,6 +187,37 @@ func (store *ServerStore) currentClientShifts(ctx context.Context, clientID stri
 	return scanShiftSessions(rows)
 }
 
+// recentClientShifts selects the current open shift and the latest closed
+// shift for every client independently. A global LIMIT would let a busy client
+// hide another client's still-open shift in the dashboard.
+func (store *ServerStore) recentClientShifts(ctx context.Context) ([]ClientShiftSession, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		WITH ranked AS (
+			SELECT s.client_id,c.name AS client_name,s.position_name,s.session_uuid,
+				s.source_session_id,s.opened_at,s.closed_at,s.first_seen_at,
+				s.last_seen_at,s.is_current,
+				ROW_NUMBER() OVER (
+					PARTITION BY s.client_id
+					ORDER BY CASE
+						WHEN s.is_current=1 AND s.closed_at IS NULL THEN 0
+						WHEN s.closed_at IS NOT NULL THEN 1
+						ELSE 2 END,
+						s.opened_at DESC,s.session_uuid
+				) AS row_number
+			FROM client_shift_sessions s
+			JOIN server_clients c ON c.client_id=s.client_id
+		)
+		SELECT client_id,client_name,position_name,session_uuid,source_session_id,
+			opened_at,closed_at,first_seen_at,last_seen_at,is_current
+		FROM ranked WHERE row_number<=2
+		ORDER BY client_id,row_number`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanShiftSessions(rows)
+}
+
 func (store *ServerStore) shiftHistory(ctx context.Context, filter HistoryFilter, limit int) ([]ClientShiftSession, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100

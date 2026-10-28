@@ -81,6 +81,69 @@ func TestShiftSnapshotsAreDeduplicatedAndOrderedAcrossRestartSafeStorage(t *test
 	}
 }
 
+func TestRecentShiftsAreSelectedPerClientBeyondGlobalHistoryLimit(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	other := application.RegisteredClient{
+		ID: "selidovo", Number: "02", Name: "Селидово",
+		SenderBotID: 13, SenderBotUsername: "selidovo_bot",
+		ChatID: -1001, ThreadID: 11, KeyID: "key-2", Key: make([]byte, 32), Active: true,
+	}
+	if err := store.SaveClient(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 10, 28, 6, 0, 0, 0, time.UTC)
+	closedAt := base.Add(-time.Minute)
+	_, err := store.RecordClientShiftSnapshot(ctx, "selidovo", base.Add(time.Minute), application.ShiftSnapshot{
+		ReadState: application.ShiftReadOK,
+		Active: []application.ShiftSession{{
+			SessionID: 2, SessionUUID: "selidovo-open", PositionName: "Позиция",
+			OpenedAt: base,
+		}},
+		LastClosed: []application.ShiftSession{{
+			SessionID: 1, SessionUUID: "selidovo-closed", PositionName: "Позиция",
+			OpenedAt: base.Add(-time.Hour), ClosedAt: &closedAt,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 101; index++ {
+		openedAt := base.Add(time.Duration(index+1) * time.Minute)
+		if _, err := store.db.ExecContext(ctx, `
+			INSERT INTO client_shift_sessions(
+				client_id,position_name,session_uuid,source_session_id,
+				opened_at,closed_at,first_seen_at,last_seen_at,last_probe_at,is_current
+			) VALUES(?,?,?,?,?,?,?,?,?,0)`,
+			"textile", "Позиция", "textile-"+openedAt.Format(time.RFC3339), index+1,
+			stamp(openedAt), stamp(openedAt.Add(time.Minute)), stamp(openedAt),
+			stamp(openedAt), stamp(openedAt)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := store.HistoryPage(ctx, "clients", 30, 0, base.Add(3*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, shift := range page.ShiftHistory {
+		if shift.ClientID == "selidovo" {
+			t.Fatal("тест не воспроизвёл вытеснение старой смены из глобальной истории")
+		}
+	}
+	for _, client := range page.Clients {
+		if client.ClientID != "selidovo" {
+			continue
+		}
+		if len(client.RecentShifts) != 2 ||
+			client.RecentShifts[0].SessionUUID != "selidovo-open" ||
+			client.RecentShifts[1].SessionUUID != "selidovo-closed" {
+			t.Fatalf("смены второй точки скрыты историей первой: %+v", client.RecentShifts)
+		}
+		return
+	}
+	t.Fatal("вторая рабочая точка не найдена")
+}
+
 func TestClosedShiftCannotBeReopenedByNewerConflictingSnapshot(t *testing.T) {
 	t.Parallel()
 	store, ctx := openObservabilityStore(t)
