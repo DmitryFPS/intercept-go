@@ -124,15 +124,13 @@
   font-size: 12px;
 }
 .shift-history small { color: #7b889d; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.shift-history b { color: #25344d; }
 .shift-row {
   display: grid;
-  grid-template-columns: minmax(130px, .65fr) minmax(310px, 1.35fr) auto;
+  grid-template-columns: minmax(310px, 1fr) auto;
   gap: 8px 14px;
   align-items: center;
   min-height: 24px;
 }
-.shift-position { min-width: 0; overflow-wrap: anywhere; }
 .shift-period {
   display: grid;
   grid-template-columns: max-content 14px max-content;
@@ -285,7 +283,6 @@
   .history-columns { display: none; }
   .health-card dl { grid-template-columns: 1fr 1fr; }
   .shift-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .shift-period { grid-column: 1 / -1; grid-row: 2; }
   .history-item-meta { grid-template-columns: 1fr; }
   .history-footer { align-items: stretch; flex-direction: column; }
   .history-pagination { justify-content: space-between; }

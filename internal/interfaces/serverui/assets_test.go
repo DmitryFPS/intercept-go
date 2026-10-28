@@ -141,8 +141,11 @@ func TestClientShiftHistoryUsesAlignedOperatorLayout(t *testing.T) {
 		`<div class="shift-history"><small>Смены</small>`,
 		`class="shift-row"`,
 		`class="shift-period"`,
+		`const currentShift = clientShiftHistory.find(item => item.current) || clientShiftHistory[0];`,
+		`const recentShifts = [currentShift, previousClosedShift].filter(Boolean);`,
 		`'по н.в.'`,
 		`${closed ? 'закрыта' : 'открыта'}`,
+		`<dt>Статус связи</dt>`,
 		`client.shift_read_state === 'error'`,
 		`data.shift_warning`,
 	} {
@@ -152,6 +155,9 @@ func TestClientShiftHistoryUsesAlignedOperatorLayout(t *testing.T) {
 	}
 	if strings.Contains(javascript, "Последние смены без повторов") {
 		t.Error("в интерфейсе осталось прежнее техническое название истории смен")
+	}
+	if strings.Contains(javascript, `class="shift-position"`) || strings.Contains(javascript, ".slice(0, 4)") {
+		t.Error("карточка смены всё ещё дублирует название точки или показывает больше двух записей")
 	}
 	for _, expected := range []string{".shift-row {", ".shift-period {", ".shift-status.open", ".shift-status.closed"} {
 		if !strings.Contains(css, expected) {

@@ -626,7 +626,11 @@ function renderHistory() {
   healthList.classList.toggle('hidden', historyKind !== 'clients');
   healthList.innerHTML = clients.map(client => {
     const currentShifts = client.shifts || [];
-    const recentShifts = shiftHistory.filter(item => item.client_id === client.client_id).slice(0, 4);
+    const clientShiftHistory = shiftHistory.filter(item => item.client_id === client.client_id);
+    const currentShift = clientShiftHistory.find(item => item.current) || clientShiftHistory[0];
+    const previousClosedShift = clientShiftHistory.find(item =>
+      item.closed_at && (!currentShift || item.session_uuid !== currentShift.session_uuid));
+    const recentShifts = [currentShift, previousClosedShift].filter(Boolean);
     const shiftState = client.shift_read_state === 'error'
       ? (client.shift_status_reason || 'Состояние смен временно недоступно; обработка перехватов продолжается')
       : (client.shift_read_state === 'unavailable'
@@ -643,10 +647,8 @@ function renderHistory() {
       ? `<span class="shift-warning">${escapeHTML(data.shift_warning)}</span>`
       : recentShifts.length
       ? recentShifts.map(item => {
-        const position = item.position_name || 'Позиция без названия';
         const closed = Boolean(item.closed_at);
         return `<div class="shift-row">
-          <b class="shift-position">${escapeHTML(position)}:</b>
           <span class="shift-period"><time>${formatDate(item.opened_at)}</time><span aria-hidden="true">—</span><time>${closed ? formatDate(item.closed_at) : 'по н.в.'}</time></span>
           <span class="shift-status ${closed ? 'closed' : 'open'}">${closed ? 'закрыта' : 'открыта'}</span>
         </div>`;
@@ -662,7 +664,7 @@ function renderHistory() {
         <dt>Последние данные</dt><dd>${formatDate(client.last_event_at)}</dd>
         <dt>Смена EAVC</dt><dd>${escapeHTML(shiftState)}</dd>
         <dt>Состояние смены получено</dt><dd>${formatDate(client.last_shift_success_at)}</dd>
-        <dt>Причина</dt><dd>${escapeHTML(client.current_reason || 'Ошибок связи нет')}</dd>
+        <dt>Статус связи</dt><dd>${escapeHTML(client.current_reason || 'Ошибок связи нет')}</dd>
       </dl>
       <div class="shift-history"><small>Смены</small>${recent}</div>
     </article>`;
