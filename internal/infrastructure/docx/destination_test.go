@@ -130,6 +130,27 @@ func TestValidateTemplateRejectsMacroAndEmbeddedParts(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateRejectsActiveWordFields(t *testing.T) {
+	for name, fragment := range map[string]string{
+		"simple":    `<w:p><w:fldSimple w:instr="INCLUDEPICTURE http://example.invalid/x"/></w:p>`,
+		"complex":   `<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>INCLUDETEXT x</w:instrText></w:r></w:p>`,
+		"alternate": `<w:altChunk r:id="rId9"/>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "field.docx")
+			original := documentXML(t, filepath.Join("..", "..", "..", "assets", "word_template.docx"))
+			modified := strings.Replace(original, "</w:body>", fragment+"</w:body>", 1)
+			if modified == original {
+				t.Fatal("не найдена граница тела шаблона")
+			}
+			createModifiedTemplate(t, path, map[string][]byte{"word/document.xml": []byte(modified)})
+			if err := ValidateTemplate(path); err == nil || !strings.Contains(err.Error(), "активное поле") {
+				t.Fatalf("активное поле должно быть отклонено: %v", err)
+			}
+		})
+	}
+}
+
 // Описание карточки EAVC сохраняется, а её внутренний номер не должен
 // попадать в итоговый документ.
 func TestBuildUsesLocalCallsignNumberAndEAVCDescription(t *testing.T) {

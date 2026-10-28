@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +37,12 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	}
 	packet := IncomingPacket{
 		SenderBotID: 11, SenderBotUsername: "textile_bot", ChatID: -1001, ThreadID: 42, Payload: payload,
+	}
+	if err := service.AuthenticatePacket(context.Background(), packet); err != nil {
+		t.Fatalf("подлинный пакет не прошёл раннюю проверку: %v", err)
+	}
+	if store.accepted != 0 {
+		t.Fatal("ранняя проверка не должна сохранять пакет как перехват")
 	}
 	result, err := service.Receive(context.Background(), packet)
 	if err != nil || !result.Accepted || store.accepted != 1 {
@@ -71,6 +79,9 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	ciphertext[len(ciphertext)-1] ^= 0xff
 	changed.Ciphertext = base64.RawStdEncoding.EncodeToString(ciphertext)
 	packet.Payload, _ = json.Marshal(changed)
+	if err := service.AuthenticatePacket(context.Background(), packet); !IsPermanentPacketError(err) {
+		t.Fatalf("повреждённый шифротекст должен быть окончательно отвергнут до записи: %v", err)
+	}
 	if _, err := service.Receive(context.Background(), packet); err == nil {
 		t.Fatal("повреждённый шифротекст должен быть отклонён")
 	}
@@ -388,6 +399,29 @@ func TestDeliveryServicePersistsExternalReceipt(t *testing.T) {
 	}
 }
 
+func TestDeliveryServiceRetriesWhenPublishedReceiptIsTemporarilyUnavailable(t *testing.T) {
+	t.Parallel()
+	event := serverServiceEvent()
+	delivery := domain.PlannedDelivery{Destination: domain.Destination{ID: "telegram", Kind: domain.DestinationTelegram}}
+	queue := &memoryDeliveryQueue{jobs: []DeliveryJob{{Event: event, Delivery: delivery}}}
+	gateway := &flakyReceiptGateway{}
+	service := DeliveryService{
+		Queue: queue, Gateways: map[string]DeliveryGateway{"telegram": gateway}, Now: time.Now,
+	}
+	delivered, err := service.RunOnce(context.Background(), 10)
+	if err != nil || delivered != 0 || len(queue.retried) != 1 ||
+		len(queue.delivered) != 0 || len(queue.receipts) != 0 {
+		t.Fatalf("задание завершено без внешнего ID: delivered=%d retried=%v receipts=%#v err=%v",
+			delivered, queue.retried, queue.receipts, err)
+	}
+	delivered, err = service.RunOnce(context.Background(), 10)
+	if err != nil || delivered != 1 || len(queue.delivered) != 1 || len(queue.receipts) != 1 ||
+		!reflect.DeepEqual(queue.receipts[0].MessageIDs, []int64{701}) {
+		t.Fatalf("повтор не восстановил квитанцию: delivered=%d receipts=%#v err=%v",
+			delivered, queue.receipts, err)
+	}
+}
+
 // Неисправимое редактирование завершается один раз и не превращается в
 // бесконечный повтор, удерживающий следующие сообщения очереди.
 func TestDeliveryServiceFinalizesPermanentFailure(t *testing.T) {
@@ -505,6 +539,19 @@ func (receiptGateway) Deliver(_ context.Context, _ domain.Event, _ domain.Planne
 }
 
 func (receiptGateway) DeliveryReceipt(_ domain.Event, _ domain.PlannedDelivery) (DeliveryReceipt, error) {
+	return DeliveryReceipt{Kind: "telegram", ChatID: -1001, ThreadID: 17, MessageIDs: []int64{701}}, nil
+}
+
+type flakyReceiptGateway struct{ reads atomic.Int32 }
+
+func (*flakyReceiptGateway) Deliver(_ context.Context, _ domain.Event, _ domain.PlannedDelivery) error {
+	return nil
+}
+
+func (gateway *flakyReceiptGateway) DeliveryReceipt(_ domain.Event, _ domain.PlannedDelivery) (DeliveryReceipt, error) {
+	if gateway.reads.Add(1) == 1 {
+		return DeliveryReceipt{}, errors.New("временная ошибка чтения состояния")
+	}
 	return DeliveryReceipt{Kind: "telegram", ChatID: -1001, ThreadID: 17, MessageIDs: []int64{701}}, nil
 }
 

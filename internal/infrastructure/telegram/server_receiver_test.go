@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -217,6 +218,93 @@ func TestServerReceiverRecognizesTransportProbe(t *testing.T) {
 	}
 	if len(packets) != 1 || packets[0].ProbeID != probeID || packets[0].ReceivedAt.IsZero() || !VerifyProbe(packets[0], key) {
 		t.Fatalf("проверка не распознана: %#v", packets)
+	}
+}
+
+// Недействительная подпись файла не должна занимать локальную входную очередь
+// и мешать приёму следующего исправного пакета.
+func TestServerReceiverRejectsUnauthenticatedPacketBeforeInbox(t *testing.T) {
+	t.Parallel()
+	var discarded atomic.Int64
+	var observations []application.TransportObservation
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": []any{
+				transportDocumentUpdate(31, 41, "invalid"),
+				transportDocumentUpdate(32, 42, "valid"),
+			}})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			var input struct {
+				FileID string `json:"file_id"`
+			}
+			_ = json.NewDecoder(request.Body).Decode(&input)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"file_path": input.FileID + ".icevent"},
+			})
+		case strings.Contains(request.URL.Path, "/file/bot"):
+			if strings.HasSuffix(request.URL.Path, "invalid.icevent") {
+				_, _ = writer.Write([]byte("invalid"))
+			} else {
+				_, _ = writer.Write([]byte("valid"))
+			}
+		default:
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := ServerReceiver{
+		API: client, ChatID: -1001, MaxBytes: 1024,
+		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+		Authenticate: func(_ context.Context, packet application.IncomingPacket) error {
+			if string(packet.Payload) == "invalid" {
+				return &application.PermanentPacketError{Err: errors.New("bad MAC")}
+			}
+			return nil
+		},
+		Discard: func(_ context.Context, messageID int64) { discarded.Store(messageID) },
+		Observe: func(item application.TransportObservation) { observations = append(observations, item) },
+	}
+	packets, next, err := receiver.Packets(context.Background(), 0)
+	if err != nil || next != 33 || len(packets) != 1 || packets[0].MessageID != 42 || discarded.Load() != 41 {
+		t.Fatalf("неверная ранняя проверка: packets=%#v next=%d discarded=%d err=%v", packets, next, discarded.Load(), err)
+	}
+	if len(observations) != 2 || observations[0].Outcome != "rejected_authentication" || observations[1].Outcome != "awaiting_processing" {
+		t.Fatalf("неверный аудит ранней проверки: %#v", observations)
+	}
+}
+
+func TestServerReceiverRetriesTransientAuthenticationErrorWithoutAdvancingOffset(t *testing.T) {
+	t.Parallel()
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": []any{transportDocumentUpdate(31, 41, "valid")}})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": map[string]any{"file_path": "valid.icevent"}})
+		case strings.Contains(request.URL.Path, "/file/bot"):
+			_, _ = writer.Write([]byte("valid"))
+		default:
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := ServerReceiver{
+		API: client, ChatID: -1001, MaxBytes: 1024,
+		Authorize:    func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+		Authenticate: func(context.Context, application.IncomingPacket) error { return errors.New("database busy") },
+	}
+	packets, next, err := receiver.Packets(context.Background(), 20)
+	if err == nil || next != 20 || len(packets) != 0 {
+		t.Fatalf("временная ошибка должна оставить offset прежним: packets=%#v next=%d err=%v", packets, next, err)
 	}
 }
 

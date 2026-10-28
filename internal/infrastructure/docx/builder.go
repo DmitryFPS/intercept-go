@@ -198,12 +198,41 @@ func validateSafeTemplateParts(parts map[string][]byte) error {
 			(strings.Contains(lowerPayload, "attachedtemplate") || strings.Contains(lowerPayload, "oleobject") || strings.Contains(lowerPayload, "activex")) {
 			return fmt.Errorf("шаблон Word содержит активное содержимое: %s", name)
 		}
+		if strings.HasPrefix(strings.ToLower(name), "word/") && strings.HasSuffix(strings.ToLower(name), ".xml") {
+			if err := validateNoActiveWordFields(payload, name); err != nil {
+				return err
+			}
+		}
 		if name == "[Content_Types].xml" &&
 			(strings.Contains(lowerPayload, "macroenabled") || strings.Contains(lowerPayload, "vbaproject") || strings.Contains(lowerPayload, "activex") || strings.Contains(lowerPayload, "oleobject")) {
 			return errors.New("шаблон Word содержит макросы или активные объекты")
 		}
 	}
 	return nil
+}
+
+// Поля Word могут обращаться к внешним ресурсам или запускать действия при
+// открытии документа. Обычный текст с похожими словами не считается полем.
+func validateNoActiveWordFields(payload []byte, part string) error {
+	const wordNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+	decoder := xml.NewDecoder(bytes.NewReader(payload))
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("прочитать XML шаблона Word %s: %w", part, err)
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Space != wordNamespace {
+			continue
+		}
+		switch start.Name.Local {
+		case "fldSimple", "fldChar", "instrText", "delInstrText", "altChunk":
+			return fmt.Errorf("шаблон Word содержит активное поле %s в %s", start.Name.Local, part)
+		}
+	}
 }
 
 func allowedDOCXPart(name string) bool {

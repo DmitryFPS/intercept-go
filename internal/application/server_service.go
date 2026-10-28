@@ -106,45 +106,9 @@ type ServerService struct {
 // Receive проверяет происхождение и содержимое пакета, после чего надёжно
 // сохраняет событие вместе с рассчитанными маршрутами.
 func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket) (PacketResult, error) {
-	if len(packet.Payload) == 0 || len(packet.Payload) > 4*1024*1024 {
-		return PacketResult{}, permanentPacketError("недопустимый размер транспортного пакета")
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(packet.Payload)))
-	decoder.DisallowUnknownFields()
-	var envelope protocol.Envelope
-	if err := decoder.Decode(&envelope); err != nil {
-		return PacketResult{}, permanentPacketError("транспортный пакет повреждён")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return PacketResult{}, permanentPacketError("после транспортного пакета найдены лишние данные")
-	}
-	client, err := service.Clients.Client(ctx, envelope.ClientID)
+	event, client, err := service.openAuthenticatedPacket(ctx, packet)
 	if err != nil {
-		if errors.Is(err, ErrClientNotFound) {
-			return PacketResult{}, permanentPacketError("точка не зарегистрирована")
-		}
-		return PacketResult{}, fmt.Errorf("прочитать регистрацию точки: %w", err)
-	}
-	if !client.Active {
-		return PacketResult{}, permanentPacketError("точка отключена")
-	}
-	if client.SenderBotID != packet.SenderBotID ||
-		!sameUsername(client.SenderBotUsername, packet.SenderBotUsername) {
-		return PacketResult{}, permanentPacketError("telegram-бот не принадлежит указанной точке")
-	}
-	if client.ChatID != packet.ChatID || client.ThreadID != packet.ThreadID {
-		return PacketResult{}, permanentPacketError("пакет поступил не из темы зарегистрированной точки")
-	}
-	if client.KeyID != envelope.KeyID {
-		return PacketResult{}, permanentPacketError("ключ пакета не зарегистрирован")
-	}
-	event, err := protocol.Open(envelope, client.Key)
-	if err != nil {
-		return PacketResult{}, &PermanentPacketError{Err: err}
-	}
-	if event.ClientID != client.ID {
-		return PacketResult{}, permanentPacketError("ID точки внутри события не совпадает с регистрацией")
+		return PacketResult{}, err
 	}
 	if err := event.Validate(); err != nil {
 		return PacketResult{}, permanentPacketError("нарушена структура события: " + err.Error())
@@ -225,6 +189,58 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 		ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
 		SourceMode: string(event.Mode),
 	}, nil
+}
+
+// AuthenticatePacket отбрасывает файл с недействительной подписью AES-GCM до
+// записи в локальную входную очередь. Это защищает очередь при компрометации
+// только Telegram-токена точки, без её отдельного транспортного ключа.
+func (service *ServerService) AuthenticatePacket(ctx context.Context, packet IncomingPacket) error {
+	_, _, err := service.openAuthenticatedPacket(ctx, packet)
+	return err
+}
+
+func (service *ServerService) openAuthenticatedPacket(ctx context.Context, packet IncomingPacket) (domain.Event, RegisteredClient, error) {
+	if len(packet.Payload) == 0 || len(packet.Payload) > 4*1024*1024 {
+		return domain.Event{}, RegisteredClient{}, permanentPacketError("недопустимый размер транспортного пакета")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(packet.Payload)))
+	decoder.DisallowUnknownFields()
+	var envelope protocol.Envelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return domain.Event{}, RegisteredClient{}, permanentPacketError("транспортный пакет повреждён")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return domain.Event{}, RegisteredClient{}, permanentPacketError("после транспортного пакета найдены лишние данные")
+	}
+	client, err := service.Clients.Client(ctx, envelope.ClientID)
+	if err != nil {
+		if errors.Is(err, ErrClientNotFound) {
+			return domain.Event{}, RegisteredClient{}, permanentPacketError("точка не зарегистрирована")
+		}
+		return domain.Event{}, RegisteredClient{}, fmt.Errorf("прочитать регистрацию точки: %w", err)
+	}
+	if !client.Active {
+		return domain.Event{}, RegisteredClient{}, permanentPacketError("точка отключена")
+	}
+	if client.SenderBotID != packet.SenderBotID ||
+		!sameUsername(client.SenderBotUsername, packet.SenderBotUsername) {
+		return domain.Event{}, RegisteredClient{}, permanentPacketError("telegram-бот не принадлежит указанной точке")
+	}
+	if client.ChatID != packet.ChatID || client.ThreadID != packet.ThreadID {
+		return domain.Event{}, RegisteredClient{}, permanentPacketError("пакет поступил не из темы зарегистрированной точки")
+	}
+	if client.KeyID != envelope.KeyID {
+		return domain.Event{}, RegisteredClient{}, permanentPacketError("ключ пакета не зарегистрирован")
+	}
+	event, err := protocol.Open(envelope, client.Key)
+	if err != nil {
+		return domain.Event{}, RegisteredClient{}, &PermanentPacketError{Err: err}
+	}
+	if event.ClientID != client.ID {
+		return domain.Event{}, RegisteredClient{}, permanentPacketError("ID точки внутри события не совпадает с регистрацией")
+	}
+	return event, client, nil
 }
 
 func eventContentKind(event domain.Event) string {
@@ -383,11 +399,20 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 		var receiptErr error
 		receipt, receiptErr = provider.DeliveryReceipt(job.Event, job.Delivery)
 		if receiptErr != nil {
-			if service.Logger != nil {
-				service.Logger.Warn("доставка выполнена, но внешний ID прочитать не удалось",
-					"event_id", job.Event.ID, "trace_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
-					"error", receiptErr)
+			// Публикация уже выполнена, но без устойчивой квитанции нельзя
+			// завершать задание: внешний message_id навсегда исчез бы из
+			// трассировки. Адаптер повторно сверит своё состояние без дубля.
+			next := now.Add(retryDelay(job.Attempts + 1))
+			if markErr := service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
+				next, "Не удалось прочитать квитанцию доставки; повторная сверка состояния назначена"); markErr != nil {
+				return false, fmt.Errorf("доставка выполнена, но квитанция недоступна: %v; сохранить повтор: %w", receiptErr, markErr)
 			}
+			if service.Logger != nil {
+				service.Logger.Warn("доставка выполнена, квитанция будет прочитана повторно",
+					"event_id", job.Event.ID, "trace_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
+					"next_attempt_at", next, "error", receiptErr)
+			}
+			return false, nil
 		} else {
 			receiptReady = true
 		}

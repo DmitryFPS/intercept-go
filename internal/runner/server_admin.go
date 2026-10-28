@@ -439,7 +439,7 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 	if !ok {
 		return errors.New("для этой доставки не настроен Telegram")
 	}
-	allowed, err := gateway.AllowRepublish(blockUUID)
+	allowed, err := gateway.AllowRepublish(job.Event, blockUUID)
 	if err != nil {
 		return err
 	}

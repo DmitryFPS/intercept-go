@@ -621,13 +621,13 @@ func TestDestinationRepublishesOnlyExplicitlySelectedBlock(t *testing.T) {
 			UUID: "block-1", Sequence: 0, Text: "12.00\n-Первое", UpdatedAt: "2026-10-26 12:00:00",
 		}},
 	}
-	allowed, err := destination.AllowRepublish("block-1")
+	allowed, err := destination.AllowRepublish(event, "block-1")
 	if err != nil || !allowed {
 		t.Fatalf("повторная публикация не разрешена: allowed=%v err=%v", allowed, err)
 	}
 	// Повтор команды до фактической доставки не должен снять разрешение:
 	// интерфейс или сеть могут безопасно повторить один и тот же запрос.
-	allowed, err = destination.AllowRepublish("block-1")
+	allowed, err = destination.AllowRepublish(event, "block-1")
 	if err != nil || !allowed {
 		t.Fatalf("повторное разрешение неидемпотентно: allowed=%v err=%v", allowed, err)
 	}
@@ -706,7 +706,7 @@ func TestDestinationDoesNotDuplicateUncertainSendAfterRestart(t *testing.T) {
 	if !block.Suppressed || block.SendPending || !strings.Contains(block.SuppressedReason, "дубль запрещён") {
 		t.Fatalf("неопределённая попытка не получила безопасное состояние: %#v", block)
 	}
-	allowed, err := destination.AllowRepublish("block-1")
+	allowed, err := destination.AllowRepublish(event, "block-1")
 	if err != nil || !allowed {
 		t.Fatalf("оператор не может разрешить публикацию после проверки Telegram: allowed=%v err=%v", allowed, err)
 	}
@@ -715,6 +715,111 @@ func TestDestinationDoesNotDuplicateUncertainSendAfterRestart(t *testing.T) {
 	}
 	if sends.Load() != 1 {
 		t.Fatalf("ручное разрешение не создало ровно одно сообщение: sends=%d", sends.Load())
+	}
+}
+
+func TestDestinationManualRepublishIsScopedToClientAndRecord(t *testing.T) {
+	t.Parallel()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {Blocks: map[string]destinationBlock{
+			"shared-block": {Suppressed: true, DeletedMessageIDs: []int64{101}},
+		}},
+		"point-02|source-2": {Blocks: map[string]destinationBlock{
+			"shared-block": {Suppressed: true, DeletedMessageIDs: []int64{202}},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{ChatID: -1001, StatePath: statePath}
+	allowed, err := destination.AllowRepublish(domain.Event{
+		ClientID: "point-02", Source: domain.SourceRecord{UUID: "source-2"},
+	}, "shared-block")
+	if err != nil || !allowed {
+		t.Fatalf("выбранный блок второй точки не разрешён: allowed=%v err=%v", allowed, err)
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !current.Items["point-01|source-1"].Blocks["shared-block"].Suppressed ||
+		current.Items["point-02|source-2"].Blocks["shared-block"].Suppressed {
+		t.Fatalf("повторная публикация затронула чужую точку: %#v", current.Items)
+	}
+}
+
+func TestDestinationManualRepublishPreservesKnownParts(t *testing.T) {
+	t.Parallel()
+	var sends atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/editMessageText"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+		case strings.HasSuffix(request.URL.Path, "/sendMessage"):
+			id := 701 + sends.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"message_id": id},
+			})
+		default:
+			http.Error(writer, "неожиданный метод", http.StatusNotFound)
+		}
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.sends.globalInterval = 0
+	client.sends.groupInterval = 0
+	event := domain.Event{
+		ID: "partial-manual", ClientID: "point-01",
+		CreatedAt: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC),
+		SourceAt:  time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC),
+		Source:    domain.SourceRecord{UUID: "source-1"},
+		Position:  domain.Position{UnitName: "позиция"}, SourceBlockUUID: "block-1", HasActiveBlocks: true,
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Sequence: 0, UpdatedAt: "2026-10-28 12:00:00",
+			Text: "12.00\n" + strings.Repeat("-Длинная строка. (10001)\n", 420),
+		}},
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	chunks := formatBlockChunksWithEditedAt(event, event.Blocks[0], delivery, "", "", "", event.SourceAt)
+	if len(chunks) < 2 {
+		t.Fatalf("контрольный текст не разбит на части: %d", len(chunks))
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {ThreadID: 42, Blocks: map[string]destinationBlock{
+			"block-1": {
+				MessageIDs: []int64{701}, ExpectedMessageCount: len(chunks),
+				Suppressed: true, SuppressedReason: "исход следующей части неизвестен",
+				SourceVersion: event.SourceVersion(), SourceEventAt: event.CreatedAt,
+				ThreadID: 42, SendPendingIndex: 1,
+			},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: client, ChatID: -1001, StatePath: statePath}
+	allowed, err := destination.AllowRepublish(event, "block-1")
+	if err != nil || !allowed {
+		t.Fatalf("ручной повтор не разрешён: allowed=%v err=%v", allowed, err)
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(current.Items["point-01|source-1"].Blocks["block-1"].MessageIDs, []int64{701}) {
+		t.Fatal("известная первая часть потеряна до повтора")
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(receipt.Blocks) != 1 || !receipt.Blocks[0].Complete ||
+		len(receipt.Blocks[0].MessageIDs) != len(chunks) || receipt.Blocks[0].MessageIDs[0] != 701 ||
+		int(sends.Load()) != len(chunks)-1 {
+		t.Fatalf("повтор создал дубль известной части: receipt=%#v sends=%d err=%v", receipt, sends.Load(), err)
 	}
 }
 
@@ -732,7 +837,9 @@ func TestDestinationDoesNotAllowRepublishWhileSendOutcomeIsUnknown(t *testing.T)
 		t.Fatal(err)
 	}
 	destination := Destination{ChatID: -1001, StatePath: statePath}
-	allowed, err := destination.AllowRepublish("block-1")
+	allowed, err := destination.AllowRepublish(domain.Event{
+		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"},
+	}, "block-1")
 	if err != nil {
 		t.Fatal(err)
 	}

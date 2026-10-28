@@ -145,12 +145,35 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 			return
 		}
 	}
+	reception := &application.ServerService{
+		Clients: server.Store, Rules: server.Store, Store: server.Store,
+		DeliveryWindow: cfg.DeliveryTimeout(),
+	}
 	receiver := &telegram.ServerReceiver{
 		API: api, ChatID: cfg.Transport.ChatID, MaxBytes: 4 * 1024 * 1024, Logger: server.Logger,
 		Authorize: func(ctx context.Context, packet application.IncomingPacket) (bool, error) {
 			return server.Store.AuthorizeTransport(
 				ctx, packet.SenderBotID, packet.SenderBotUsername, packet.ChatID, packet.ThreadID,
 			)
+		},
+		Authenticate: func(ctx context.Context, packet application.IncomingPacket) error {
+			if packet.ProbeID == "" {
+				return reception.AuthenticatePacket(ctx, packet)
+			}
+			client, err := server.Store.Client(ctx, packet.ProbeClientID)
+			if errors.Is(err, application.ErrClientNotFound) {
+				return &application.PermanentPacketError{Err: errors.New("точка контрольного пакета не зарегистрирована")}
+			}
+			if err != nil {
+				return err
+			}
+			if !client.Active || client.SenderBotID != packet.SenderBotID ||
+				!strings.EqualFold(strings.TrimPrefix(client.SenderBotUsername, "@"), strings.TrimPrefix(packet.SenderBotUsername, "@")) ||
+				client.ChatID != packet.ChatID || client.ThreadID != packet.ThreadID ||
+				!telegram.VerifyProbe(packet, client.Key) {
+				return &application.PermanentPacketError{Err: errors.New("контрольный пакет не прошёл проверку подлинности")}
+			}
+			return nil
 		},
 	}
 	receiver.Observe = func(item application.TransportObservation) {
@@ -160,10 +183,6 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	// повреждённые), очищаются через ту же долговечную очередь, что и принятые.
 	receiver.Discard = func(discardContext context.Context, messageID int64) {
 		server.deleteTransportPacket(discardContext, receiver, messageID)
-	}
-	reception := &application.ServerService{
-		Clients: server.Store, Rules: server.Store, Store: server.Store,
-		DeliveryWindow: cfg.DeliveryTimeout(),
 	}
 	server.update(func(status *ServerStatus) {
 		status.State = "running"

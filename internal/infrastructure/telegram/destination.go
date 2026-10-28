@@ -649,29 +649,20 @@ func compactTelegramTombstones(blocks map[string]destinationBlock) map[string]de
 // Следующий обычный проход доставки создаст новое сообщение и сохранит точный
 // message_id из ответа Telegram; соседние и пользовательские сообщения не
 // участвуют в выборе.
-func (destination *Destination) AllowRepublish(blockUUID string) (bool, error) {
+func (destination *Destination) AllowRepublish(event domain.Event, blockUUID string) (bool, error) {
 	blockUUID = strings.TrimSpace(blockUUID)
 	if blockUUID == "" {
 		return false, errors.New("не задан UUID блока для повторной публикации")
 	}
-	destination.mu.Lock()
-	current, err := destination.loadState()
-	if err != nil {
-		destination.mu.Unlock()
-		return false, err
+	if strings.TrimSpace(event.ClientID) == "" ||
+		(strings.TrimSpace(event.Source.UUID) == "" && event.Source.ID <= 0) {
+		return false, errors.New("не задана рабочая точка или запись для повторной публикации")
 	}
-	itemKey := ""
-	for key, item := range current.Items {
-		if block, exists := item.Blocks[blockUUID]; exists && !block.SendPending &&
-			(block.Suppressed || (len(block.MessageIDs) == 0 && len(block.DeletedMessageIDs) > 0)) {
-			itemKey = key
-			break
-		}
+	legacyItemKey := strings.TrimSpace(event.Source.UUID)
+	if legacyItemKey == "" {
+		legacyItemKey = fmt.Sprintf("id:%d", event.Source.ID)
 	}
-	destination.mu.Unlock()
-	if itemKey == "" {
-		return false, nil
-	}
+	itemKey := strings.TrimSpace(event.ClientID) + "|" + legacyItemKey
 	unlock := destination.lockItem(itemKey)
 	defer unlock()
 	item, err := destination.loadItem(itemKey)
@@ -687,8 +678,12 @@ func (destination *Destination) AllowRepublish(blockUUID string) (bool, error) {
 	block.SuppressedReason = ""
 	block.Hash = ""
 	block.SourceHash = ""
-	block.MessageIDs = nil
-	block.ExpectedMessageCount = 0
+	// Уже подтверждённые части длинного сообщения сохраняются. При
+	// неопределённом исходе следующей части оператор проверяет только её;
+	// повторная отправка всех известных частей создала бы дубль.
+	if len(block.MessageIDs) == 0 {
+		block.ExpectedMessageCount = 0
+	}
 	block.Recovering = false
 	block.SendPending = false
 	block.SendPendingIndex = 0

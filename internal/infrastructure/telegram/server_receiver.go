@@ -22,6 +22,9 @@ type ServerReceiver struct {
 	Logger   *slog.Logger
 	// Authorize проверяет метаданные отправителя до скачивания файла.
 	Authorize func(context.Context, application.IncomingPacket) (bool, error)
+	// Authenticate проверяет подпись содержимого после скачивания, но до
+	// долговечной записи. Временная ошибка оставляет Telegram offset прежним.
+	Authenticate func(context.Context, application.IncomingPacket) error
 	// Discard передаёт удаление служебного файла владельцу долговечной очереди
 	// очистки. Без обработчика сохраняется совместимый однократный вызов API.
 	Discard func(context.Context, int64)
@@ -186,6 +189,21 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			packet.ProbeSentAt = probeAt.UTC()
 			packet.ProbeMAC = probe.MAC
 			packet.ProbeShift = application.NormalizeShiftSnapshot(probe.Shift)
+		}
+		if receiver.Authenticate != nil {
+			if err := receiver.Authenticate(ctx, packet); err != nil {
+				if !application.IsPermanentPacketError(err) {
+					observation.Outcome, observation.Reason, observation.Rank =
+						"authentication_retry", "Временная ошибка проверки содержимого пакета", 20
+					receiver.observe(observation)
+					return packets, offset, fmt.Errorf("проверить содержимое пакета: %w", err)
+				}
+				observation.Outcome, observation.Reason, observation.Rank =
+					"rejected_authentication", "Служебный пакет не прошёл проверку подлинности", 200
+				receiver.observe(observation)
+				receiver.discardPacket(ctx, message.MessageID)
+				continue
+			}
 		}
 		observation.Outcome, observation.Reason, observation.Rank =
 			"awaiting_processing", "Служебный пакет передан обработчику", 10
