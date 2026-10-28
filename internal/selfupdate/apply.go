@@ -1,6 +1,11 @@
 package selfupdate
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -311,7 +316,10 @@ func healthVersion(options ApplyOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := updateHTTPClient(2 * time.Second)
+	if err := verifyUpdateInstance(client, options.Address, strings.TrimSpace(string(token))); err != nil {
+		return "", err
+	}
 	request, err := http.NewRequest(http.MethodGet, "http://"+options.Address+"/api/status", nil)
 	if err != nil {
 		return "", err
@@ -349,6 +357,10 @@ func activateApplication(options ApplyOptions, expectedVersion string) (bool, er
 	if err != nil {
 		return false, err
 	}
+	client := updateHTTPClient(15 * time.Second)
+	if err := verifyUpdateInstance(client, options.Address, strings.TrimSpace(string(token))); err != nil {
+		return false, err
+	}
 	url := "http://" + options.Address + "/api/control/start"
 	request, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
@@ -356,7 +368,7 @@ func activateApplication(options ApplyOptions, expectedVersion string) (bool, er
 	}
 	request.Header.Set("X-EAVC-Access", strings.TrimSpace(string(token)))
 	request.Header.Set("Origin", "http://"+options.Address)
-	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		if activationRequestDefinitelyNotSent(err) {
 			return false, err
@@ -397,6 +409,56 @@ func activateApplication(options ApplyOptions, expectedVersion string) (bool, er
 		return true, fmt.Errorf("обработка не запущена: состояние %q", status.State)
 	}
 	return true, nil
+}
+
+const (
+	updateInstanceChallengeHeader = "X-EAVC-Instance-Challenge"
+	updateInstanceProofHeader     = "X-EAVC-Instance-Proof"
+)
+
+func updateHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// verifyUpdateInstance подтверждает владельца локального порта до передачи
+// постоянного bearer-токена. Тот же HTTP-клиент затем переиспользует проверенное
+// keep-alive соединение для status/start.
+func verifyUpdateInstance(client *http.Client, address, token string) error {
+	challengeBytes := make([]byte, 32)
+	if _, err := rand.Read(challengeBytes); err != nil {
+		return err
+	}
+	challenge := base64.RawURLEncoding.EncodeToString(challengeBytes)
+	request, err := http.NewRequest(http.MethodGet, "http://"+address+"/api/instance-proof", nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set(updateInstanceChallengeHeader, challenge)
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("локальный экземпляр не подтвердил подлинность: код %d", response.StatusCode)
+	}
+	expected := updateInstanceProof(token, challenge)
+	actual := response.Header.Get(updateInstanceProofHeader)
+	if subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) != 1 {
+		return errors.New("локальный экземпляр не подтвердил владение ключом доступа")
+	}
+	return nil
+}
+
+func updateInstanceProof(token, challenge string) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	_, _ = mac.Write([]byte("eavc-connect-instance:" + challenge))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // activationRequestDefinitelyNotSent отличает отказ ещё до установки TCP-соединения

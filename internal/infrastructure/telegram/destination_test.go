@@ -718,6 +718,37 @@ func TestDestinationDoesNotDuplicateUncertainSendAfterRestart(t *testing.T) {
 	}
 }
 
+func TestDestinationDoesNotAllowRepublishWhileSendOutcomeIsUnknown(t *testing.T) {
+	t.Parallel()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {Blocks: map[string]destinationBlock{
+			"block-1": {
+				SendPending: true, SendPendingIndex: 1, SendPendingAt: "2026-10-28T12:00:00Z",
+				DeletedMessageIDs: []int64{101}, SourceVersion: "2026-10-28 12:00:00",
+			},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{ChatID: -1001, StatePath: statePath}
+	allowed, err := destination.AllowRepublish("block-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("неопределённая Telegram-отправка ошибочно разрешена к повтору")
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := current.Items["point-01|source-1"].Blocks["block-1"]
+	if !block.SendPending || block.SendPendingIndex != 1 {
+		t.Fatalf("защитный маркер неопределённой отправки очищен: %#v", block)
+	}
+}
+
 func TestDestinationResumesMissingChunksWithoutCompletingPartialPublication(t *testing.T) {
 	t.Parallel()
 	var sendCalls atomic.Int32

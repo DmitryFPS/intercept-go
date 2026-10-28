@@ -662,7 +662,8 @@ func (destination *Destination) AllowRepublish(blockUUID string) (bool, error) {
 	}
 	itemKey := ""
 	for key, item := range current.Items {
-		if block, exists := item.Blocks[blockUUID]; exists && (block.Suppressed || (len(block.MessageIDs) == 0 && len(block.DeletedMessageIDs) > 0)) {
+		if block, exists := item.Blocks[blockUUID]; exists && !block.SendPending &&
+			(block.Suppressed || (len(block.MessageIDs) == 0 && len(block.DeletedMessageIDs) > 0)) {
 			itemKey = key
 			break
 		}
@@ -678,7 +679,7 @@ func (destination *Destination) AllowRepublish(blockUUID string) (bool, error) {
 		return false, err
 	}
 	block, exists := item.Blocks[blockUUID]
-	if !exists || (!block.Suppressed && (len(block.MessageIDs) > 0 || len(block.DeletedMessageIDs) == 0)) {
+	if !exists || block.SendPending || (!block.Suppressed && (len(block.MessageIDs) > 0 || len(block.DeletedMessageIDs) == 0)) {
 		return false, nil
 	}
 	block.Suppressed = false

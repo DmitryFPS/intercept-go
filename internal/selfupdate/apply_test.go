@@ -54,6 +54,9 @@ func TestActivateApplicationStartsValidatedProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if serveUpdateInstanceProof(writer, request, token) {
+			return
+		}
 		if request.Method != http.MethodPost || request.URL.Path != "/api/control/start" {
 			t.Fatalf("unexpected activation request %s %s", request.Method, request.URL.Path)
 		}
@@ -81,10 +84,14 @@ func TestActivateApplicationStartsValidatedProcess(t *testing.T) {
 func TestActivateApplicationRejectsPausedConfiguredProcess(t *testing.T) {
 	baseDir := t.TempDir()
 	tokenPath := filepath.Join(baseDir, "access.dat")
-	if err := secrets.Save(tokenPath, []byte("test-access-token-with-at-least-32-characters")); err != nil {
+	const token = "test-access-token-with-at-least-32-characters"
+	if err := secrets.Save(tokenPath, []byte(token)); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if serveUpdateInstanceProof(writer, request, token) {
+			return
+		}
 		writer.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(writer).Encode(map[string]any{
 			"version": "0.2.0-rc46", "state": "paused", "configured": true, "processing": false,
@@ -108,6 +115,9 @@ func TestActivateApplicationWaitsUntilStartingProcessIsReady(t *testing.T) {
 	}
 	statusChecks := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if serveUpdateInstanceProof(writer, request, token) {
+			return
+		}
 		if request.Method == http.MethodPost {
 			_ = json.NewEncoder(writer).Encode(map[string]any{
 				"version": "0.2.0-rc50", "state": "starting", "configured": true, "processing": true,
@@ -129,4 +139,41 @@ func TestActivateApplicationWaitsUntilStartingProcessIsReady(t *testing.T) {
 	if statusChecks == 0 {
 		t.Fatal("обновлятор не дождался контрольного статуса после состояния starting")
 	}
+}
+
+func TestHealthVersionDoesNotExposeTokenToUnverifiedPortOwner(t *testing.T) {
+	baseDir := t.TempDir()
+	tokenPath := filepath.Join(baseDir, "access.dat")
+	const token = "secret-access-token-with-at-least-32-characters"
+	if err := secrets.Save(tokenPath, []byte(token)); err != nil {
+		t.Fatal(err)
+	}
+	var tokenObserved bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("X-EAVC-Access") != "" {
+			tokenObserved = true
+		}
+		writer.Header().Set(updateInstanceProofHeader, "forged-proof")
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	_, err := healthVersion(ApplyOptions{
+		BaseDir: baseDir, TokenFile: "access.dat", Address: strings.TrimPrefix(server.URL, "http://"),
+	})
+	if err == nil {
+		t.Fatal("поддельный владелец порта ошибочно прошёл HMAC-проверку")
+	}
+	if tokenObserved {
+		t.Fatal("bearer-токен раскрыт до подтверждения владельца порта")
+	}
+}
+
+func serveUpdateInstanceProof(writer http.ResponseWriter, request *http.Request, token string) bool {
+	if request.URL.Path != "/api/instance-proof" {
+		return false
+	}
+	challenge := request.Header.Get(updateInstanceChallengeHeader)
+	writer.Header().Set(updateInstanceProofHeader, updateInstanceProof(token, challenge))
+	writer.WriteHeader(http.StatusNoContent)
+	return true
 }
