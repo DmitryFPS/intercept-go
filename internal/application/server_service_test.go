@@ -100,9 +100,11 @@ func TestServerServiceDoesNotExpireBlockDeletionCleanup(t *testing.T) {
 	event.Content = ""
 	event.SourceBlockUUID = "block-deleted"
 	event.SourceBlockDeleted = true
+	event.CreatedAt = now
+	event.SourceAt = now
 	event.Blocks = []domain.ContentBlock{{UUID: "block-deleted", DeletedAt: now.Format(time.RFC3339Nano)}}
 	event.ExpiresAt = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
-	event.ContentDigest = "delete-digest"
+	event.ContentDigest = event.CanonicalContentDigest()
 	envelope, err := protocol.Seal(event, "key-1", key, now, bytes.NewReader(make([]byte, 12)))
 	if err != nil {
 		t.Fatal(err)
@@ -259,6 +261,91 @@ func TestServerServiceKeepsPacketOnTransientRegistryFailure(t *testing.T) {
 	_, err = service.Receive(context.Background(), IncomingPacket{Payload: payload})
 	if err == nil || !IsPermanentPacketError(err) {
 		t.Fatalf("неизвестная точка не классифицирована как окончательный отказ: %v", err)
+	}
+}
+
+func TestServerServiceRejectsDigestAndFutureRevisionPoisoning(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	key := bytes.Repeat([]byte{0x71}, 32)
+	receive := func(event domain.Event) error {
+		envelope, err := protocol.Seal(event, "key-1", key, now, bytes.NewReader(make([]byte, 12)))
+		if err != nil {
+			return err
+		}
+		payload, _ := json.Marshal(envelope)
+		service := ServerService{
+			Clients: memoryRegistry{client: RegisteredClient{
+				ID: "textile", SenderBotID: 11, SenderBotUsername: "textile_bot",
+				ChatID: -1001, ThreadID: 42, KeyID: "key-1", Key: key, Active: true,
+			}},
+			Rules: memoryRules{rules: serverServiceRules()}, Store: &memoryServerStore{},
+			Now: func() time.Time { return now },
+		}
+		_, err = service.Receive(context.Background(), IncomingPacket{
+			SenderBotID: 11, SenderBotUsername: "textile_bot", ChatID: -1001,
+			ThreadID: 42, Payload: payload,
+		})
+		return err
+	}
+	event := serverServiceEvent()
+	event.CreatedAt = now
+	event.SourceAt = now
+	event.Source.UpdatedAt = "2026-10-28 12:00:00"
+	event.ContentDigestVersion = ""
+	event.ContentDigest = event.CanonicalContentDigest()
+	if err := receive(event); err == nil {
+		t.Fatal("пакет старого контракта без версии digest принят")
+	}
+	event.ContentDigestVersion = domain.ContentDigestVersionCurrent
+	event.ContentDigest = event.CanonicalContentDigest()
+	event.ContentDigest = "подменённый-отпечаток"
+	if err := receive(event); err == nil {
+		t.Fatal("подмена digest не отклонена до отправки")
+	}
+	event.ContentDigest = event.CanonicalContentDigest()
+	event.Source.UpdatedAt = "9999-10-28 12:00:00"
+	if err := receive(event); err == nil {
+		t.Fatal("будущая ревизия не отклонена")
+	}
+
+	current := serverServiceEvent()
+	current.CreatedAt, current.SourceAt = now, now
+	current.Source.UpdatedAt = "2026-10-28 12:00:00"
+	current.Content = "12.00\n-Доклад. (61021)"
+	current.SourceBlockUUID = "block-1"
+	current.HasActiveBlocks = true
+	current.Blocks = []domain.ContentBlock{{
+		UUID: "block-1", Text: current.Content, UpdatedAt: current.Source.UpdatedAt,
+		Callsigns: []domain.Callsign{{Code: "61021", Label: "Рубин"}},
+	}}
+	current.ContentDigestVersion = domain.ContentDigestVersionCurrent
+	current.ContentDigest = current.CanonicalContentDigest()
+	if err := receive(current); err != nil {
+		t.Fatalf("корректный пакет v2 отклонён: %v", err)
+	}
+	tamperedCatalog := current
+	tamperedCatalog.Position.CatalogUUID = "подменённый-каталог"
+	if err := receive(tamperedCatalog); err == nil {
+		t.Fatal("подмена catalog_uuid не отклонена до отправки")
+	}
+	tamperedCallsign := current
+	tamperedCallsign.Blocks = append([]domain.ContentBlock(nil), current.Blocks...)
+	tamperedCallsign.Blocks[0].Callsigns = append([]domain.Callsign(nil), current.Blocks[0].Callsigns...)
+	tamperedCallsign.Blocks[0].Callsigns[0].Label = "Подменённый"
+	if err := receive(tamperedCallsign); err == nil {
+		t.Fatal("подмена позывного не отклонена до отправки")
+	}
+	mismatchedText := current
+	mismatchedText.Content = "другой текст"
+	mismatchedText.ContentDigest = mismatchedText.CanonicalContentDigest()
+	if err := receive(mismatchedText); err == nil {
+		t.Fatal("расхождение Content и блока разрешено упаковать")
+	}
+	unknownVersion := current
+	unknownVersion.ContentDigestVersion = "v999"
+	if err := receive(unknownVersion); err == nil {
+		t.Fatal("неизвестную версию digest разрешено упаковать")
 	}
 }
 
@@ -523,13 +610,15 @@ func (queue *memoryDeliveryQueue) MarkDeliveryRetry(_ context.Context, eventID, 
 }
 
 func serverServiceEvent() domain.Event {
-	now := time.Now().UTC()
-	return domain.Event{
+	now := time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC)
+	event := domain.Event{
 		ID: "event-1", ClientID: "textile", CreatedAt: now, ObservedAt: now,
 		Source:   domain.SourceRecord{ID: 1, UUID: "source"},
 		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
-		Content: "данные", ContentDigest: "digest",
+		Content: "данные", ContentDigestVersion: domain.ContentDigestVersionCurrent,
 	}
+	event.ContentDigest = event.CanonicalContentDigest()
+	return event
 }
 
 func serverServiceRules() domain.RuleSet {

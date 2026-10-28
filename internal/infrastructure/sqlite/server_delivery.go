@@ -13,6 +13,11 @@ import (
 	"intercept/internal/domain"
 )
 
+// Барьеры не удаляются вместе с журналом: иначе старый пакет смог бы снова
+// создать публикацию. Жёсткий предел превращает бесконечный рост от
+// скомпрометированной точки в явный карантин, не ослабляя replay-защиту.
+const maxSourceLineagesPerClient = 200000
+
 // KnownEvent проверяет, был ли пакет уже надёжно принят. Совпавший UUID с
 // другим содержимым считается конфликтом, а не повторной доставкой.
 func (store *ServerStore) KnownEvent(ctx context.Context, eventID, contentDigest string) (bool, error) {
@@ -119,7 +124,63 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 	if !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("проверить повтор события: %w", err)
 	}
-	plan, err = addRemovedRouteCleanup(ctx, tx, event, plan)
+	// Telegram может доставить служебные пакеты не в порядке их создания.
+	// Барьер сравнивает каноническую исходную ревизию, а CreatedAt разрешает
+	// несколько реальных правок в одну секунду. Полностью совпавшее состояние
+	// только продвигает барьер и повторно не создаёт задания доставки.
+	barrier, hasBarrier, err := loadSourceRevisionBarrier(
+		ctx, tx, event.ClientID, event.SourceLineageKey(),
+	)
+	if err != nil {
+		return false, err
+	}
+	if hasBarrier {
+		sameDigest := strings.EqualFold(
+			strings.TrimSpace(event.ContentDigest), strings.TrimSpace(barrier.ContentDigest),
+		)
+		order := domain.CompareSourceRevision(
+			event.CanonicalSourceVersion(), event.CreatedAt, barrier.SourceVersion, barrier.SourceEventAt,
+		)
+		if order < 0 {
+			return false, nil
+		}
+		if sameDigest {
+			if order == 0 {
+				return false, nil
+			}
+			barrier.SourceVersion = event.CanonicalSourceVersion()
+			barrier.SourceEventAt = event.CreatedAt
+			if err := saveSourceRevisionBarrier(ctx, tx, barrier); err != nil {
+				return false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return false, fmt.Errorf("продвинуть барьер повторного события: %w", err)
+			}
+			return false, nil
+		}
+		if order == 0 {
+			return false, application.ErrSourceRevisionConflict
+		}
+	} else {
+		var lineages int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM source_revision_barriers WHERE client_id=?`,
+			event.ClientID,
+		).Scan(&lineages); err != nil {
+			return false, fmt.Errorf("проверить предел линий источника: %w", err)
+		}
+		limit := store.maxSourceLineages
+		if limit <= 0 {
+			limit = maxSourceLineagesPerClient
+		}
+		if lineages >= limit {
+			return false, application.ErrSourceLineageLimit
+		}
+	}
+	// В барьере хранится именно активный маршрут этой редакции. Задания cleanup,
+	// добавленные ниже, не должны становиться маршрутом следующей версии.
+	activeRoute := append([]domain.PlannedDelivery(nil), plan.Deliveries...)
+	plan, err = addRemovedRouteCleanup(event, plan, barrier, hasBarrier)
 	if err != nil {
 		return false, err
 	}
@@ -165,6 +226,13 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 			return false, fmt.Errorf("создать задание %s: %w", delivery.Destination.ID, err)
 		}
 	}
+	if err := saveSourceRevisionBarrier(ctx, tx, sourceRevisionBarrier{
+		ClientID: event.ClientID, SourceUUID: event.SourceLineageKey(),
+		SourceVersion: event.CanonicalSourceVersion(), SourceEventAt: event.CreatedAt,
+		ContentDigest: event.ContentDigest, EventID: event.ID, Route: activeRoute,
+	}); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("завершить приём события: %w", err)
 	}
@@ -176,53 +244,24 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 // подразделения или маршрута. Так переход корректной позиции в ошибочную не
 // оставляет старый DOCX или сообщение в прежней теме.
 func addRemovedRouteCleanup(
-	ctx context.Context, tx *sql.Tx, event domain.Event, plan domain.DeliveryPlan,
+	event domain.Event, plan domain.DeliveryPlan, previous sourceRevisionBarrier, hasPrevious bool,
 ) (domain.DeliveryPlan, error) {
 	sourceUUID := event.SourceLineageKey()
-	if sourceUUID == "" {
+	if sourceUUID == "" || !hasPrevious {
 		return plan, nil
 	}
-	rows, err := tx.QueryContext(ctx, `
-		SELECT j.delivery_json
-		FROM delivery_jobs j
-		JOIN received_events e ON e.event_id=j.event_id
-		WHERE e.client_id=? AND e.source_uuid=?
-			AND e.rowid=(
-				SELECT MAX(previous.rowid) FROM received_events previous
-				WHERE previous.client_id=? AND previous.source_uuid=?
-			)
-		ORDER BY j.destination_id`, event.ClientID, sourceUUID, event.ClientID, sourceUUID)
-	if err != nil {
-		return plan, fmt.Errorf("прочитать предыдущий маршрут записи: %w", err)
-	}
-	defer rows.Close()
 	current := make(map[string]bool, len(plan.Deliveries))
 	for _, delivery := range plan.Deliveries {
 		current[delivery.Destination.ID] = true
 	}
-	for rows.Next() {
-		var protected []byte
-		if err := rows.Scan(&protected); err != nil {
-			return plan, fmt.Errorf("прочитать предыдущее направление: %w", err)
-		}
-		plain, err := unprotectDatabaseValue(protected)
-		if err != nil {
-			return plan, err
-		}
-		var previous domain.PlannedDelivery
-		if err := json.Unmarshal(plain, &previous); err != nil {
-			return plan, errors.New("предыдущее задание доставки повреждено")
-		}
-		if current[previous.Destination.ID] {
+	for _, delivery := range previous.Route {
+		if current[delivery.Destination.ID] {
 			continue
 		}
-		previous.Decision = domain.RouteDecision{Action: domain.RouteSkip}
-		previous.RuleLevel = "cleanup"
-		plan.Deliveries = append(plan.Deliveries, previous)
-		current[previous.Destination.ID] = true
-	}
-	if err := rows.Err(); err != nil {
-		return plan, fmt.Errorf("прочитать предыдущий маршрут записи: %w", err)
+		delivery.Decision = domain.RouteDecision{Action: domain.RouteSkip}
+		delivery.RuleLevel = "cleanup"
+		plan.Deliveries = append(plan.Deliveries, delivery)
+		current[delivery.Destination.ID] = true
 	}
 	return plan, nil
 }
@@ -241,7 +280,7 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 		return nil, fmt.Errorf("завершить просроченные доставки: %w", err)
 	}
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT e.payload_json, j.delivery_json, j.attempts
+		SELECT j.event_id, j.destination_id, e.payload_json, j.delivery_json, j.attempts
 		FROM delivery_jobs j
 		JOIN received_events e ON e.event_id = j.event_id
 		WHERE j.state = 'pending' AND j.next_attempt_at <= ? AND j.expires_at >= ?
@@ -265,31 +304,78 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 	if err != nil {
 		return nil, fmt.Errorf("прочитать очередь доставки: %w", err)
 	}
-	defer rows.Close()
-	var jobs []application.DeliveryJob
+	type storedDelivery struct {
+		eventID, destinationID        string
+		eventPayload, deliveryPayload []byte
+		attempts                      int
+	}
+	stored := make([]storedDelivery, 0, limit)
 	for rows.Next() {
-		var eventPayload, deliveryPayload []byte
-		var job application.DeliveryJob
-		if err := rows.Scan(&eventPayload, &deliveryPayload, &job.Attempts); err != nil {
+		var value storedDelivery
+		if err := rows.Scan(&value.eventID, &value.destinationID, &value.eventPayload, &value.deliveryPayload, &value.attempts); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("прочитать задание доставки: %w", err)
 		}
-		eventPlain, err := unprotectDatabaseValue(eventPayload)
-		if err != nil {
-			return nil, err
+		stored = append(stored, value)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	jobs := make([]application.DeliveryJob, 0, len(stored))
+	for _, value := range stored {
+		var job application.DeliveryJob
+		job.Attempts = value.attempts
+		eventPlain, decodeErr := unprotectDatabaseValue(value.eventPayload)
+		eventCorrupt := decodeErr != nil
+		if decodeErr == nil {
+			decodeErr = json.Unmarshal(eventPlain, &job.Event)
+			eventCorrupt = decodeErr != nil
 		}
-		deliveryPlain, err := unprotectDatabaseValue(deliveryPayload)
-		if err != nil {
-			return nil, err
+		if decodeErr == nil {
+			var deliveryPlain []byte
+			deliveryPlain, decodeErr = unprotectDatabaseValue(value.deliveryPayload)
+			if decodeErr == nil {
+				decodeErr = json.Unmarshal(deliveryPlain, &job.Delivery)
+			}
 		}
-		if err := json.Unmarshal(eventPlain, &job.Event); err != nil {
-			return nil, errors.New("сохранённое событие повреждено")
+		if decodeErr == nil && (job.Event.ID != value.eventID || job.Delivery.Destination.ID != value.destinationID) {
+			decodeErr = errors.New("идентификаторы задания не совпадают с локальной очередью")
 		}
-		if err := json.Unmarshal(deliveryPlain, &job.Delivery); err != nil {
-			return nil, errors.New("сохранённое задание повреждено")
+		if decodeErr != nil {
+			reason := "повреждено локальное задание доставки: " + decodeErr.Error()
+			if err := store.quarantineCorruptDelivery(ctx, value.eventID, value.destinationID, eventCorrupt, now, reason); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		jobs = append(jobs, job)
 	}
-	return jobs, rows.Err()
+	return jobs, nil
+}
+
+func (store *ServerStore) quarantineCorruptDelivery(
+	ctx context.Context, eventID, destinationID string, entireEvent bool, at time.Time, reason string,
+) error {
+	reason = strings.TrimSpace(reason)
+	if len(reason) > 2000 {
+		reason = reason[:2000]
+	}
+	query := `UPDATE delivery_jobs SET state='expired',expired_at=?,last_error=?
+		WHERE event_id=? AND destination_id=? AND state='pending'`
+	args := []any{at.UTC().Format(time.RFC3339Nano), reason, eventID, destinationID}
+	if entireEvent {
+		query = `UPDATE delivery_jobs SET state='expired',expired_at=?,last_error=?
+			WHERE event_id=? AND state='pending'`
+		args = []any{at.UTC().Format(time.RFC3339Nano), reason, eventID}
+	}
+	if _, err := store.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("изолировать повреждённое задание доставки: %w", err)
+	}
+	return nil
 }
 
 // DeliveryJobByID загружает ровно одно ранее сохранённое задание для явного

@@ -1,14 +1,12 @@
 package domain
 
 import (
-	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
 var (
-	presentationTimeLine = regexp.MustCompile(`^(\d{1,2})[.:](\d{2})\s*$`)
 	presentationCodeTail = regexp.MustCompile(`\s*\((\d{1,10})\)\s*$`)
 	presentationCodeAny  = regexp.MustCompile(`\((\d{1,10})\)`)
 	presentationLeadDash = regexp.MustCompile(`^[-–—]\s*`)
@@ -25,9 +23,12 @@ type PresentedCorrespondent struct {
 }
 
 // PresentedLine — строка готового перехвата. Для строки времени Time=true.
+// InternalTime отличает помеченное оператором время с #, которое остаётся
+// внутри текущего временного блока и только оформляется по-разному в каналах.
 type PresentedLine struct {
-	Text string
-	Time bool
+	Text         string
+	Time         bool
+	InternalTime bool
 }
 
 // PresentIntercept преобразует бланк EAVC в общий для Telegram и Word вид.
@@ -73,9 +74,8 @@ func PresentIntercept(content string, callsigns []Callsign) ([]PresentedCorrespo
 		if line == "" {
 			continue
 		}
-		if match := presentationTimeLine.FindStringSubmatch(line); match != nil {
-			hour, _ := strconv.Atoi(match[1])
-			lines = append(lines, PresentedLine{Text: fmt.Sprintf("%02d:%s", hour, match[2]), Time: true})
+		if normalized, _, ok := CanonicalTimeHeader(line); ok {
+			lines = append(lines, PresentedLine{Text: normalized, Time: true})
 			continue
 		}
 		body := presentationLeadDash.ReplaceAllString(line, "")

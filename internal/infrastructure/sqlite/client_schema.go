@@ -130,3 +130,17 @@ CREATE TABLE client_cleared_events (
 );
 CREATE INDEX client_cleared_events_time_idx ON client_cleared_events(cleared_at);
 `
+
+// Локальный occurrence-ID переживает перезапуск, смену физического UUID EAVC
+// и добавление/удаление служебной решётки.
+const clientTimeStateMigration = `
+CREATE TABLE client_time_state (
+	source_key TEXT PRIMARY KEY,
+	payload BLOB NOT NULL,
+	updated_at TEXT NOT NULL
+);
+`
+
+const clientTimeStateRetentionMigration = `
+CREATE INDEX client_time_state_updated_idx ON client_time_state(updated_at);
+`

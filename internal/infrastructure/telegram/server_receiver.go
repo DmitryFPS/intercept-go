@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -160,9 +161,12 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			decoder := json.NewDecoder(strings.NewReader(string(payload)))
 			decoder.DisallowUnknownFields()
 			var probe probePayload
-			if err := decoder.Decode(&probe); err != nil || probe.Schema != probeSchema ||
+			decodeErr := decoder.Decode(&probe)
+			var trailing any
+			trailingErr := decoder.Decode(&trailing)
+			if decodeErr != nil || !errors.Is(trailingErr, io.EOF) || probe.Schema != probeSchema ||
 				strings.TrimSpace(probe.ClientID) == "" || !validProbeID(probe.ProbeID) ||
-				strings.TrimSpace(probe.MAC) == "" {
+				strings.TrimSpace(probe.MAC) == "" || application.ValidateShiftSnapshot(probe.Shift) != nil {
 				observation.Outcome, observation.Reason, observation.Rank =
 					"invalid_probe", "Повреждённый или неподписанный контрольный пакет", 100
 				receiver.observe(observation)
@@ -181,6 +185,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			packet.ProbeClientID = probe.ClientID
 			packet.ProbeSentAt = probeAt.UTC()
 			packet.ProbeMAC = probe.MAC
+			packet.ProbeShift = application.NormalizeShiftSnapshot(probe.Shift)
 		}
 		observation.Outcome, observation.Reason, observation.Rank =
 			"awaiting_processing", "Служебный пакет передан обработчику", 10

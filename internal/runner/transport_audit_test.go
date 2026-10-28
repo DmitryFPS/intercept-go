@@ -133,3 +133,24 @@ func TestTransportAuditSinkRecoversDatabaseFailureFromDisk(t *testing.T) {
 		t.Fatalf("recovered spool not removed: entries=%v err=%v", entries, err)
 	}
 }
+
+func TestTransportAuditSinkBoundsDiskSpoolAndRejectsLateSubmitSafely(t *testing.T) {
+	spoolDir := filepath.Join(t.TempDir(), "spool")
+	recorder := &transportAuditRecorderStub{}
+	sink := newTransportAuditSink(recorder, nil, spoolDir, 1)
+	sink.maxSpoolFiles = 1
+	sink.maxSpoolBytes = 1 << 20
+	sink.maxSpoolEntryBytes = 1 << 10
+
+	sink.submit(application.TransportObservation{MessageID: 1})
+	sink.submit(application.TransportObservation{MessageID: 2})
+	sink.submit(application.TransportObservation{MessageID: 3})
+	entries, err := os.ReadDir(spoolDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("дисковая очередь не ограничена одним файлом: entries=%v err=%v", entries, err)
+	}
+	go sink.run()
+	sink.shutdown()
+	// Поздний производитель не должен паниковать отправкой в закрытый канал.
+	sink.submit(application.TransportObservation{MessageID: 4})
+}

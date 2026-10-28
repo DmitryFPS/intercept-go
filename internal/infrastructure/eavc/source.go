@@ -33,11 +33,20 @@ var requiredBlockColumns = []string{
 // оператор получает явную ошибку, а курсор не сдвигается.
 const maxBoundaryReplay = 1000
 
+type recordContractError struct{ reason string }
+
+func (err *recordContractError) Error() string { return err.reason }
+
+func newRecordContractError(format string, args ...any) error {
+	return &recordContractError{reason: fmt.Sprintf(format, args...)}
+}
+
 // Source читает EAVC только через SQLite mode=ro и PRAGMA query_only.
 type Source struct {
 	db              *sql.DB
 	hasCatalogUUID  bool
 	hasSourceMode   bool
+	hasBlockAuthor  bool
 	hasCallsigns    bool
 	callsignColumns map[string]bool
 	hasArchive      bool
@@ -141,6 +150,7 @@ func Open(ctx context.Context, path string) (*Source, error) {
 		sort.Strings(missing)
 		return nil, fmt.Errorf("схема блоков EAVC не поддерживается, отсутствуют поля: %s", strings.Join(missing, ", "))
 	}
+	hasBlockAuthor := blockColumns["updated_by"]
 	hasCallsigns, err := hasTable(ctx, db, "intercept_callsigns")
 	if err != nil {
 		db.Close()
@@ -178,13 +188,133 @@ func Open(ctx context.Context, path string) (*Source, error) {
 	}
 	return &Source{
 		db: db, hasCatalogUUID: columns["catalog_uuid"], hasSourceMode: columns["source_mode"],
-		hasCallsigns: hasCallsigns, callsignColumns: callsignColumns, hasArchive: hasArchive,
+		hasBlockAuthor: hasBlockAuthor, hasCallsigns: hasCallsigns,
+		callsignColumns: callsignColumns, hasArchive: hasArchive,
 	}, nil
 }
 
 // Close освобождает соединение с базой EAVC, не изменяя её файл.
 func (source *Source) Close() error {
 	return source.db.Close()
+}
+
+// ShiftSnapshot читает состояние смен отдельно от перехватов. Для каждой
+// позиции передаётся не более одной открытой и одной последней закрытой смены:
+// этого достаточно, чтобы Центр восстановил пропущенный переход без дублей.
+func (source *Source) ShiftSnapshot(ctx context.Context, location *time.Location) (application.ShiftSnapshot, error) {
+	if location == nil {
+		location = time.UTC
+	}
+	active, err := source.shiftSessions(ctx, location, false)
+	if err != nil {
+		return application.ShiftSnapshot{}, err
+	}
+	closed, err := source.shiftSessions(ctx, location, true)
+	if err != nil {
+		return application.ShiftSnapshot{}, err
+	}
+	snapshot := application.NormalizeShiftSnapshot(application.ShiftSnapshot{
+		ReadState: application.ShiftReadOK, Active: active, LastClosed: closed,
+	})
+	if err := application.ValidateShiftSnapshot(snapshot); err != nil {
+		return application.ShiftSnapshot{}, fmt.Errorf("проверить состояние смен EAVC: %w", err)
+	}
+	return snapshot, nil
+}
+
+func (source *Source) shiftSessions(ctx context.Context, location *time.Location, closed bool) ([]application.ShiftSession, error) {
+	query := `
+		SELECT id, position_name, uuid, started_at, ended_at
+		FROM intercept_sessions
+		WHERE ended_at IS NULL
+		ORDER BY position_name, julianday(started_at) DESC, id DESC
+		LIMIT ?`
+	if closed {
+		query = `
+			WITH closed_sessions AS (
+				SELECT id, position_name, uuid, started_at, ended_at FROM intercept_sessions WHERE ended_at IS NOT NULL
+				UNION ALL
+				SELECT id, position_name, uuid, started_at, ended_at FROM intercept_sessions_archive WHERE ended_at IS NOT NULL
+			), ranked AS (
+				SELECT id, position_name, uuid, started_at, ended_at,
+					ROW_NUMBER() OVER (
+						PARTITION BY position_name
+						ORDER BY julianday(ended_at) DESC, id DESC
+					) AS position_rank
+				FROM closed_sessions
+			)
+			SELECT id, position_name, uuid, started_at, ended_at
+			FROM ranked WHERE position_rank=1
+			ORDER BY position_name
+			LIMIT ?`
+	}
+	rows, err := source.db.QueryContext(ctx, query, application.MaxShiftSessionsPerSnapshot+1)
+	if err != nil {
+		return nil, fmt.Errorf("прочитать состояние смен EAVC: %w", err)
+	}
+	defer rows.Close()
+	result := make([]application.ShiftSession, 0)
+	activePositions := make(map[string]struct{})
+	for rows.Next() {
+		var session application.ShiftSession
+		var uuid, position, openedRaw string
+		var closedRaw sql.NullString
+		if err := rows.Scan(&session.SessionID, &position, &uuid, &openedRaw, &closedRaw); err != nil {
+			return nil, fmt.Errorf("декодировать состояние смены EAVC: %w", err)
+		}
+		session.SessionUUID = strings.TrimSpace(uuid)
+		session.PositionName = strings.TrimSpace(position)
+		if session.SessionUUID == "" {
+			// Старые базы могли архивировать смену до появления uuid. Клиент не
+			// изменяет EAVC, поэтому создаёт только транспортную стабильную
+			// идентичность из неизменяемых полей старой записи.
+			digest := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", session.SessionID, session.PositionName, openedRaw)))
+			session.SessionUUID = fmt.Sprintf("legacy-%x", digest[:])
+		}
+		openedAt, parseErr := parseEAVCTimestamp(openedRaw, location)
+		if parseErr != nil {
+			return nil, fmt.Errorf("смена %d содержит неверное время открытия: %w", session.SessionID, parseErr)
+		}
+		session.OpenedAt = openedAt
+		if closedRaw.Valid && strings.TrimSpace(closedRaw.String) != "" {
+			closedAt, parseErr := parseEAVCTimestamp(closedRaw.String, location)
+			if parseErr != nil {
+				return nil, fmt.Errorf("смена %d содержит неверное время закрытия: %w", session.SessionID, parseErr)
+			}
+			session.ClosedAt = &closedAt
+		}
+		if !closed {
+			if _, duplicate := activePositions[session.PositionName]; duplicate {
+				return nil, fmt.Errorf("для позиции %q одновременно открыто несколько смен", session.PositionName)
+			}
+			activePositions[session.PositionName] = struct{}{}
+		}
+		result = append(result, session)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("прочитать строки смен EAVC: %w", err)
+	}
+	if len(result) > application.MaxShiftSessionsPerSnapshot {
+		return nil, fmt.Errorf("в EAVC более %d позиций со сменами; снимок не отправлен частично", application.MaxShiftSessionsPerSnapshot)
+	}
+	return result, nil
+}
+
+func parseEAVCTimestamp(value string, location *time.Location) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05"} {
+		var parsed time.Time
+		var err error
+		if layout == time.RFC3339Nano {
+			parsed, err = time.Parse(layout, value)
+		} else {
+			parsed, err = time.ParseInLocation(layout, value, location)
+		}
+		if err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("неподдерживаемая дата %q", value)
 }
 
 // Scan читает изменения в устойчивом порядке updated_at + id.
@@ -285,6 +415,11 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		} else {
 			blocks, deletedBlocks, err := source.readBlocks(ctx, items[index])
 			if err != nil {
+				var contractErr *recordContractError
+				if errors.As(err, &contractErr) {
+					items[index].ContractError = contractErr.Error()
+					continue
+				}
 				return nil, after, err
 			}
 			items[index].Blocks = blocks
@@ -300,12 +435,16 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 }
 
 func (source *Source) readBlocks(ctx context.Context, item application.SourceItem) ([]domain.ContentBlock, []domain.ContentBlock, error) {
-	rows, err := source.db.QueryContext(ctx, `
+	authorExpression := "''"
+	if source.hasBlockAuthor {
+		authorExpression = "COALESCE(updated_by, '')"
+	}
+	rows, err := source.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT uuid, item_uuid, item_id, time_key, day_offset, ord,
-			header, body, text_hash, updated_at, deleted_at
+			header, body, text_hash, updated_at, deleted_at, %s AS updated_by
 		FROM intercept_blocks
 		WHERE item_id=?
-		ORDER BY (deleted_at IS NOT NULL), day_offset, (time_key IS NULL), time_key, ord`, item.Record.ID)
+		ORDER BY (deleted_at IS NOT NULL), day_offset, (time_key IS NULL), time_key, ord`, authorExpression), item.Record.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("прочитать блоки EAVC для записи %d: %w", item.Record.ID, err)
 	}
@@ -314,32 +453,35 @@ func (source *Source) readBlocks(ctx context.Context, item application.SourceIte
 	deletedBlocks := make([]domain.ContentBlock, 0)
 	texts := make([]string, 0)
 	for rows.Next() {
-		var uuid, itemUUID, header, body, storedHash, updatedAt string
+		var uuid, itemUUID, header, body, storedHash, updatedAt, updatedBy string
 		var deletedAt sql.NullString
 		var itemID int64
 		var timeKey sql.NullInt64
 		var dayOffset, order int
 		if err := rows.Scan(&uuid, &itemUUID, &itemID, &timeKey, &dayOffset, &order,
-			&header, &body, &storedHash, &updatedAt, &deletedAt); err != nil {
-			return nil, nil, fmt.Errorf("декодировать блок EAVC для записи %d: %w", item.Record.ID, err)
+			&header, &body, &storedHash, &updatedAt, &deletedAt, &updatedBy); err != nil {
+			return nil, nil, newRecordContractError("декодировать блок EAVC для записи %d: %v", item.Record.ID, err)
 		}
 		if strings.TrimSpace(uuid) == "" || itemID != item.Record.ID ||
 			(strings.TrimSpace(item.Record.UUID) != "" && itemUUID != item.Record.UUID) {
-			return nil, nil, fmt.Errorf("нарушен контракт EAVC: блок записи %d имеет неверную связь с исходным перехватом", item.Record.ID)
+			return nil, nil, newRecordContractError("нарушен контракт EAVC: блок записи %d имеет неверную связь с исходным перехватом", item.Record.ID)
 		}
 		text := strings.TrimSpace(strings.TrimSpace(header) + "\n" + strings.TrimSpace(body))
 		digest := sha256.Sum256([]byte(text))
 		hash := fmt.Sprintf("%x", digest[:])
 		if storedHash != "" && !strings.EqualFold(storedHash, hash) {
-			return nil, nil, fmt.Errorf("нарушен контракт EAVC: хеш блока %s не соответствует его тексту", uuid)
+			return nil, nil, newRecordContractError("нарушен контракт EAVC: хеш блока %s не соответствует его тексту", uuid)
 		}
 		key := strings.TrimSpace(header)
 		if key == "" {
 			key = "без времени"
 		}
 		block := domain.ContentBlock{
-			UUID: uuid, Key: key, Sequence: order, Text: text, Hash: hash,
-			UpdatedAt: updatedAt, DeletedAt: deletedAt.String,
+			UUID: uuid, Key: key, Sequence: order, DayOffset: dayOffset, Text: text, Hash: hash,
+			UpdatedBy: updatedBy, UpdatedAt: updatedAt, DeletedAt: deletedAt.String,
+		}
+		if timeKey.Valid {
+			block.TimeKey = int(timeKey.Int64)
 		}
 		if deletedAt.Valid && strings.TrimSpace(deletedAt.String) != "" {
 			deletedBlocks = append(deletedBlocks, block)
@@ -353,7 +495,7 @@ func (source *Source) readBlocks(ctx context.Context, item application.SourceIte
 		return nil, nil, fmt.Errorf("прочитать блоки EAVC для записи %d: %w", item.Record.ID, err)
 	}
 	if normalizeSnapshot(strings.Join(texts, "\n")) != normalizeSnapshot(item.Content) {
-		return nil, nil, fmt.Errorf("нарушен контракт EAVC: текст записи %d и таблица intercept_blocks временно расходятся", item.Record.ID)
+		return nil, nil, newRecordContractError("нарушен контракт EAVC: текст записи %d и таблица intercept_blocks расходятся", item.Record.ID)
 	}
 	return blocks, deletedBlocks, nil
 }
@@ -364,6 +506,7 @@ func legacyArchiveBlocks(item application.SourceItem) []domain.ContentBlock {
 		seed := fmt.Sprintf("%s|%d|%d|%s", item.Record.UUID, item.Record.ID, index, blocks[index].Hash)
 		digest := sha256.Sum256([]byte(seed))
 		blocks[index].UUID = fmt.Sprintf("legacy-%x", digest[:16])
+		blocks[index].UpdatedBy = item.UpdatedBy
 		blocks[index].UpdatedAt = item.Record.UpdatedAt
 	}
 	return blocks

@@ -237,7 +237,13 @@ func formatBlock(event domain.Event, block domain.ContentBlock, delivery domain.
 		if line.Time {
 			transcript.WriteString("<b>")
 		}
+		if line.InternalTime {
+			transcript.WriteString("(")
+		}
 		transcript.WriteString(escapeText(line.Text))
+		if line.InternalTime {
+			transcript.WriteString(")")
+		}
 		if line.Time {
 			transcript.WriteString("</b>")
 		}

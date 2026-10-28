@@ -89,8 +89,9 @@ func TestVerifyProbeRejectsTamperingAndReplay(t *testing.T) {
 	packet := application.IncomingPacket{
 		ProbeClientID: "textile", ProbeID: "018f22d2-3f5c-7abc-8123-0123456789ab",
 		ProbeSentAt: probeAt, SentAt: probeAt.Add(10 * time.Second),
+		ProbeShift: application.EmptyShiftSnapshot(),
 	}
-	packet.ProbeMAC = probeMAC(key, packet.ProbeClientID, packet.ProbeID, packet.ProbeSentAt.Format(time.RFC3339))
+	packet.ProbeMAC = probeMAC(key, packet.ProbeClientID, packet.ProbeID, packet.ProbeSentAt.Format(time.RFC3339), packet.ProbeShift)
 	if !VerifyProbe(packet, key) {
 		t.Fatal("подлинный свежий контрольный пакет отклонён")
 	}
@@ -98,6 +99,17 @@ func TestVerifyProbeRejectsTamperingAndReplay(t *testing.T) {
 	tampered.ProbeClientID = "selidovo"
 	if VerifyProbe(tampered, key) {
 		t.Fatal("подмена точки не обнаружена")
+	}
+	tamperedShift := packet
+	tamperedShift.ProbeShift = application.ShiftSnapshot{
+		ReadState: application.ShiftReadOK,
+		Active: []application.ShiftSession{{
+			SessionID: 1, SessionUUID: "session-1", PositionName: "Позиция",
+			OpenedAt: probeAt.Add(-time.Hour),
+		}},
+	}
+	if VerifyProbe(tamperedShift, key) {
+		t.Fatal("подмена состояния смены не обнаружена")
 	}
 	replayed := packet
 	replayed.SentAt = probeAt.Add(3 * time.Minute)

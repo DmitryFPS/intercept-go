@@ -178,8 +178,11 @@ func TestServerReceiverRecognizesTransportProbe(t *testing.T) {
 	probeID := "018f22d2-3f5c-7abc-8123-0123456789ab"
 	key := make([]byte, 32)
 	sentAt := time.Now().UTC().Truncate(time.Second)
-	probe := probePayload{Schema: probeSchema, ClientID: "textile", ProbeID: probeID, SentAt: sentAt.Format(time.RFC3339)}
-	probe.MAC = probeMAC(key, probe.ClientID, probe.ProbeID, probe.SentAt)
+	probe := probePayload{
+		Schema: probeSchema, ClientID: "textile", ProbeID: probeID,
+		SentAt: sentAt.Format(time.RFC3339), Shift: application.EmptyShiftSnapshot(),
+	}
+	probe.MAC = probeMAC(key, probe.ClientID, probe.ProbeID, probe.SentAt, probe.Shift)
 	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch {
 		case strings.HasSuffix(request.URL.Path, "/getUpdates"):

@@ -70,6 +70,7 @@ func TestClientServiceDoesNotCountBoundaryReplayAsNewEvent(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 23, 20, 0, 0, 0, time.UTC)
+	currentTime := now
 	item := SourceItem{
 		Record: domain.SourceRecord{
 			ID: 42, UUID: "source-42", UpdatedAt: "2026-10-23 20:00:00",
@@ -81,11 +82,12 @@ func TestClientServiceDoesNotCountBoundaryReplayAsNewEvent(t *testing.T) {
 	service := ClientService{
 		ClientID: "textile", Source: &replaySource{item: item}, Queue: queue, State: queue,
 		Sender: &memorySender{}, KeyID: "key", Key: make([]byte, 32), BatchSize: 10,
-		CatchUpExisting: true, Now: func() time.Time { return now },
+		CatchUpExisting: true, Now: func() time.Time { return currentTime },
 	}
 	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
 		t.Fatalf("первая версия не поставлена в очередь: queued=%d err=%v", queued, err)
 	}
+	currentTime = currentTime.Add(10 * time.Minute)
 	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
 		t.Fatalf("точный повтор ошибочно посчитан новым: queued=%d err=%v", queued, err)
 	}
@@ -94,10 +96,8 @@ func TestClientServiceDoesNotCountBoundaryReplayAsNewEvent(t *testing.T) {
 	}
 }
 
-// Добавление UUID блоков в rc82 не должно менять прежний отпечаток rc81.
-// Иначе после обновления граничное перечитывание возвращает старые записи в
-// «Не отправлены старше 30 минут» как будто это новые редакции.
-func TestClientServiceBlockMetadataKeepsRC81ContentDigest(t *testing.T) {
+// Новый базовый Клиент всегда создаёт только строгий v2-отпечаток.
+func TestClientServiceUsesStrictCurrentDigest(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 27, 14, 0, 0, 0, time.UTC)
 	base := SourceItem{
@@ -106,9 +106,17 @@ func TestClientServiceBlockMetadataKeepsRC81ContentDigest(t *testing.T) {
 		Content:  "10.39\n-Первый блок", Mode: domain.SourceModeNormal, ObservedAt: now,
 	}
 	service := ClientService{ClientID: "textile", Now: func() time.Time { return now }}
-	legacy, err := service.newEvent(base)
+	current, err := service.newEvent(base)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if current.ContentDigestVersion != domain.ContentDigestVersionCurrent {
+		t.Fatalf("Клиент не указал усиленный контракт digest: %#v", current)
+	}
+	legacy := current
+	legacy.ContentDigestVersion = ""
+	if err := legacy.ValidateContentDigest(); err == nil {
+		t.Fatal("пакет старого контракта без версии ошибочно принят")
 	}
 	withUUID := base
 	withUUID.Blocks = []domain.ContentBlock{{UUID: "01a17-block", Key: "10.39", Sequence: 0, Text: base.Content, Hash: "hash", UpdatedAt: "2026-10-27T14:00:00Z"}}
@@ -116,8 +124,8 @@ func TestClientServiceBlockMetadataKeepsRC81ContentDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if modern.ContentDigest != legacy.ContentDigest {
-		t.Fatalf("UUID блока изменил отпечаток rc81: %s != %s", modern.ContentDigest, legacy.ContentDigest)
+	if modern.ContentDigest == current.ContentDigest {
+		t.Fatal("v2 не связал структуру временного блока")
 	}
 }
 
@@ -144,13 +152,85 @@ func TestClientServiceCreatesIndependentEventForEveryTimeBlock(t *testing.T) {
 		t.Fatalf("два блока не стали двумя событиями: queued=%d events=%#v err=%v", queued, queue.events, err)
 	}
 	if queue.events[0].ID == queue.events[1].ID ||
-		queue.events[0].SourceBlockUUID != "block-1846" || queue.events[1].SourceBlockUUID != "block-1850" ||
+		!strings.HasPrefix(queue.events[0].SourceBlockUUID, "time:d0:1846:") ||
+		!strings.HasPrefix(queue.events[1].SourceBlockUUID, "time:d0:1850:") ||
 		len(queue.events[0].Blocks) != 1 || len(queue.events[1].Blocks) != 1 ||
 		queue.events[0].Content == queue.events[1].Content {
 		t.Fatalf("идентичность блоков смешалась: %#v", queue.events)
 	}
 	if queue.events[0].Source.UUID != "record-375" || queue.events[1].Source.UUID != "record-375" {
 		t.Fatalf("исходная запись EAVC потеряна: %#v", queue.events)
+	}
+}
+
+func TestClientServiceKeepsUnchangedBlockDigestAcrossBoundaryReplayAndSiblingEdit(t *testing.T) {
+	t.Parallel()
+	currentTime := time.Date(2026, 10, 28, 10, 10, 0, 0, time.UTC)
+	item := SourceItem{
+		Record:   domain.SourceRecord{ID: 700, UUID: "record-700", UpdatedAt: "2026-10-28 10:05:00"},
+		Position: domain.Position{CatalogUUID: "catalog-1", UnitName: "Игровая команда"},
+		Mode:     domain.SourceModeNormal, Content: "10.00\n-Первый\n10.05\n-Второй", ObservedAt: currentTime,
+		Blocks: []domain.ContentBlock{
+			{UUID: "block-a", Text: "10.00\n-Первый", UpdatedAt: "2026-10-28 10:00:00"},
+			{UUID: "block-b", Sequence: 1, Text: "10.05\n-Второй", UpdatedAt: "2026-10-28 10:05:00"},
+		},
+	}
+	service := ClientService{ClientID: "textile", Now: func() time.Time { return currentTime }}
+	beforePlan := planSourceTimeBlocks(item, SourceTimeStateRecord{}, false, currentTime)
+	if beforePlan.Conflict != nil {
+		t.Fatal(beforePlan.Conflict)
+	}
+	before, err := service.newEvents(beforePlan.Item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentTime = currentTime.Add(10 * time.Minute)
+	item.ObservedAt = currentTime
+	item.Record.UpdatedAt = "2026-10-28 10:15:00"
+	item.Content = "10.00\n-Первый\n10.05\n-Второй исправлен"
+	item.Blocks[1].Text = "10.05\n-Второй исправлен"
+	item.Blocks[1].UpdatedAt = item.Record.UpdatedAt
+	afterPlan := planSourceTimeBlocks(item, beforePlan.Record, true, currentTime)
+	if afterPlan.Conflict != nil {
+		t.Fatal(afterPlan.Conflict)
+	}
+	after, err := service.newEvents(afterPlan.Item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before[0].SourceAt != after[0].SourceAt || before[0].ContentDigest != after[0].ContentDigest {
+		t.Fatalf("редакция соседа изменила неизменный block-a: before=%#v after=%#v", before[0], after[0])
+	}
+	if before[1].SourceAt == after[1].SourceAt || before[1].ContentDigest == after[1].ContentDigest {
+		t.Fatalf("настоящая редакция block-b не изменила его версию: before=%#v after=%#v", before[1], after[1])
+	}
+}
+
+func TestClientServiceCreatesOneEventForEveryMarkedTimeHeader(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 28, 10, 30, 0, 0, time.UTC)
+	raw := "10.15\n-Начало. (7)\n10.18#\n-Уточнение. (7)\n10.28#1\n-Финиш. (7)"
+	item := SourceItem{
+		Record:   domain.SourceRecord{ID: 501, UUID: "record-501", UpdatedAt: "2026-10-28 10:30:00"},
+		Position: domain.Position{UnitName: "Игровая команда"}, Mode: domain.SourceModeNormal,
+		Content: raw, ObservedAt: now,
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-marked", Key: "10.15", Text: raw, Hash: "source-hash", UpdatedAt: "2026-10-28 10:30:00",
+		}},
+	}
+	service := ClientService{ClientID: "textile", Now: func() time.Time { return now }}
+	events, err := service.newEvents(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("каждая строка времени должна стать событием: %#v", events)
+	}
+	for index, canonical := range []string{"10:15", "10:18", "10:28"} {
+		if len(events[index].Blocks) != 1 || !strings.HasPrefix(events[index].SourceBlockUUID, "time:d0:"+strings.ReplaceAll(canonical, ":", "")+":") ||
+			!strings.HasPrefix(events[index].Content, canonical+"\n") || strings.Contains(strings.Split(events[index].Content, "\n")[0], "#") {
+			t.Fatalf("событие %d не нормализовано: %#v", index, events[index])
+		}
 	}
 }
 
@@ -212,52 +292,6 @@ func TestClientServiceSuppressesSeenBlocksAfterSessionArchive(t *testing.T) {
 	}
 }
 
-// После обновления с цельной модели rc87 текущая версия уже была доставлена.
-// Клиент должен молча создать поблочные отпечатки, а при следующей редакции
-// поставить в очередь только действительно изменённый блок.
-func TestClientServiceMigratesLegacyRecordWithoutExpiredReplay(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 27, 19, 34, 0, 0, time.UTC)
-	item := SourceItem{
-		Record:   domain.SourceRecord{ID: 386, UUID: "record-386", UpdatedAt: "2026-10-27 15:59:29"},
-		Position: domain.Position{UnitName: "1 мб 155 омбр"}, Mode: domain.SourceModeNormal,
-		Content: "15.57\n-Первый блок\n15.59\n-Второй блок", ObservedAt: now,
-		Blocks: []domain.ContentBlock{
-			{UUID: "block-a", Key: "15.57", Text: "15.57\n-Первый блок", UpdatedAt: "2026-10-27 15:57:00"},
-			{UUID: "block-b", Key: "15.59", Sequence: 1, Text: "15.59\n-Второй блок", UpdatedAt: "2026-10-27 15:59:29"},
-		},
-	}
-	queue := newMemoryClientState()
-	service := ClientService{
-		ClientID: "textile", Source: &replaySource{item: item}, Queue: queue, State: queue,
-		Sender: &memorySender{}, KeyID: "key", Key: make([]byte, 32), BatchSize: 10,
-		CatchUpExisting: true, Now: func() time.Time { return now },
-	}
-	legacy, err := service.newEvent(item)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if inserted, err := queue.Enqueue(context.Background(), legacy); err != nil || !inserted {
-		t.Fatalf("не создана исходная запись rc87: inserted=%v err=%v", inserted, err)
-	}
-	queue.states[legacy.ID] = "acknowledged"
-	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 || len(queue.events) != 1 {
-		t.Fatalf("старая цельная версия переиздана блоками: queued=%d events=%d err=%v", queued, len(queue.events), err)
-	}
-
-	source := service.Source.(*replaySource)
-	source.item.Record.UpdatedAt = "2026-10-27 19:35:00"
-	source.item.Content = "15.57\n-Первый блок исправлен\n15.59\n-Второй блок"
-	source.item.Blocks[0].Text = "15.57\n-Первый блок исправлен"
-	source.item.Blocks[0].UpdatedAt = "2026-10-27 19:35:00"
-	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
-		t.Fatalf("редакция после миграции не выделила один блок: queued=%d err=%v", queued, err)
-	}
-	if len(queue.events) != 2 || queue.events[1].SourceBlockUUID != "block-a" {
-		t.Fatalf("после миграции отправлен неверный набор: %#v", queue.events)
-	}
-}
-
 func TestClientServiceQueuesOnlyChangedBlockAndDeletionTombstone(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 27, 19, 0, 0, 0, time.UTC)
@@ -299,7 +333,7 @@ func TestClientServiceQueuesOnlyChangedBlockAndDeletionTombstone(t *testing.T) {
 		t.Fatalf("удаление блока не стало одним надгробием: queued=%d err=%v", queued, err)
 	}
 	last := queue.events[len(queue.events)-1]
-	if !last.SourceBlockDeleted || last.SourceBlockUUID != "block-a" || last.Content != "" || len(last.ActiveBlockUUIDs) != 1 {
+	if !last.SourceBlockDeleted || !strings.HasPrefix(last.SourceBlockUUID, "time:d0:1800:") || last.Content != "" || !last.HasActiveBlocks {
 		t.Fatalf("неверное событие удаления: %#v", last)
 	}
 }
@@ -509,11 +543,28 @@ func (sender *memorySender) Acknowledgements(_ context.Context, offset int64) ([
 }
 
 type memoryClientState struct {
-	events    []domain.Event
-	states    map[string]string
-	cursors   map[string]Cursor
-	values    map[string]string
-	baselines map[string]bool
+	events     []domain.Event
+	states     map[string]string
+	cursors    map[string]Cursor
+	values     map[string]string
+	baselines  map[string]bool
+	timeStates map[string]SourceTimeStateRecord
+	timeSaves  int
+}
+
+func (state *memoryClientState) LoadSourceTimeState(
+	_ context.Context, sourceKey string,
+) (SourceTimeStateRecord, bool, error) {
+	record, exists := state.timeStates[sourceKey]
+	return record, exists, nil
+}
+
+func (state *memoryClientState) SaveSourceTimeState(
+	_ context.Context, sourceKey string, record SourceTimeStateRecord,
+) error {
+	state.timeStates[sourceKey] = record
+	state.timeSaves++
+	return nil
 }
 
 func (state *memoryClientState) SeedBlockBaselinesFromLegacy(
@@ -567,7 +618,7 @@ func (state *memoryClientState) SeedArchiveBaselinesFromSeenBlocks(
 func newMemoryClientState() *memoryClientState {
 	return &memoryClientState{
 		states: make(map[string]string), cursors: make(map[string]Cursor), values: make(map[string]string),
-		baselines: make(map[string]bool),
+		baselines: make(map[string]bool), timeStates: make(map[string]SourceTimeStateRecord),
 	}
 }
 

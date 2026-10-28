@@ -123,20 +123,26 @@ func TestTransportInboxQuarantinesPoisonAndProcessesFollowingPacket(t *testing.T
 		SourceAt: now, ExpiresAt: now.Add(30 * time.Minute),
 		Source:   domain.SourceRecord{ID: 1, UUID: "source-valid"},
 		Position: domain.Position{UnitName: "подразделение"}, Mode: domain.SourceModeNormal,
-		Content: "текст", ContentDigest: "digest-valid",
+		Content: "текст", ContentDigestVersion: domain.ContentDigestVersionCurrent,
 	}
+	event.ContentDigest = event.CanonicalContentDigest()
 	envelope, err := protocol.Seal(event, client.KeyID, key, now, bytes.NewReader(make([]byte, 12)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	validPayload, _ := json.Marshal(envelope)
+	legacyEnvelope := envelope
+	legacyEnvelope.Schema = "intercept-envelope/v1"
+	legacyPayload, _ := json.Marshal(legacyEnvelope)
 	packets := []application.IncomingPacket{
 		{UpdateID: 1, SenderBotID: 11, SenderBotUsername: "station_bot", ChatID: -1001, ThreadID: 9,
 			MessageID: 101, SentAt: now, ReceivedAt: now, Payload: []byte("повреждено")},
 		{UpdateID: 2, SenderBotID: 11, SenderBotUsername: "station_bot", ChatID: -1001, ThreadID: 9,
-			MessageID: 102, SentAt: now, ReceivedAt: now, Payload: validPayload},
+			MessageID: 102, SentAt: now, ReceivedAt: now, Payload: legacyPayload},
+		{UpdateID: 3, SenderBotID: 11, SenderBotUsername: "station_bot", ChatID: -1001, ThreadID: 9,
+			MessageID: 103, SentAt: now, ReceivedAt: now, Payload: validPayload},
 	}
-	if err := store.PersistTransportBatch(ctx, serverOffsetName, 3, packets); err != nil {
+	if err := store.PersistTransportBatch(ctx, serverOffsetName, 4, packets); err != nil {
 		t.Fatal(err)
 	}
 
@@ -172,7 +178,7 @@ func TestTransportInboxQuarantinesPoisonAndProcessesFollowingPacket(t *testing.T
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		stats, statsErr := store.Stats(context.Background())
-		if statsErr == nil && stats.TransportInbox == 0 && stats.Events == 1 && stats.Rejected == 1 {
+		if statsErr == nil && stats.TransportInbox == 0 && stats.Events == 1 && stats.Rejected == 2 {
 			cancel()
 			<-done
 			return

@@ -15,8 +15,10 @@ import (
 	"intercept/internal/domain"
 )
 
-// SchemaV1 обозначает текущий формат зашифрованного транспортного конверта.
-const SchemaV1 = "intercept-envelope/v1"
+// SchemaV2 — новый базовый транспортный контракт после перехода на
+// самостоятельные временные блоки. Старые пакеты намеренно несовместимы:
+// Центр помещает их в карантин и продолжает разбирать следующие сообщения.
+const SchemaV2 = "intercept-envelope/v2"
 
 // Envelope — безопасный внешний формат файла, передаваемого через Telegram.
 type Envelope struct {
@@ -33,6 +35,9 @@ type Envelope struct {
 func Seal(event domain.Event, keyID string, key []byte, now time.Time, random io.Reader) (Envelope, error) {
 	if err := event.Validate(); err != nil {
 		return Envelope{}, fmt.Errorf("проверить событие: %w", err)
+	}
+	if err := event.ValidateContentDigest(); err != nil {
+		return Envelope{}, fmt.Errorf("проверить транспортный контракт: %w", err)
 	}
 	if len(key) != 32 {
 		return Envelope{}, errors.New("ключ пакета должен содержать 32 байта")
@@ -62,7 +67,7 @@ func Seal(event domain.Event, keyID string, key []byte, now time.Time, random io
 	}
 
 	envelope := Envelope{
-		Schema: SchemaV1, ClientID: event.ClientID, EventID: event.ID,
+		Schema: SchemaV2, ClientID: event.ClientID, EventID: event.ID,
 		KeyID: keyID, CreatedAt: now.UTC(),
 		Nonce: base64.RawStdEncoding.EncodeToString(nonce),
 	}
@@ -73,8 +78,11 @@ func Seal(event domain.Event, keyID string, key []byte, now time.Time, random io
 
 // Open проверяет подлинность конверта и возвращает событие.
 func Open(envelope Envelope, key []byte) (domain.Event, error) {
-	if envelope.Schema != SchemaV1 {
-		return domain.Event{}, fmt.Errorf("неподдерживаемая схема %q", envelope.Schema)
+	if envelope.Schema != SchemaV2 {
+		return domain.Event{}, fmt.Errorf(
+			"несовместимая схема транспортного пакета %q, требуется %q",
+			envelope.Schema, SchemaV2,
+		)
 	}
 	if len(key) != 32 {
 		return domain.Event{}, errors.New("ключ пакета должен содержать 32 байта")

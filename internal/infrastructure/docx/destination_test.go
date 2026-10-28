@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,8 +16,38 @@ import (
 	"testing"
 	"time"
 
+	"intercept/internal/application"
 	"intercept/internal/domain"
 )
+
+func TestWordStateRejectsOversizedFileBeforeReadingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "word-state.json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxWordStateBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadState(path); err == nil || !application.IsPermanentDeliveryError(err) {
+		t.Fatalf("чрезмерное состояние Word не изолировано: %v", err)
+	}
+}
+
+func TestWordStateLimitsActiveBlocks(t *testing.T) {
+	current := state{Blocks: make(map[string]blockRecord, maxWordActiveBlocks+1)}
+	for index := 0; index <= maxWordActiveBlocks; index++ {
+		current.Blocks[fmt.Sprintf("block-%d", index)] = blockRecord{}
+	}
+	if err := enforceWordActiveBlockLimit(current, maxWordActiveBlocks); err == nil ||
+		!application.IsPermanentDeliveryError(err) {
+		t.Fatalf("чрезмерное число активных блоков Word не отклонено: %v", err)
+	}
+}
 
 // Шаблон в поставке сохраняет оформление предоставленного пользователем файла,
 // а метки заменяются фрагментами в том же порядке.
@@ -131,6 +162,35 @@ func TestBuildUsesLocalCallsignNumberAndEAVCDescription(t *testing.T) {
 	}
 }
 
+func TestBuildShowsMarkedTimesWithoutTelegramParentheses(t *testing.T) {
+	t.Parallel()
+	template := filepath.Join("..", "..", "..", "assets", "word_template.docx")
+	payload, err := Build(template, Document{
+		Unit: "Игровая команда", Frequency: "100.100", GroupCode: "GAME-1", Network: "Тест",
+		Date:      time.Date(2026, 10, 28, 10, 45, 0, 0, time.UTC),
+		Callsigns: []domain.Callsign{{Code: "7", Label: "Игрок"}},
+		Content:   "10.15\n-Начало раунда. (7)\n10.18#\n-Уточнение. (7)\n10.28#1\n-Финиш. (7)",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "marked-times.docx")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runs := documentRuns(t, documentXML(t, path))
+	for _, expected := range []string{"10:15", "10:18", "10:28"} {
+		if !slices.Contains(runs, expected) {
+			t.Fatalf("в Word отсутствует %q: %#v", expected, runs)
+		}
+	}
+	for _, unexpected := range []string{"(10:18)", "(10:28)", "10.18#", "10.28#1"} {
+		if slices.Contains(runs, unexpected) {
+			t.Fatalf("в Word осталось Telegram/служебное оформление %q: %#v", unexpected, runs)
+		}
+	}
+}
+
 // Каждый временной UUID-блок получает самостоятельный Word-документ, а
 // повторная обработка не порождает копий.
 func TestDestinationBuildsOneDocumentPerBlockWithoutDuplicates(t *testing.T) {
@@ -196,8 +256,8 @@ func TestDestinationDeletesOnlyScopedWordBlock(t *testing.T) {
 	event := domain.Event{
 		ClientID: "textile", Source: domain.SourceRecord{UUID: "source-1"},
 		SourceBlockUUID: "block-a", SourceBlockDeleted: true,
-		ActiveBlockUUIDs: []string{"block-b"},
-		Blocks:           []domain.ContentBlock{{UUID: "block-a", DeletedAt: "2026-10-27 19:00:00"}},
+		HasActiveBlocks: true,
+		Blocks:          []domain.ContentBlock{{UUID: "block-a", DeletedAt: "2026-10-27 19:00:00"}},
 	}
 	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
 		t.Fatal(err)
@@ -209,8 +269,336 @@ func TestDestinationDeletesOnlyScopedWordBlock(t *testing.T) {
 		t.Fatalf("соседний документ удалён: %v", err)
 	}
 	current, err := loadState(statePath)
-	if err != nil || len(current.Blocks) != 1 || current.Blocks["textile|source-1|block-b"].Filename != "second.docx" {
+	deleted := current.Blocks["textile|source-1|block-a"]
+	if err != nil || len(current.Blocks) != 2 || !deleted.Tombstone || deleted.SourceVersion != "2026-10-27 19:00:00" ||
+		current.Blocks["textile|source-1|block-b"].Filename != "second.docx" {
 		t.Fatalf("состояние соседнего блока повреждено: %#v err=%v", current, err)
+	}
+	numbers, err := StateNumbers(statePath)
+	if err != nil || !reflect.DeepEqual(numbers, []int{2}) {
+		t.Fatalf("надгробие ошибочно попало в активные документы: numbers=%v err=%v", numbers, err)
+	}
+}
+
+func TestDestinationWordTombstoneRejectsLateEditAndAllowsNewerRestore(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	destination := Destination{
+		TemplatePath: template, Folder: filepath.Join(root, "out"),
+		StatePath: filepath.Join(root, "state", "word.json"), Network: "Тест", Prefix: "GAME-",
+	}
+	created := time.Date(2026, 10, 28, 10, 0, 0, 1, time.UTC)
+	event := domain.Event{
+		ID: "v1", ClientID: "point-01", CreatedAt: created, SourceAt: created,
+		Source: domain.SourceRecord{UUID: "source-1"}, Position: domain.Position{UnitName: "Игровая команда"},
+		SourceBlockUUID: "block-1", HasActiveBlocks: true,
+		Blocks: []domain.ContentBlock{{UUID: "block-1", Text: "10.00\n-Старт", UpdatedAt: "2026-10-28 10:00:00"}},
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	deletion := event
+	deletion.ID = "v3-delete"
+	deletion.CreatedAt = created.Add(3 * time.Minute)
+	deletion.SourceAt = deletion.CreatedAt
+	deletion.SourceBlockDeleted = true
+	deletion.HasActiveBlocks = false
+	deletion.Blocks = []domain.ContentBlock{{UUID: "block-1", DeletedAt: "2026-10-28 10:03:00"}}
+	if err := destination.Deliver(context.Background(), deletion, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	stale := event
+	stale.ID = "v2-late"
+	stale.CreatedAt = created.Add(2 * time.Minute)
+	stale.SourceAt = stale.CreatedAt
+	stale.Blocks[0].Text = "10.00\n-Старая запоздалая редакция"
+	stale.Blocks[0].UpdatedAt = "2026-10-28 10:02:00"
+	if err := destination.Deliver(context.Background(), stale, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx")); len(files) != 0 {
+		t.Fatalf("устаревшая версия воскресила Word: %v", files)
+	}
+	restored := event
+	restored.ID = "v4-restore"
+	restored.CreatedAt = created.Add(4 * time.Minute)
+	restored.SourceAt = restored.CreatedAt
+	restored.Blocks[0].Text = "10.00\n-Новая версия после восстановления источника"
+	restored.Blocks[0].UpdatedAt = "2026-10-28 10:04:00"
+	if err := destination.Deliver(context.Background(), restored, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx"))
+	if len(files) != 1 || !strings.Contains(documentXML(t, files[0]), "Новая версия после восстановления источника") {
+		t.Fatalf("новая версия не восстановила Word: %v", files)
+	}
+	if err := destination.Deliver(context.Background(), deletion, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := filepath.Glob(filepath.Join(destination.Folder, "*.docx")); len(files) != 1 {
+		t.Fatalf("позднее удаление откатило новую версию: %v", files)
+	}
+	current, err := loadState(destination.StatePath)
+	record := current.Blocks["point-01|source-1|block-1"]
+	if err != nil || record.Tombstone || record.SourceVersion != "2026-10-28 10:04:00" {
+		t.Fatalf("неверное состояние Word после restore: %#v err=%v", record, err)
+	}
+}
+
+func TestDestinationVersionedWordStateRejectsLateEditAndUnscopedCleanup(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	destination := Destination{
+		TemplatePath: template, Folder: filepath.Join(root, "out"),
+		StatePath: filepath.Join(root, "state", "word.json"), Network: "Тест", Prefix: "GAME-",
+	}
+	base := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	currentEvent := domain.Event{
+		ID: "v3", ClientID: "point-01", CreatedAt: base.Add(3 * time.Minute), SourceAt: base.Add(3 * time.Minute),
+		Source: domain.SourceRecord{UUID: "source-1"}, Position: domain.Position{UnitName: "Игровая команда"},
+		SourceBlockUUID: "block-1",
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Text: "10.03\n-Актуальная v3", UpdatedAt: "2026-10-28 10:03:00",
+		}},
+	}
+	if err := destination.Deliver(context.Background(), currentEvent, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := loadState(destination.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "point-01|source-1|block-1"
+	record := legacy.Blocks[key]
+	record.SourceVersion = "2026-10-28 10:03:00"
+	record.SourceEventAt = base.Add(3 * time.Minute)
+	record.UpdatedAt = base.Add(3 * time.Minute)
+	legacy.Blocks[key] = record
+	if err := saveState(destination.StatePath, legacy); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(destination.Folder, record.Filename)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := currentEvent
+	stale.ID = "v2-late"
+	stale.CreatedAt = base.Add(2 * time.Minute)
+	stale.SourceAt = stale.CreatedAt
+	stale.Blocks[0].UpdatedAt = "2026-10-28 10:02:00"
+	stale.Blocks[0].Text = "10.02\n-Старая v2"
+	if err := destination.Deliver(context.Background(), stale, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	afterEdit, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, afterEdit) {
+		t.Fatalf("запоздалая rc90-правка перезаписала Word: changed=%v err=%v", !bytes.Equal(before, afterEdit), err)
+	}
+	cleanup := stale
+	cleanup.ID = "legacy-cleanup-v2"
+	cleanup.SourceBlockUUID = ""
+	cleanup.Blocks = nil
+	cleanup.Source.UpdatedAt = "2026-10-28 10:02:00"
+	if err := destination.Deliver(context.Background(), cleanup, domain.PlannedDelivery{
+		Decision: domain.RouteDecision{Action: domain.RouteSkip},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("запоздалый unscoped cleanup удалил актуальный Word: %v", err)
+	}
+}
+
+func TestDestinationLegacyWordStateAcceptsNewBacklogRevisionOlderThanLocalWrite(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	destination := Destination{
+		TemplatePath: template, Folder: filepath.Join(root, "out"),
+		StatePath: filepath.Join(root, "state", "word.json"), Network: "Тест", Prefix: "GAME-",
+	}
+	base := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	initial := domain.Event{
+		ID: "v1", ClientID: "point-01", CreatedAt: base, SourceAt: base,
+		Source:   domain.SourceRecord{UUID: "source-1", UpdatedAt: "2026-10-28 10:00:00"},
+		Position: domain.Position{UnitName: "Игровая команда"}, SourceBlockUUID: "block-1",
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Text: "10.00\n-Первая редакция", UpdatedAt: "2026-10-28 10:00:00",
+		}},
+	}
+	if err := destination.Deliver(context.Background(), initial, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := loadState(destination.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "point-01|source-1|block-1"
+	record := legacy.Blocks[key]
+	record.SourceVersion = ""
+	record.SourceEventAt = time.Time{}
+	record.UpdatedAt = base.Add(2 * time.Hour)
+	legacy.Blocks[key] = record
+	if err := saveState(destination.StatePath, legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	backlog := initial
+	backlog.ID = "backlog-v2"
+	backlog.CreatedAt = base.Add(5 * time.Minute)
+	backlog.SourceAt = backlog.CreatedAt
+	backlog.Source.UpdatedAt = "2026-10-28 10:05:00"
+	backlog.Blocks[0].UpdatedAt = "2026-10-28 10:05:00"
+	backlog.Blocks[0].Text = "10.00\n-Новая редакция из очереди"
+	if err := destination.Deliver(context.Background(), backlog, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := loadState(destination.StatePath)
+	record = current.Blocks[key]
+	if err != nil || record.SourceVersion != "2026-10-28 10:05:00" || !record.SourceEventAt.Equal(backlog.CreatedAt) {
+		t.Fatalf("истинная Word-ревизия backlog не закреплена: %#v err=%v", record, err)
+	}
+	path := filepath.Join(destination.Folder, record.Filename)
+	if !strings.Contains(documentXML(t, path), "Новая редакция из очереди") {
+		t.Fatal("новая backlog-редакция не перезаписала legacy Word")
+	}
+}
+
+func TestWordStateBoundsSourceTombstones(t *testing.T) {
+	t.Parallel()
+	current := state{Blocks: make(map[string]blockRecord)}
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	for index := 0; index < 4100; index++ {
+		current.Blocks[fmt.Sprintf("block-%04d", index)] = blockRecord{
+			Tombstone: true, UpdatedAt: base.Add(time.Duration(index) * time.Second),
+		}
+	}
+	compactWordTombstones(&current)
+	if len(current.Blocks) != 4096 {
+		t.Fatalf("надгробия Word не ограничены: %d", len(current.Blocks))
+	}
+	if _, exists := current.Blocks["block-0000"]; exists {
+		t.Fatal("самое старое Word-надгробие не вытеснено")
+	}
+}
+
+func TestWordRecordCleanupRejectsDelayedScopedEventAndAllowsNewerRevision(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	template := filepath.Join(root, "template.docx")
+	createTemplate(t, template)
+	destination := Destination{
+		TemplatePath: template, Folder: filepath.Join(root, "out"),
+		StatePath: filepath.Join(root, "state", "word.json"), Network: "Тест", Prefix: "GAME-",
+	}
+	base := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	event := domain.Event{
+		ID: "v1", ClientID: "point-01", CreatedAt: base, SourceAt: base,
+		Source:   domain.SourceRecord{UUID: "source-1", UpdatedAt: "2026-10-28 10:00:00"},
+		Position: domain.Position{UnitName: "Игровая команда"}, SourceBlockUUID: "block-1",
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Text: "10.00\n-Первая версия", UpdatedAt: "2026-10-28 10:00:00",
+		}},
+	}
+	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	cleanup := event
+	cleanup.ID = "v3-cleanup"
+	cleanup.CreatedAt = base.Add(3 * time.Minute)
+	cleanup.SourceAt = cleanup.CreatedAt
+	cleanup.Source.UpdatedAt = "2026-10-28 10:03:00"
+	cleanup.SourceBlockUUID = ""
+	cleanup.Blocks = nil
+	if err := destination.Deliver(context.Background(), cleanup, domain.PlannedDelivery{
+		Decision: domain.RouteDecision{Action: domain.RouteSkip},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Поблочные надгробия ограничены 4096, но удаление всей записи — отдельный
+	// долговечный барьер и не должно исчезнуть вместе с ними.
+	compacted, err := loadState(destination.StatePath)
+	for index := 0; index < 4100; index++ {
+		compacted.Blocks[fmt.Sprintf("other|record-%04d", index)] = blockRecord{
+			Tombstone: true, UpdatedAt: base.Add(time.Duration(index) * time.Second),
+		}
+	}
+	if err := saveState(destination.StatePath, compacted); err != nil {
+		t.Fatal(err)
+	}
+	compacted, err = loadState(destination.StatePath)
+	if err != nil || len(compacted.Blocks) != 4096 ||
+		compacted.RecordTombstones["point-01|source-1"].SourceVersion != "2026-10-28 10:03:00" {
+		t.Fatalf("барьер удаления записи потерян при компактации Word: blocks=%d barrier=%#v err=%v",
+			len(compacted.Blocks), compacted.RecordTombstones["point-01|source-1"], err)
+	}
+	equal := event
+	equal.ID = "v3-equal-delayed"
+	equal.CreatedAt = cleanup.CreatedAt
+	equal.SourceAt = cleanup.SourceAt
+	equal.Source.UpdatedAt = "2026-10-28 10:03:00"
+	equal.Blocks[0].UpdatedAt = "2026-10-28 10:03:00"
+	equal.Blocks[0].Text = "10.00\n-Равная удалению запоздалая версия"
+	if err := destination.Deliver(context.Background(), equal, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	delayed := event
+	delayed.ID = "v2-delayed"
+	delayed.CreatedAt = base.Add(2 * time.Minute)
+	delayed.SourceAt = delayed.CreatedAt
+	delayed.Source.UpdatedAt = "2026-10-28 10:02:00"
+	delayed.Blocks[0].UpdatedAt = "2026-10-28 10:02:00"
+	delayed.Blocks[0].Text = "10.00\n-Запоздалая версия"
+	if err := destination.Deliver(context.Background(), delayed, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(destination.Folder, "*.docx")); err != nil || len(matches) != 0 {
+		t.Fatalf("запоздалое событие воскресило Word: files=%v err=%v", matches, err)
+	}
+	newer := event
+	newer.ID = "v4-new"
+	newer.CreatedAt = base.Add(4 * time.Minute)
+	newer.SourceAt = newer.CreatedAt
+	newer.Source.UpdatedAt = "2026-10-28 10:04:00"
+	newer.Blocks[0].UpdatedAt = "2026-10-28 10:04:00"
+	newer.Blocks[0].Text = "10.00\n-Новая версия после удаления записи"
+	if err := destination.Deliver(context.Background(), newer, domain.PlannedDelivery{}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := loadState(destination.StatePath)
+	record := current.Blocks["point-01|source-1|block-1"]
+	barrier := current.RecordTombstones["point-01|source-1"]
+	if err != nil || record.Tombstone || record.Filename == "" ||
+		barrier.SourceVersion != "2026-10-28 10:03:00" {
+		t.Fatalf("барьер удаления записи или новый Word не сохранены: record=%#v barrier=%#v err=%v", record, barrier, err)
+	}
+	path := filepath.Join(destination.Folder, record.Filename)
+	if !strings.Contains(documentXML(t, path), "Новая версия после удаления записи") {
+		t.Fatal("после барьера создана не новая редакция Word")
+	}
+}
+
+func TestWordRecordCleanupTombstonesUseHardLimitInsteadOfEviction(t *testing.T) {
+	t.Parallel()
+	current := state{RecordTombstones: make(map[string]recordRevisionBarrier)}
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	for index := 0; index < 4100; index++ {
+		current.RecordTombstones[fmt.Sprintf("record-%04d", index)] = recordRevisionBarrier{
+			SourceVersion: "2026-10-01 00:00:00", UpdatedAt: base.Add(time.Duration(index) * time.Second),
+		}
+	}
+	if err := enforceWordRecordTombstoneLimit(current, 4096); err == nil ||
+		!application.IsPermanentDeliveryError(err) {
+		t.Fatalf("переполнение барьеров Word не дало постоянную ошибку: %v", err)
+	}
+	if len(current.RecordTombstones) != 4100 {
+		t.Fatalf("защитные барьеры молча вытеснены: %d", len(current.RecordTombstones))
 	}
 }
 
@@ -290,99 +678,6 @@ func TestDestinationAssignsSequentialNumbersAcrossTimeBlocks(t *testing.T) {
 		if !slices.Contains(runs, expected) {
 			t.Fatalf("в отдельных Word нет %q: %#v", expected, runs)
 		}
-	}
-}
-
-func TestDestinationMigratesLegacyBlockDocumentsWithoutEditedMarker(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	template := filepath.Join(root, "template.docx")
-	createTemplate(t, template)
-	folder := filepath.Join(root, "out")
-	if err := os.MkdirAll(folder, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	statePath := filepath.Join(root, "state", "word.json")
-	legacy := state{LastNumber: 8, Blocks: map[string]blockRecord{
-		"legacy-source|10.00": {Number: 7, Filename: "old-7.docx", Render: "old"},
-		"legacy-source|10.05": {Number: 8, Filename: "old-8.docx", Render: "old"},
-	}}
-	if err := saveState(statePath, legacy); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"old-7.docx", "old-8.docx"} {
-		if err := os.WriteFile(filepath.Join(folder, name), []byte("old"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	destination := Destination{TemplatePath: template, Folder: folder, StatePath: statePath, Network: "313", Prefix: "СТНД"}
-	event := domain.Event{
-		Source: domain.SourceRecord{UUID: "legacy-source"}, Position: domain.Position{UnitName: "позиция"},
-		Content: "10.00\n-Первый\n10.05\n-Второй", SourceAt: time.Now(),
-	}
-	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
-		t.Fatal(err)
-	}
-	files, _ := filepath.Glob(filepath.Join(folder, "*.docx"))
-	if len(files) != 2 || !strings.HasPrefix(filepath.Base(files[0]), "СТНД7 ") ||
-		!strings.HasPrefix(filepath.Base(files[1]), "СТНД8 ") {
-		t.Fatalf("миграция не сохранила номера блоков: %#v", files)
-	}
-	for _, file := range files {
-		if xml := documentXML(t, file); strings.Contains(xml, "(отредактировано") {
-			t.Fatal("техническая миграция ошибочно помечена как редакция оператора")
-		}
-	}
-	numbers, err := StateNumbers(statePath)
-	if err != nil || !reflect.DeepEqual(numbers, []int{7, 8}) {
-		t.Fatalf("состояние после миграции: %#v, %v", numbers, err)
-	}
-}
-
-func TestDestinationMigratesRC81CombinedDocumentToUUIDBlocks(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	template := filepath.Join(root, "template.docx")
-	createTemplate(t, template)
-	folder := filepath.Join(root, "out")
-	if err := os.MkdirAll(folder, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	statePath := filepath.Join(root, "state", "word.json")
-	combinedName := "СТНД7 позиция - 313.docx"
-	if err := os.WriteFile(filepath.Join(folder, combinedName), []byte("rc81"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveState(statePath, state{LastNumber: 7, Blocks: map[string]blockRecord{
-		"point-01|source-1|record": {Number: 7, Filename: combinedName, Render: "rc81"},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	destination := Destination{TemplatePath: template, Folder: folder, StatePath: statePath, Network: "313", Prefix: "СТНД"}
-	event := domain.Event{
-		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"},
-		Position: domain.Position{UnitName: "позиция"}, SourceAt: time.Now(),
-		Blocks: []domain.ContentBlock{
-			{UUID: "block-1", Sequence: 0, Text: "12.00\n-Первое"},
-			{UUID: "block-2", Sequence: 1, Text: "12.01\n-Второе"},
-		},
-	}
-	if err := destination.Deliver(context.Background(), event, domain.PlannedDelivery{}); err != nil {
-		t.Fatal(err)
-	}
-	files, _ := filepath.Glob(filepath.Join(folder, "*.docx"))
-	if len(files) != 2 || !strings.HasPrefix(filepath.Base(files[0]), "СТНД7 ") ||
-		!strings.HasPrefix(filepath.Base(files[1]), "СТНД8 ") {
-		t.Fatalf("неверная миграция rc81 Word: %#v", files)
-	}
-	current, err := loadState(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, exists := current.Blocks["point-01|source-1|record"]; exists ||
-		current.Blocks["point-01|source-1|block-1"].Number != 7 ||
-		current.Blocks["point-01|source-1|block-2"].Number != 8 {
-		t.Fatalf("номера rc81 потеряны: %#v", current.Blocks)
 	}
 }
 

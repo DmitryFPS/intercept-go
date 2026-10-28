@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"intercept/internal/application"
 
@@ -15,6 +16,66 @@ import (
 )
 
 var fixtureTimeLine = regexp.MustCompile(`^\d{1,2}\.\d{2}$`)
+
+func TestSourceReadsCurrentAndLastClosedShiftForEveryPosition(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "main.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE intercept_items (
+			id INTEGER PRIMARY KEY, session_id INTEGER, session_uuid TEXT,
+			unit_name TEXT, frequency TEXT, group_code TEXT, uuid TEXT,
+			content TEXT, updated_by TEXT, updated_at TEXT
+		);
+		CREATE TABLE intercept_sessions (
+			id INTEGER PRIMARY KEY, position_name TEXT, uuid TEXT,
+			started_at TEXT, ended_at TEXT
+		);
+		CREATE TABLE intercept_sessions_archive (
+			id INTEGER PRIMARY KEY, position_name TEXT, uuid TEXT,
+			started_at TEXT, ended_at TEXT
+		);
+		INSERT INTO intercept_sessions VALUES
+			(20, 'Позиция 1', 'open-20', '2026-10-28 12:00:00', NULL);
+		INSERT INTO intercept_sessions_archive VALUES
+			(19, 'Позиция 1', 'closed-19', '2026-10-28 08:00:00', '2026-10-28 11:59:00'),
+			(7, 'Позиция 2', 'closed-7', '2026-10-28 09:00:00', '2026-10-28 10:00:00');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTestBlockSchema(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	location, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := source.ShiftSnapshot(context.Background(), location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Active) != 1 || len(snapshot.LastClosed) != 2 {
+		t.Fatalf("переходы смен прочитаны не полностью: %+v", snapshot)
+	}
+	if snapshot.Active[0].SessionUUID != "open-20" ||
+		!snapshot.Active[0].OpenedAt.Equal(time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("время открытия не переведено из часового пояса EAVC: %+v", snapshot.Active[0])
+	}
+	if snapshot.LastClosed[0].SessionUUID != "closed-19" || snapshot.LastClosed[0].ClosedAt == nil {
+		t.Fatalf("последняя закрытая смена позиции потеряна: %+v", snapshot.LastClosed)
+	}
+}
 
 // Клиент читает нужные поля из действующей и расширенной базы EAVC, не изменяя саму базу.
 func TestSourceReadsCurrentAndFutureSchemaReadOnly(t *testing.T) {
@@ -453,7 +514,7 @@ func TestSourceReadsStableUUIDForEveryEAVCBlock(t *testing.T) {
 	}
 }
 
-func TestSourceRejectsInconsistentItemAndBlockSnapshot(t *testing.T) {
+func TestSourceIsolatesInconsistentItemAndContinuesFollowingRecord(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "main.sqlite")
 	db, err := sql.Open("sqlite", path)
@@ -479,6 +540,13 @@ func TestSourceRejectsInconsistentItemAndBlockSnapshot(t *testing.T) {
 		INSERT INTO intercept_blocks VALUES(
 			'block-a','item-1',1,600,0,0,'10.00','-Старая редакция','','2026-10-27 10:00:00',NULL
 		);
+		INSERT INTO intercept_items VALUES(
+			2,1,'session','Позиция','100','A','item-2',
+			'10.01' || char(10) || '-Исправная запись','Оператор','2026-10-27 10:07:00'
+		);
+		INSERT INTO intercept_blocks VALUES(
+			'block-b','item-2',2,601,0,0,'10.01','-Исправная запись','','2026-10-27 10:07:00',NULL
+		);
 	`)
 	if err != nil {
 		t.Fatal(err)
@@ -489,9 +557,15 @@ func TestSourceRejectsInconsistentItemAndBlockSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer source.Close()
-	_, _, err = source.Scan(context.Background(), application.Cursor{}, 10)
-	if err == nil || !strings.Contains(err.Error(), "временно расходятся") {
-		t.Fatalf("рассогласованный снимок ушёл в очередь: %v", err)
+	items, cursor, err := source.Scan(context.Background(), application.Cursor{}, 10)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("чтение записей: items=%#v err=%v", items, err)
+	}
+	if !strings.Contains(items[0].ContractError, "расходятся") || len(items[0].Blocks) != 0 {
+		t.Fatalf("повреждённая запись не изолирована: %#v", items[0])
+	}
+	if items[1].ContractError != "" || len(items[1].Blocks) != 1 || cursor.ID != 2 {
+		t.Fatalf("исправная запись после повреждённой потеряна: item=%#v cursor=%#v", items[1], cursor)
 	}
 }
 

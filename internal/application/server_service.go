@@ -34,6 +34,7 @@ type IncomingPacket struct {
 	ProbeClientID string
 	ProbeSentAt   time.Time
 	ProbeMAC      string
+	ProbeShift    ShiftSnapshot
 }
 
 // TransportObservation описывает только технический след Telegram-обновления.
@@ -145,10 +146,19 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	if event.ClientID != client.ID {
 		return PacketResult{}, permanentPacketError("ID точки внутри события не совпадает с регистрацией")
 	}
+	if err := event.Validate(); err != nil {
+		return PacketResult{}, permanentPacketError("нарушена структура события: " + err.Error())
+	}
 	if service.Now == nil {
 		service.Now = time.Now
 	}
 	now := service.Now().UTC()
+	if err := domain.ValidateRevisionClock(event, now); err != nil {
+		return PacketResult{}, permanentPacketError("нарушена совместимость времени EAVC: " + err.Error())
+	}
+	if err := event.ValidateContentDigest(); err != nil {
+		return PacketResult{}, permanentPacketError(err.Error())
+	}
 	freshnessAt := now
 	if !packet.ReceivedAt.IsZero() && !packet.ReceivedAt.After(now.Add(time.Minute)) {
 		freshnessAt = packet.ReceivedAt.UTC()
@@ -203,6 +213,9 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	event.FreshnessIssue = ""
 	accepted, err := service.Store.Accept(ctx, event, plan)
 	if err != nil {
+		if errors.Is(err, ErrSourceLineageLimit) || errors.Is(err, ErrSourceRevisionConflict) {
+			return PacketResult{}, &PermanentPacketError{Err: err}
+		}
 		return PacketResult{}, err
 	}
 	return PacketResult{

@@ -19,8 +19,10 @@ func TestEnvelopeRoundTripAndTamperProtection(t *testing.T) {
 		CreatedAt: now, ObservedAt: now,
 		Source:   domain.SourceRecord{ID: 7, UUID: "source-7"},
 		Position: domain.Position{UnitName: "1 мб 155 омбр"},
-		Mode:     domain.SourceModeNormal, Content: "данные", ContentDigest: "abc",
+		Mode:     domain.SourceModeNormal, Content: "данные",
+		ContentDigestVersion: domain.ContentDigestVersionCurrent,
 	}
+	event.ContentDigest = event.CanonicalContentDigest()
 	envelope, err := Seal(event, "key-1", key, now, bytes.NewReader(make([]byte, 12)))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
@@ -31,6 +33,11 @@ func TestEnvelopeRoundTripAndTamperProtection(t *testing.T) {
 	}
 	if opened.Content != event.Content || opened.ID != event.ID {
 		t.Fatalf("событие изменилось: %#v", opened)
+	}
+	legacy := envelope
+	legacy.Schema = "intercept-envelope/v1"
+	if _, err := Open(legacy, key); err == nil {
+		t.Fatal("конверт старого контракта ошибочно принят")
 	}
 
 	envelope.ClientID = "another-client"

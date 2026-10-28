@@ -3,8 +3,6 @@ package application
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +20,6 @@ const (
 	eavcCursorName         = "eavc"
 	eavcInitializedName    = "eavc_initialized"
 	eavcBaselineName       = "eavc_initial_baseline"
-	eavcBlockEventsName    = "eavc_block_events_initialized"
 	transportOffsetName    = "transport_offset"
 	lastTransportProbeName = "last_transport_probe"
 	lastTransportProbeID   = "last_transport_probe_id"
@@ -34,6 +31,7 @@ type ClientService struct {
 	Source          EventSource
 	Queue           ClientQueue
 	State           ClientState
+	TimeState       SourceTimeStateStore
 	Sender          TransportSender
 	KeyID           string
 	Key             []byte
@@ -52,10 +50,6 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 		service.Now = time.Now
 	}
 	cursor, err := service.State.Cursor(ctx, eavcCursorName)
-	if err != nil {
-		return 0, err
-	}
-	_, blockEventsInitialized, err := service.State.Value(ctx, eavcBlockEventsName)
 	if err != nil {
 		return 0, err
 	}
@@ -81,19 +75,6 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 	items, next, err := service.Source.Scan(ctx, cursor, service.BatchSize)
 	if err != nil {
 		return 0, err
-	}
-	// При первом запуске новой поблочной модели не переиздаём граничную
-	// запись, уже принятую rc87 как единое событие. Более свежие изменения,
-	// накопившиеся во время обновления, имеют другой updated_at и сохраняются.
-	if !blockEventsInitialized && strings.TrimSpace(cursor.UpdatedAt) != "" {
-		filtered := items[:0]
-		for _, item := range items {
-			if item.Record.UpdatedAt == cursor.UpdatedAt && item.Record.ID <= cursor.ID {
-				continue
-			}
-			filtered = append(filtered, item)
-		}
-		items = filtered
 	}
 	if !service.CatchUpExisting {
 		baseline, exists, baselineErr := service.savedInitialBaseline(ctx)
@@ -123,8 +104,63 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
+	timeState := service.TimeState
+	if timeState == nil {
+		if storedByQueue, ok := service.Queue.(SourceTimeStateStore); ok {
+			timeState = storedByQueue
+		}
+	}
 	queued := 0
 	for _, item := range items {
+		if strings.TrimSpace(item.ContractError) != "" {
+			if service.Logger != nil {
+				service.Logger.Error("нарушена обратная совместимость записи EAVC; запись изолирована",
+					"source_id", item.Record.ID, "source_uuid", item.Record.UUID,
+					"source_version", item.Record.UpdatedAt, "position", item.Position.UnitName,
+					"frequency", item.Position.Frequency, "group_code", item.Position.GroupCode,
+					"reason", item.ContractError,
+				)
+			}
+			continue
+		}
+		if len(item.Blocks) > 0 || len(item.DeletedBlocks) > 0 {
+			var stored SourceTimeStateRecord
+			var exists bool
+			var stateKey string
+			if timeState != nil {
+				stateKey = sourceTimeStateKey(item)
+				var stateErr error
+				stored, exists, stateErr = timeState.LoadSourceTimeState(ctx, stateKey)
+				if stateErr != nil {
+					return queued, stateErr
+				}
+			}
+			prepared := planSourceTimeBlocks(item, stored, exists, service.Now().UTC())
+			// Состояние сохраняется до очереди: после аварийного завершения повтор
+			// получит те же occurrence-ID. Tombstone остаются в снимке и поэтому
+			// удаление также не потеряется при таком повторе.
+			if timeState != nil && (!exists || !sourceTimeStateRecordsEqual(stored, prepared.Record)) {
+				if stateErr := timeState.SaveSourceTimeState(ctx, stateKey, prepared.Record); stateErr != nil {
+					return queued, stateErr
+				}
+			}
+			if prepared.Conflict != nil {
+				if service.Logger != nil {
+					service.Logger.Warn("Конфликт сопоставления временных блоков EAVC",
+						"source_id", item.Record.ID, "source_uuid", item.Record.UUID,
+						"source_version", item.Record.UpdatedAt, "position", item.Position.UnitName,
+						"frequency", item.Position.Frequency, "group_code", item.Position.GroupCode,
+						"conflict_kind", prepared.Conflict.Kind, "reason", prepared.Conflict.Reason,
+						"canonical_time", prepared.Conflict.CanonicalTime,
+						"day_offset", prepared.Conflict.DayOffset,
+						"previous_occurrence_ids", strings.Join(prepared.Conflict.PreviousOccurrenceIDs, ","),
+						"current_occurrences", prepared.Conflict.CurrentOccurrences,
+					)
+				}
+				continue
+			}
+			item = prepared.Item
+		}
 		events, err := service.newEvents(item)
 		if err != nil {
 			// Одна повреждённая строка внешней БД не должна навсегда закрывать
@@ -142,18 +178,6 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 			legacySourceUUID := strings.TrimSpace(item.Record.UUID)
 			if legacySourceUUID == "" {
 				legacySourceUUID = fmt.Sprintf("id:%d", item.Record.ID)
-			}
-			migrated, migrateErr := service.Queue.SeedBlockBaselinesFromLegacy(
-				ctx, legacySourceUUID, strings.TrimSpace(item.Record.UpdatedAt), events,
-			)
-			if migrateErr != nil {
-				return queued, migrateErr
-			}
-			if migrated {
-				// Эта точная версия уже была принята старым Клиентом единым
-				// событием. Поблочные отпечатки сохранены без повторной отправки;
-				// следующая настоящая редакция затронет только изменённый блок.
-				continue
 			}
 			if item.Archived {
 				archivedReplay, archiveErr := service.Queue.SeedArchiveBaselinesFromSeenBlocks(
@@ -210,11 +234,6 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 	}
 	if !initialized {
 		if err := service.State.SaveValue(ctx, eavcInitializedName, "true"); err != nil {
-			return queued, err
-		}
-	}
-	if !blockEventsInitialized {
-		if err := service.State.SaveValue(ctx, eavcBlockEventsName, "true"); err != nil {
 			return queued, err
 		}
 	}
@@ -412,17 +431,14 @@ func (service *ClientService) newEvent(item SourceItem) (domain.Event, error) {
 	if err != nil {
 		return domain.Event{}, err
 	}
-	digest := sha256.Sum256([]byte(strings.Join([]string{
-		content, domain.NormalizeUnitName(item.Position.UnitName),
-		strings.TrimSpace(item.Position.Frequency), strings.TrimSpace(item.Position.GroupCode),
-	}, "\x01")))
 	event := domain.Event{
 		ID: id, ClientID: service.ClientID, CreatedAt: now, ObservedAt: item.ObservedAt,
 		SourceAt: sourceAt, ExpiresAt: expiresAt, FreshnessIssue: freshnessIssue,
 		Source: item.Record, Position: item.Position, Mode: item.Mode,
 		Content: content, Blocks: item.Blocks, UpdatedBy: item.UpdatedBy,
-		ContentDigest: hex.EncodeToString(digest[:]),
+		ContentDigestVersion: domain.ContentDigestVersionCurrent,
 	}
+	event.ContentDigest = event.CanonicalContentDigest()
 	return event, event.Validate()
 }
 
@@ -437,20 +453,28 @@ func (service *ClientService) newEvents(item SourceItem) ([]domain.Event, error)
 		}
 		return []domain.Event{event}, nil
 	}
-	activeBlockUUIDs := make([]string, 0, len(item.Blocks))
-	for _, block := range item.Blocks {
-		activeBlockUUIDs = append(activeBlockUUIDs, block.Identity())
+	if !item.logicalTimeBlocks {
+		now := time.Now().UTC()
+		if service.Now != nil {
+			now = service.Now().UTC()
+		}
+		prepared := planSourceTimeBlocks(item, SourceTimeStateRecord{}, false, now)
+		if prepared.Conflict != nil {
+			return nil, errors.New(prepared.Conflict.Reason)
+		}
+		item = prepared.Item
 	}
+	hasActiveBlocks := len(item.Blocks) > 0
 	events := make([]domain.Event, 0, len(item.Blocks)+len(item.DeletedBlocks))
 	for _, block := range item.Blocks {
-		event, err := service.newBlockEvent(item, block, false, activeBlockUUIDs)
+		event, err := service.newBlockEvent(item, block, false, hasActiveBlocks)
 		if err != nil {
 			return nil, err
 		}
 		events = append(events, event)
 	}
 	for _, block := range item.DeletedBlocks {
-		event, err := service.newBlockEvent(item, block, true, activeBlockUUIDs)
+		event, err := service.newBlockEvent(item, block, true, hasActiveBlocks)
 		if err != nil {
 			return nil, err
 		}
@@ -460,7 +484,7 @@ func (service *ClientService) newEvents(item SourceItem) ([]domain.Event, error)
 }
 
 func (service *ClientService) newBlockEvent(
-	item SourceItem, block domain.ContentBlock, deleted bool, activeBlockUUIDs []string,
+	item SourceItem, block domain.ContentBlock, deleted bool, hasActiveBlocks bool,
 ) (domain.Event, error) {
 	now := service.Now().UTC()
 	blockUUID := strings.TrimSpace(block.Identity())
@@ -492,34 +516,45 @@ func (service *ClientService) newBlockEvent(
 	sourceAt, expiresAt, freshnessIssue := domain.FreshnessInLocation(
 		freshnessTimestamp, item.ObservedAt, now, maxAge, service.SourceLocation,
 	)
+	// Срок свежести относится к снимку записи EAVC целиком, но идентичность и
+	// дата самостоятельного события относятся к версии конкретного блока.
+	// Поэтому редакция соседнего блока не меняет SourceAt и digest этого блока.
+	if blockSourceAt, _, _ := domain.FreshnessInLocation(
+		version, time.Time{}, now, maxAge, service.SourceLocation,
+	); !blockSourceAt.IsZero() {
+		sourceAt = blockSourceAt
+	}
 	if deleted {
 		expiresAt = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
 		freshnessIssue = ""
 		content = ""
 		block.Text = ""
 		block.Callsigns = nil
+	} else {
+		// У scoped-события существует один источник истины. Это исключает
+		// ситуацию, когда маршрут/дайджест проверяют Content, а Telegram или Word
+		// отображают отличающийся Blocks[0].Text.
+		block.Text = content
 	}
 	id, err := protocol.UUIDv7(now, rand.Reader)
 	if err != nil {
 		return domain.Event{}, err
 	}
-	marker := "active"
-	if deleted {
-		marker = "deleted"
-	}
-	digest := sha256.Sum256([]byte(strings.Join([]string{
-		marker, blockUUID, content, domain.NormalizeUnitName(item.Position.UnitName),
-		strings.TrimSpace(item.Position.Frequency), strings.TrimSpace(item.Position.GroupCode),
-	}, "\x01")))
 	event := domain.Event{
 		ID: id, ClientID: service.ClientID, CreatedAt: now, ObservedAt: item.ObservedAt,
 		SourceAt: sourceAt, ExpiresAt: expiresAt, FreshnessIssue: freshnessIssue,
 		Source: item.Record, Position: item.Position, Mode: item.Mode,
 		Content: content, Blocks: []domain.ContentBlock{block},
 		SourceBlockUUID: blockUUID, SourceBlockDeleted: deleted,
-		ActiveBlockUUIDs: append([]string(nil), activeBlockUUIDs...),
-		UpdatedBy:        item.UpdatedBy, ContentDigest: hex.EncodeToString(digest[:]),
+		HasActiveBlocks: hasActiveBlocks,
+		UpdatedBy:       block.UpdatedBy, ContentDigestVersion: domain.ContentDigestVersionCurrent,
 	}
+	if strings.TrimSpace(event.UpdatedBy) == "" {
+		// Старые совместимые схемы EAVC не имели updated_by у блока.
+		// Для них сохраняем прежний источник, не требуя изменения EAVC.
+		event.UpdatedBy = item.UpdatedBy
+	}
+	event.ContentDigest = event.CanonicalContentDigest()
 	return event, event.Validate()
 }
 

@@ -61,8 +61,9 @@ func TestThreePointsCanBeAcceptedConcurrently(t *testing.T) {
 			ClientID: name, CreatedAt: now, ObservedAt: now,
 			Source:   domain.SourceRecord{ID: int64(index + 1)},
 			Position: domain.Position{UnitName: "новое"}, Mode: domain.SourceModeNormal,
-			Content: "данные", ContentDigest: "digest-" + name,
+			Content: "данные", ContentDigestVersion: domain.ContentDigestVersionCurrent,
 		}
+		event.ContentDigest = event.CanonicalContentDigest()
 		envelope, err := protocol.Seal(event, client.KeyID, key, now, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -144,8 +145,9 @@ func TestEncryptedPacketIsAcceptedRoutedAndDeliveredOnce(t *testing.T) {
 		ID: "0199f399-8e00-7000-8000-000000000001", ClientID: client.ID,
 		CreatedAt: now, ObservedAt: now, Source: domain.SourceRecord{ID: 42, UUID: "source-42"},
 		Position: domain.Position{UnitName: "новое подразделение"}, Mode: domain.SourceModeNormal,
-		Content: "текст перехвата", ContentDigest: "digest-42",
+		Content: "текст перехвата", ContentDigestVersion: domain.ContentDigestVersionCurrent,
 	}
+	event.ContentDigest = event.CanonicalContentDigest()
 	envelope, err := protocol.Seal(event, client.KeyID, key, now, nil)
 	if err != nil {
 		t.Fatal(err)

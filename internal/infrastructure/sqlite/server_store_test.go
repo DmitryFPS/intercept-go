@@ -3,6 +3,8 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -239,6 +241,107 @@ func TestServerTransportInboxRetryDoesNotBlockFollowingPacket(t *testing.T) {
 	}
 }
 
+func TestServerTransportInboxQuarantinesCorruptStoredRowAndReturnsNext(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := store.PersistTransportBatch(ctx, "telegram_offset", 3, []application.IncomingPacket{
+		{UpdateID: 1, ChatID: -1001, MessageID: 101, Payload: []byte("first")},
+		{UpdateID: 2, ChatID: -1001, MessageID: 102, Payload: []byte("second")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE transport_inbox SET packet_json=? WHERE update_id=1", []byte("corrupt")); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.PendingTransportPackets(ctx, 25, now.Add(time.Minute))
+	if err != nil || len(items) != 1 || items[0].Packet.UpdateID != 2 {
+		t.Fatalf("повреждённая строка заблокировала следующую: items=%#v err=%v", items, err)
+	}
+	var inbox, rejected, cleanup int
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_inbox WHERE update_id=1").Scan(&inbox)
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets").Scan(&rejected)
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup WHERE message_id=101").Scan(&cleanup)
+	if inbox != 0 || rejected != 1 || cleanup != 1 {
+		t.Fatalf("повреждённая строка изолирована неатомарно: inbox=%d rejected=%d cleanup=%d", inbox, rejected, cleanup)
+	}
+}
+
+func TestPendingDeliveriesExpiresCorruptHeadAndUnblocksFollowingJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rules := serverTestRules()
+	first := serverTestEvent()
+	first.SourceAt = time.Now().UTC()
+	first.ExpiresAt = first.SourceAt.Add(time.Hour)
+	firstPlan, _ := rules.Resolve(first)
+	if accepted, err := store.Accept(ctx, first, firstPlan); err != nil || !accepted {
+		t.Fatalf("первая запись: accepted=%v err=%v", accepted, err)
+	}
+	second := first
+	second.ID = "event-2"
+	second.CreatedAt = first.CreatedAt.Add(time.Second)
+	second.Source.UpdatedAt = second.CreatedAt.Format("2006-01-02 15:04:05")
+	second.Content = "следующая редакция"
+	second.ContentDigest = "digest-2"
+	secondPlan, _ := rules.Resolve(second)
+	if accepted, err := store.Accept(ctx, second, secondPlan); err != nil || !accepted {
+		t.Fatalf("вторая запись: accepted=%v err=%v", accepted, err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE delivery_jobs SET delivery_json=? WHERE event_id=? AND destination_id='a'", []byte("corrupt"), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.PendingDeliveries(ctx, 10, time.Now().UTC().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("повреждённое задание остановило чтение: %v", err)
+	}
+	for _, job := range jobs {
+		if job.Event.ID == first.ID && job.Delivery.Destination.ID == "a" {
+			t.Fatal("повреждённое задание вернулось на доставку")
+		}
+	}
+	jobs, err = store.PendingDeliveries(ctx, 10, time.Now().UTC().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSecond := false
+	for _, job := range jobs {
+		foundSecond = foundSecond || (job.Event.ID == second.ID && job.Delivery.Destination.ID == "a")
+	}
+	if !foundSecond {
+		t.Fatalf("следующее исправное задание осталось заблокировано: %#v", jobs)
+	}
+	var state, reason string
+	if err := db.QueryRowContext(ctx, `SELECT state,last_error FROM delivery_jobs WHERE event_id=? AND destination_id='a'`, first.ID).Scan(&state, &reason); err != nil || state != "expired" || !strings.Contains(reason, "повреждено") {
+		t.Fatalf("повреждённое задание не изолировано: state=%q reason=%q err=%v", state, reason, err)
+	}
+}
+
 func TestServerTransportInboxCompletionQueuesCleanupInSameTransaction(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -345,8 +448,8 @@ func TestServerStoreMigratesRc85DatabaseToTransportInbox(t *testing.T) {
 		t.Fatalf("обновление базы rc85 не прошло: %v", err)
 	}
 	var version int
-	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil || version != 9 {
-		t.Fatalf("миграция входной очереди не применена: version=%d err=%v", version, err)
+	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil || version != 11 {
+		t.Fatalf("новые миграции Центра не применены: version=%d err=%v", version, err)
 	}
 }
 
@@ -425,6 +528,7 @@ func TestServerStoreQueuesCleanupWhenEditedRecordLeavesWordRoute(t *testing.T) {
 	}
 	second := first
 	second.ID = "event-2"
+	second.CreatedAt = first.CreatedAt.Add(time.Nanosecond)
 	second.ContentDigest = "digest-2"
 	second.Position.UnitName = "1мб 155 омбр"
 	secondPlan, err := rules.Resolve(second)
@@ -754,11 +858,13 @@ func TestServerStoreKeepsRevisionAfterOriginalAcrossTopics(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := domain.Destination{ID: "telegram", Name: "Группа", Kind: domain.DestinationTelegram, Enabled: true}
+	revision := 0
 	accept := func(id, content, position string, threadID int64) {
+		revision++
 		event := serverTestEvent()
 		event.ID, event.Source.UUID, event.ContentDigest = id, "same-source", "digest-"+content
 		event.Content, event.Position.UnitName = content, position
-		event.CreatedAt, event.SourceAt, event.ExpiresAt = now, now, now.Add(30*time.Minute)
+		event.CreatedAt, event.SourceAt, event.ExpiresAt = now.Add(time.Duration(revision)*time.Nanosecond), now, now.Add(30*time.Minute)
 		plan := domain.DeliveryPlan{EventID: id, RuleSetVersion: 1, Deliveries: []domain.PlannedDelivery{{
 			Destination: destination, Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: threadID},
 		}}}
@@ -938,6 +1044,290 @@ func TestServerStoreKeepsIndependentLineageForEachSourceBlock(t *testing.T) {
 	want := []string{"source-shared|block:block-a", "source-shared|block:block-b"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("сервер смешал линии блоков: got=%v want=%v", got, want)
+	}
+}
+
+func TestServerStoreOrdersSameSecondEditsAndRejectsExactRevisionConflict(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rules := serverTestRules()
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	destination := rules.Destinations["a"]
+	plan := domain.DeliveryPlan{RuleSetVersion: 1, Deliveries: []domain.PlannedDelivery{{
+		Destination: destination, Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 1},
+	}}}
+	makeEvent := func(id, version, content string, created time.Time) domain.Event {
+		return domain.Event{
+			ID: id, ClientID: "textile", CreatedAt: created, SourceAt: created,
+			Source: domain.SourceRecord{UUID: "source-1"}, Position: domain.Position{UnitName: "Игровая команда"},
+			Mode: domain.SourceModeNormal, Content: content, ContentDigest: "digest-" + id,
+			SourceBlockUUID: "block-1", Blocks: []domain.ContentBlock{{
+				UUID: "block-1", Text: content, UpdatedAt: version,
+			}},
+		}
+	}
+	base := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	newer := makeEvent("event-v2", "2026-10-28 10:02:00", "10.00\n-Новая версия", base.Add(2*time.Minute))
+	if accepted, err := store.Accept(ctx, newer, plan); err != nil || !accepted {
+		t.Fatalf("новая версия не принята: accepted=%v err=%v", accepted, err)
+	}
+	rapidEdit := makeEvent("event-v2-rapid", "2026-10-28 10:02:00", "10.00\n-Быстрая правка той же секунды", base.Add(150*time.Second))
+	if accepted, err := store.Accept(ctx, rapidEdit, plan); err != nil || !accepted {
+		t.Fatalf("быстрая правка той же секунды не принята: accepted=%v err=%v", accepted, err)
+	}
+	conflict := makeEvent("event-v2-conflict", "2026-10-28 10:02:00", "10.00\n-Иные данные точной ревизии", rapidEdit.CreatedAt)
+	if accepted, err := store.Accept(ctx, conflict, plan); accepted || !errors.Is(err, application.ErrSourceRevisionConflict) {
+		t.Fatalf("конфликт одной версии не отправлен в карантин: accepted=%v err=%v", accepted, err)
+	}
+	older := makeEvent("event-v1-late", "2026-10-28 10:01:00", "10.00\n-Старая версия", base.Add(time.Minute))
+	if accepted, err := store.Accept(ctx, older, plan); err != nil || accepted {
+		t.Fatalf("запоздалая старая версия создала доставку: accepted=%v err=%v", accepted, err)
+	}
+	latest := makeEvent("event-v3", "2026-10-28 10:03:00", "10.00\n-Последняя версия", base.Add(3*time.Minute))
+	if accepted, err := store.Accept(ctx, latest, plan); err != nil || !accepted {
+		t.Fatalf("последняя версия не принята: accepted=%v err=%v", accepted, err)
+	}
+	var events, jobs int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM received_events").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM delivery_jobs").Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if events != 3 || jobs != 3 {
+		t.Fatalf("устаревшая версия попала в Центр: events=%d jobs=%d", events, jobs)
+	}
+}
+
+func TestServerStoreCapsUniqueSourceLineagesWithoutBlockingExistingEdits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.maxSourceLineages = 1
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	makeEvent := func(id, source string, second int) domain.Event {
+		created := base.Add(time.Duration(second) * time.Second)
+		content := "10.00\n-" + id
+		return domain.Event{
+			ID: id, ClientID: "textile", CreatedAt: created, SourceAt: created,
+			Source: domain.SourceRecord{UUID: source}, Position: domain.Position{UnitName: "Игровая команда"},
+			Mode: domain.SourceModeNormal, Content: content, ContentDigest: "digest-" + id,
+			SourceBlockUUID: "block-1", Blocks: []domain.ContentBlock{{
+				UUID: "block-1", Text: content, UpdatedAt: created.Format("2006-01-02 15:04:05"),
+			}},
+		}
+	}
+	first := makeEvent("event-1", "source-1", 1)
+	if accepted, err := store.Accept(ctx, first, domain.DeliveryPlan{RuleSetVersion: 1}); err != nil || !accepted {
+		t.Fatalf("первая линия не принята: accepted=%v err=%v", accepted, err)
+	}
+	second := makeEvent("event-2", "source-2", 2)
+	if accepted, err := store.Accept(ctx, second, domain.DeliveryPlan{RuleSetVersion: 1}); accepted || !errors.Is(err, application.ErrSourceLineageLimit) {
+		t.Fatalf("новая линия сверх предела не остановлена: accepted=%v err=%v", accepted, err)
+	}
+	// Предел новых UUID не должен ломать следующую редакцию уже известного блока.
+	edit := makeEvent("event-3", "source-1", 3)
+	if accepted, err := store.Accept(ctx, edit, domain.DeliveryPlan{RuleSetVersion: 1}); err != nil || !accepted {
+		t.Fatalf("редакция известной линии заблокирована: accepted=%v err=%v", accepted, err)
+	}
+}
+
+func TestServerStoreMigratesCanonicalBarrierFromReorderedRc90History(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := Migrate(ctx, db, []string{
+		serverMigration, serverDeliveryOrderMigration, serverStreamRepairMigration,
+		serverObservabilityMigration, serverIntegrityMigration, serverHistoryIndexesMigration,
+		serverDeliveryResultMigration, serverTransportAuditMigration, serverTransportInboxMigration,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	legacy := &ServerStore{db: db}
+	if err := legacy.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	makeEvent := func(id, version string, minute int) domain.Event {
+		event := domain.Event{
+			ID: id, ClientID: "textile", CreatedAt: base.Add(time.Duration(minute) * time.Minute),
+			SourceAt: base.Add(time.Duration(minute) * time.Minute),
+			Source:   domain.SourceRecord{UUID: "source-1"}, Position: domain.Position{UnitName: "Игровая команда"},
+			Mode: domain.SourceModeNormal, Content: version, ContentDigest: "digest-" + id,
+			SourceBlockUUID: "block-1", Blocks: []domain.ContentBlock{{
+				UUID: "block-1", Text: version, UpdatedAt: version,
+			}},
+		}
+		return event
+	}
+	// rc90 успел записать v3, а затем запоздавшую v2.
+	for _, event := range []domain.Event{
+		makeEvent("event-v3", base.Add(3*time.Minute).Format("2006-01-02 15:04:05"), 3),
+		makeEvent("event-v2-late", base.Add(2*time.Minute).Format("2006-01-02 15:04:05"), 2),
+		// rc90 принимал такую отравленную версию. Новая миграция обязана
+		// оставить её в истории, но не делать вечным барьером.
+		makeEvent("event-clock-poison", "9999-12-31 23:59:59", 4),
+	} {
+		payload, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		payload, err = protectDatabaseValue(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO received_events(
+				event_id, client_id, source_uuid, content_digest, payload_json, rule_version, received_at
+			) VALUES(?, ?, ?, ?, ?, 1, ?)`, event.ID, event.ClientID, event.SourceLineageKey(),
+			event.ContentDigest, payload, event.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	middle := makeEvent("event-v2-5", base.Add(150*time.Second).Format("2006-01-02 15:04:05"), 2)
+	if accepted, err := store.Accept(ctx, middle, domain.DeliveryPlan{RuleSetVersion: 1}); err != nil || accepted {
+		t.Fatalf("миграция приняла v2.5 после v3: accepted=%v err=%v", accepted, err)
+	}
+	newest := makeEvent("event-v4", base.Add(4*time.Minute).Format("2006-01-02 15:04:05"), 4)
+	if accepted, err := store.Accept(ctx, newest, domain.DeliveryPlan{RuleSetVersion: 1}); err != nil || !accepted {
+		t.Fatalf("v4 не принята: accepted=%v err=%v", accepted, err)
+	}
+	var barrierID string
+	if err := db.QueryRowContext(ctx, `
+		SELECT event_id FROM source_revision_barriers
+		WHERE client_id='textile' AND source_uuid='source-1|block:block-1'`).Scan(&barrierID); err != nil || barrierID != "event-v4" {
+		t.Fatalf("неверный канонический барьерный event: %q err=%v", barrierID, err)
+	}
+}
+
+func TestServerStoreKeepsPreviousRouteAfterHistoryPurge(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rules := serverTestRules()
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	makeEvent := func(id string, minute int) domain.Event {
+		created := base.Add(time.Duration(minute) * time.Minute)
+		content := fmt.Sprintf("10.00\n-Редакция %d", minute)
+		return domain.Event{
+			ID: id, ClientID: "textile", CreatedAt: created, SourceAt: created,
+			Source:   domain.SourceRecord{UUID: "source-route"},
+			Position: domain.Position{UnitName: "Игровая команда"}, Mode: domain.SourceModeNormal,
+			Content: content, ContentDigest: "digest-" + id, SourceBlockUUID: "block-1",
+			Blocks: []domain.ContentBlock{{
+				UUID: "block-1", Text: content,
+				UpdatedAt: created.Format("2006-01-02 15:04:05"),
+			}},
+		}
+	}
+	destinationA := rules.Destinations["a"]
+	destinationW := rules.Destinations["w"]
+	firstPlan := domain.DeliveryPlan{RuleSetVersion: 1, Deliveries: []domain.PlannedDelivery{
+		{Destination: destinationA, Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 2}},
+		{Destination: destinationW, Decision: domain.RouteDecision{Action: domain.RouteDeliver}},
+	}}
+	first := makeEvent("event-before-purge", 1)
+	if accepted, err := store.Accept(ctx, first, firstPlan); err != nil || !accepted {
+		t.Fatalf("принять исходный маршрут: accepted=%v err=%v", accepted, err)
+	}
+	for _, destinationID := range []string{"a", "w"} {
+		if err := store.MarkDelivered(ctx, first.ID, destinationID, base.Add(2*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.PurgeOld(ctx, time.Now().UTC().Add(time.Hour), time.Now().UTC(), 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	var oldEvents int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM received_events WHERE event_id=?", first.ID).Scan(&oldEvents); err != nil || oldEvents != 0 {
+		t.Fatalf("старая история не очищена: count=%d err=%v", oldEvents, err)
+	}
+	second := makeEvent("event-after-purge", 3)
+	secondPlan := domain.DeliveryPlan{RuleSetVersion: 1, Deliveries: []domain.PlannedDelivery{{
+		Destination: destinationA, Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 2},
+	}}}
+	if accepted, err := store.Accept(ctx, second, secondPlan); err != nil || !accepted {
+		t.Fatalf("принять новый маршрут: accepted=%v err=%v", accepted, err)
+	}
+	var protected []byte
+	if err := db.QueryRowContext(ctx, `
+		SELECT delivery_json FROM delivery_jobs
+		WHERE event_id=? AND destination_id='w'`, second.ID).Scan(&protected); err != nil {
+		t.Fatalf("после очистки истории не создан cleanup Word: %v", err)
+	}
+	plain, err := unprotectDatabaseValue(protected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cleanup domain.PlannedDelivery
+	if err := json.Unmarshal(plain, &cleanup); err != nil {
+		t.Fatal(err)
+	}
+	if cleanup.Decision.Action != domain.RouteSkip || cleanup.RuleLevel != "cleanup" {
+		t.Fatalf("неверное задание очистки после purge: %#v", cleanup)
 	}
 }
 

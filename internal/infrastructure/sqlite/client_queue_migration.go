@@ -15,7 +15,7 @@ func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
 	if err := Migrate(ctx, db, []string{
 		clientMigration, clientExpiryMigration, clientSourceVersionMigration,
 		clientStreamMigration, clientStreamRepairMigration, clientSourceStreamMigration,
-		clientClearedEventsMigration,
+		clientClearedEventsMigration, clientTimeStateMigration, clientTimeStateRetentionMigration,
 	}); err != nil {
 		return nil, err
 	}

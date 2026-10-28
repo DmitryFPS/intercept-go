@@ -18,7 +18,8 @@ const (
 
 // ServerStore объединяет постоянные хранилища сервера в одной транзакционной БД.
 type ServerStore struct {
-	db *sql.DB
+	db                *sql.DB
+	maxSourceLineages int
 }
 
 // NewServerStore применяет миграции и защищает чувствительные столбцы.
@@ -27,6 +28,7 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 		serverMigration, serverDeliveryOrderMigration, serverStreamRepairMigration,
 		serverObservabilityMigration, serverIntegrityMigration, serverHistoryIndexesMigration,
 		serverDeliveryResultMigration, serverTransportAuditMigration, serverTransportInboxMigration,
+		serverRevisionBarrierMigration, serverShiftStateMigration,
 	}); err != nil {
 		return nil, err
 	}
@@ -37,6 +39,7 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 		{"delivery_jobs", "result_json"},
 		{"rejected_packets", "payload"},
 		{"transport_inbox", "packet_json"},
+		{"source_revision_barriers", "route_json"},
 	} {
 		if err := protectExistingColumn(ctx, db, item.table, item.column); err != nil {
 			return nil, fmt.Errorf("защитить хранилище сервера: %w", err)
@@ -45,13 +48,16 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 	if err := backfillServerStreamKeys(ctx, db); err != nil {
 		return nil, err
 	}
+	if err := backfillSourceRevisionBarriers(ctx, db); err != nil {
+		return nil, err
+	}
 	if err := repairIncidentTimes(ctx, db); err != nil {
 		return nil, err
 	}
 	if err := finalizeTerminalTelegramEdits(ctx, db); err != nil {
 		return nil, err
 	}
-	return &ServerStore{db: db}, nil
+	return &ServerStore{db: db, maxSourceLineages: maxSourceLineagesPerClient}, nil
 }
 
 // finalizeTerminalTelegramEdits освобождает очереди, уже заблокированные

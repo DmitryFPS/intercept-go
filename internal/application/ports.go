@@ -37,6 +37,13 @@ type SourceItem struct {
 	Archived      bool
 	UpdatedBy     string
 	ObservedAt    time.Time
+	// ContractError изолирует одну несовместимую/повреждённую запись EAVC.
+	// Клиент журналирует её и продолжает следующие записи; после исправления
+	// оператором новая updated_at снова попадёт в чтение.
+	ContractError string
+	// logicalTimeBlocks отмечает внутренний снимок после безопасного разбиения
+	// физических блоков EAVC на отдельные вхождения времени.
+	logicalTimeBlocks bool
 }
 
 // ClientQueue гарантирует сохранение события до обращения к сети.

@@ -106,30 +106,93 @@ func (store *ServerStore) PendingTransportPackets(
 		limit = 25
 	}
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT packet_json,attempts FROM transport_inbox
+		SELECT update_id,chat_id,message_id,packet_json,attempts FROM transport_inbox
 		WHERE next_attempt_at<=?
 		ORDER BY next_attempt_at,update_id LIMIT ?`, now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, fmt.Errorf("прочитать локальную входную очередь: %w", err)
 	}
-	defer rows.Close()
-	items := make([]TransportInboxItem, 0, limit)
+	type storedPacket struct {
+		updateID, chatID, messageID int64
+		protected                   []byte
+		attempts                    int
+	}
+	stored := make([]storedPacket, 0, limit)
 	for rows.Next() {
-		var protected []byte
-		var item TransportInboxItem
-		if err := rows.Scan(&protected, &item.Attempts); err != nil {
+		var value storedPacket
+		if err := rows.Scan(&value.updateID, &value.chatID, &value.messageID, &value.protected, &value.attempts); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		plain, err := unprotectDatabaseValue(protected)
-		if err != nil {
-			return nil, fmt.Errorf("расшифровать локальный входной пакет: %w", err)
-		}
-		if err := json.Unmarshal(plain, &item.Packet); err != nil {
-			return nil, fmt.Errorf("прочитать локальный входной пакет: %w", err)
-		}
-		items = append(items, item)
+		stored = append(stored, value)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	items := make([]TransportInboxItem, 0, len(stored))
+	for _, value := range stored {
+		plain, decodeErr := unprotectDatabaseValue(value.protected)
+		var packet application.IncomingPacket
+		if decodeErr == nil {
+			decodeErr = json.Unmarshal(plain, &packet)
+		}
+		if decodeErr == nil && (packet.UpdateID != value.updateID || packet.ChatID != value.chatID || packet.MessageID != value.messageID) {
+			decodeErr = errors.New("идентификаторы пакета не совпадают с локальной очередью")
+		}
+		if decodeErr != nil {
+			reason := "повреждён локальный входной пакет: " + decodeErr.Error()
+			if err := store.quarantineCorruptTransportRow(ctx, value.updateID, value.chatID, value.messageID, value.protected, reason); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		items = append(items, TransportInboxItem{Packet: packet, Attempts: value.attempts})
+	}
+	return items, nil
+}
+
+func (store *ServerStore) quarantineCorruptTransportRow(
+	ctx context.Context, updateID, chatID, messageID int64, protected []byte, reason string,
+) error {
+	reason = strings.TrimSpace(reason)
+	if len(reason) > transportInboxErrorLimit {
+		reason = reason[:transportInboxErrorLimit]
+	}
+	quarantinePayload, err := protectDatabaseValue(protected)
+	if err != nil {
+		return fmt.Errorf("защитить повреждённый входной пакет для карантина: %w", err)
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("начать изоляцию повреждённого входного пакета: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO rejected_packets(
+			sender_bot_id,sender_bot_username,chat_id,thread_id,reason,payload,received_at
+		) VALUES(0,'',?,0,?,?,?)`, chatID, reason, quarantinePayload,
+		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("сохранить повреждённый входной пакет в карантин: %w", err)
+	}
+	if err = trimQuarantine(ctx, tx); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM transport_inbox WHERE update_id=?", updateID); err != nil {
+		return fmt.Errorf("удалить повреждённый входной пакет из рабочей очереди: %w", err)
+	}
+	if messageID > 0 {
+		if err = queueTransportDeletionTx(ctx, tx, messageID); err != nil {
+			return err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("зафиксировать изоляцию повреждённого входного пакета: %w", err)
+	}
+	return nil
 }
 
 func (store *ServerStore) MarkTransportRetry(

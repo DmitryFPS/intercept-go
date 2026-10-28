@@ -3,6 +3,9 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,8 +18,11 @@ import (
 )
 
 const (
-	transportAuditBufferSize = 512
-	transportAuditWriteLimit = 2 * time.Second
+	transportAuditBufferSize      = 512
+	transportAuditWriteLimit      = 2 * time.Second
+	transportAuditSpoolFiles      = 10_000
+	transportAuditSpoolBytes      = 64 << 20
+	transportAuditSpoolEntryBytes = 64 << 10
 )
 
 type transportObservationRecorder interface {
@@ -28,23 +34,32 @@ type transportObservationRecorder interface {
 // сохраняется на диск и не теряется. При остановке канал дренируется, а файлы
 // удаляются только после подтверждённой записи в базу.
 type transportAuditSink struct {
-	recorder transportObservationRecorder
-	logger   *slog.Logger
-	spoolDir string
-	pending  chan application.TransportObservation
-	done     chan struct{}
-	close    sync.Once
+	recorder           transportObservationRecorder
+	logger             *slog.Logger
+	spoolDir           string
+	pending            chan application.TransportObservation
+	done               chan struct{}
+	close              sync.Once
+	gate               sync.RWMutex
+	closed             bool
+	spoolMu            sync.Mutex
+	maxSpoolFiles      int
+	maxSpoolBytes      int64
+	maxSpoolEntryBytes int64
 }
 
 func newTransportAuditSink(
 	recorder transportObservationRecorder, logger *slog.Logger, spoolDir string, capacity int,
 ) *transportAuditSink {
 	return &transportAuditSink{
-		recorder: recorder,
-		logger:   logger,
-		spoolDir: spoolDir,
-		pending:  make(chan application.TransportObservation, capacity),
-		done:     make(chan struct{}),
+		recorder:           recorder,
+		logger:             logger,
+		spoolDir:           spoolDir,
+		pending:            make(chan application.TransportObservation, capacity),
+		done:               make(chan struct{}),
+		maxSpoolFiles:      transportAuditSpoolFiles,
+		maxSpoolBytes:      transportAuditSpoolBytes,
+		maxSpoolEntryBytes: transportAuditSpoolEntryBytes,
 	}
 }
 
@@ -68,11 +83,20 @@ func (sink *transportAuditSink) run() {
 }
 
 func (sink *transportAuditSink) submit(item application.TransportObservation) {
+	sink.gate.RLock()
+	if sink.closed {
+		sink.gate.RUnlock()
+		sink.warn("наблюдение транспорта поступило после остановки журнала",
+			"transport_message_id", item.MessageID, "outcome", item.Outcome)
+		return
+	}
 	select {
 	case sink.pending <- item:
+		sink.gate.RUnlock()
 		return
 	default:
 	}
+	sink.gate.RUnlock()
 	if err := sink.spool(item); err != nil {
 		sink.warn("не удалось сохранить переполненный журнал транспорта",
 			"transport_message_id", item.MessageID, "outcome", item.Outcome, "error", err)
@@ -83,7 +107,12 @@ func (sink *transportAuditSink) submit(item application.TransportObservation) {
 }
 
 func (sink *transportAuditSink) shutdown() {
-	sink.close.Do(func() { close(sink.pending) })
+	sink.close.Do(func() {
+		sink.gate.Lock()
+		sink.closed = true
+		close(sink.pending)
+		sink.gate.Unlock()
+	})
 	<-sink.done
 }
 
@@ -109,11 +138,19 @@ func (sink *transportAuditSink) record(item application.TransportObservation) er
 }
 
 func (sink *transportAuditSink) spool(item application.TransportObservation) error {
+	sink.spoolMu.Lock()
+	defer sink.spoolMu.Unlock()
 	if err := os.MkdirAll(sink.spoolDir, 0o700); err != nil {
 		return err
 	}
 	payload, err := json.Marshal(item)
 	if err != nil {
+		return err
+	}
+	if int64(len(payload)) > sink.maxSpoolEntryBytes {
+		return fmt.Errorf("запись журнала транспорта превышает предел %d байт", sink.maxSpoolEntryBytes)
+	}
+	if err := sink.ensureSpoolCapacity(int64(len(payload))); err != nil {
 		return err
 	}
 	temporary, err := os.CreateTemp(sink.spoolDir, ".transport-audit-*.tmp")
@@ -149,6 +186,33 @@ func (sink *transportAuditSink) spool(item application.TransportObservation) err
 	return nil
 }
 
+func (sink *transportAuditSink) ensureSpoolCapacity(incoming int64) error {
+	entries, err := os.ReadDir(sink.spoolDir)
+	if err != nil {
+		return err
+	}
+	count := 0
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() || !transportAuditSpoolName(entry.Name(), true) {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		count++
+		total += info.Size()
+	}
+	if count >= sink.maxSpoolFiles || total+incoming > sink.maxSpoolBytes {
+		return fmt.Errorf("дисковая очередь журнала транспорта достигла предела: файлов=%d, байт=%d", count, total)
+	}
+	return nil
+}
+
 func (sink *transportAuditSink) flushSpool(includeTemporary bool) {
 	entries, err := os.ReadDir(sink.spoolDir)
 	if err != nil {
@@ -160,16 +224,14 @@ func (sink *transportAuditSink) flushSpool(includeTemporary bool) {
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		completed := strings.HasPrefix(name, "transport-audit-") && strings.HasSuffix(name, ".json")
-		temporary := includeTemporary && strings.HasPrefix(name, ".transport-audit-") && strings.HasSuffix(name, ".tmp")
-		if !entry.IsDir() && (completed || temporary) {
+		if !entry.IsDir() && transportAuditSpoolName(name, includeTemporary) {
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
 	for _, name := range names {
 		path := filepath.Join(sink.spoolDir, name)
-		payload, readErr := os.ReadFile(path)
+		payload, readErr := readTransportAuditSpool(path, sink.maxSpoolEntryBytes)
 		if readErr != nil {
 			sink.warn("не удалось прочитать отложенную запись журнала транспорта", "error", readErr)
 			continue
@@ -191,6 +253,29 @@ func (sink *transportAuditSink) flushSpool(includeTemporary bool) {
 		}
 		sink.logRecorded(item)
 	}
+}
+
+func transportAuditSpoolName(name string, includeTemporary bool) bool {
+	if strings.HasPrefix(name, "transport-audit-") && strings.HasSuffix(name, ".json") {
+		return true
+	}
+	return includeTemporary && strings.HasPrefix(name, ".transport-audit-") && strings.HasSuffix(name, ".tmp")
+}
+
+func readTransportAuditSpool(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > limit {
+		return nil, errors.New("запись дисковой очереди журнала превышает допустимый размер")
+	}
+	return payload, nil
 }
 
 func (sink *transportAuditSink) logRecorded(item application.TransportObservation) {

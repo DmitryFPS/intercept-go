@@ -45,8 +45,9 @@ func TestSavedQueueDispatchDoesNotRequireEAVCSource(t *testing.T) {
 		SourceAt: now, ExpiresAt: now.Add(time.Hour),
 		Source:   domain.SourceRecord{UUID: "source-1", ID: 1, UpdatedAt: now.Format(time.RFC3339Nano)},
 		Position: domain.Position{UnitName: "1 мб 155 омбр"}, Mode: domain.SourceModeNormal,
-		Content: "сохранённый перехват", ContentDigest: "digest-1",
+		Content: "сохранённый перехват", ContentDigestVersion: domain.ContentDigestVersionCurrent,
 	}
+	event.ContentDigest = event.CanonicalContentDigest()
 	if inserted, err := queue.Enqueue(ctx, event); err != nil || !inserted {
 		t.Fatalf("поставить событие в очередь: inserted=%v err=%v", inserted, err)
 	}

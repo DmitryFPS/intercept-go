@@ -18,7 +18,7 @@ import (
 const (
 	acknowledgementPrefixV3    = "IC-ACK/3 "
 	probeAcknowledgementPrefix = "IC-PROBE-ACK/2 "
-	probeSchema                = "IC-PROBE/1"
+	probeSchema                = "IC-PROBE/2"
 	acknowledgementSchema      = "IC-ACK/3"
 	probeAcknowledgementSchema = "IC-PROBE-ACK/2"
 )
@@ -34,26 +34,34 @@ type ClientTransport struct {
 }
 
 type probePayload struct {
-	Schema   string `json:"schema"`
-	ClientID string `json:"client_id"`
-	ProbeID  string `json:"probe_id"`
-	SentAt   string `json:"sent_at"`
-	MAC      string `json:"mac"`
+	Schema   string                    `json:"schema"`
+	ClientID string                    `json:"client_id"`
+	ProbeID  string                    `json:"probe_id"`
+	SentAt   string                    `json:"sent_at"`
+	Shift    application.ShiftSnapshot `json:"shift"`
+	MAC      string                    `json:"mac"`
 }
 
 // SendProbe отправляет безопасный служебный файл, который сервер подтверждает
 // напрямую клиентскому боту. Конечные группы такой файл никогда не получают.
-func (transport *ClientTransport) SendProbe(ctx context.Context, clientID string) (string, error) {
+func (transport *ClientTransport) SendProbe(ctx context.Context, clientID string, shift application.ShiftSnapshot) (string, error) {
 	if len(transport.Key) != 32 {
 		return "", fmt.Errorf("для проверки связи не задан ключ рабочей точки")
+	}
+	shift = application.NormalizeShiftSnapshot(shift)
+	if err := application.ValidateShiftSnapshot(shift); err != nil {
+		return "", fmt.Errorf("проверить состояние смены EAVC: %w", err)
 	}
 	probeID, err := protocol.UUIDv7(time.Now().UTC(), rand.Reader)
 	if err != nil {
 		return "", err
 	}
 	sentAt := time.Now().UTC().Truncate(time.Second)
-	probe := probePayload{Schema: probeSchema, ClientID: clientID, ProbeID: probeID, SentAt: sentAt.Format(time.RFC3339)}
-	probe.MAC = probeMAC(transport.Key, probe.ClientID, probe.ProbeID, probe.SentAt)
+	probe := probePayload{
+		Schema: probeSchema, ClientID: clientID, ProbeID: probeID,
+		SentAt: sentAt.Format(time.RFC3339), Shift: shift,
+	}
+	probe.MAC = probeMAC(transport.Key, probe.ClientID, probe.ProbeID, probe.SentAt, probe.Shift)
 	payload, err := json.Marshal(probe)
 	if err != nil {
 		return "", err
@@ -67,9 +75,11 @@ func (transport *ClientTransport) SendProbe(ctx context.Context, clientID string
 	return probeID, nil
 }
 
-func probeMAC(key []byte, clientID, probeID, sentAt string) string {
+func probeMAC(key []byte, clientID, probeID, sentAt string, shift application.ShiftSnapshot) string {
 	digest := hmac.New(sha256.New, key)
-	_, _ = digest.Write([]byte(probeSchema + "\x00" + clientID + "\x00" + probeID + "\x00" + sentAt))
+	shiftJSON, _ := json.Marshal(application.NormalizeShiftSnapshot(shift))
+	_, _ = digest.Write([]byte(probeSchema + "\x00" + clientID + "\x00" + probeID + "\x00" + sentAt + "\x00"))
+	_, _ = digest.Write(shiftJSON)
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
@@ -80,7 +90,10 @@ func VerifyProbe(packet application.IncomingPacket, key []byte) bool {
 		packet.ProbeMAC == "" || packet.ProbeSentAt.IsZero() || packet.SentAt.IsZero() {
 		return false
 	}
-	expected := probeMAC(key, packet.ProbeClientID, packet.ProbeID, packet.ProbeSentAt.Format(time.RFC3339))
+	if err := application.ValidateShiftSnapshot(packet.ProbeShift); err != nil {
+		return false
+	}
+	expected := probeMAC(key, packet.ProbeClientID, packet.ProbeID, packet.ProbeSentAt.Format(time.RFC3339), packet.ProbeShift)
 	actual, err := hex.DecodeString(packet.ProbeMAC)
 	if err != nil || !hmac.Equal([]byte(expected), []byte(hex.EncodeToString(actual))) {
 		return false

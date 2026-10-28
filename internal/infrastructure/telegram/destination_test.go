@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -129,6 +130,30 @@ func TestFormatEventKeepsSeveralTimeBlocksInOneMessage(t *testing.T) {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("в объединённом сообщении нет %q:\n%s", expected, got)
 		}
+	}
+}
+
+func TestFormatEventNormalizesAllMarkedTimeHeaders(t *testing.T) {
+	t.Parallel()
+	event := domain.Event{
+		SourceAt: time.Date(2026, 10, 28, 10, 45, 0, 0, time.UTC),
+		Position: domain.Position{UnitName: "Игровая команда", Frequency: "100.100", GroupCode: "GAME-1"},
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Text: "10.15\n-Начало раунда. (7)\n10.18#\n-Уточнение. (7)\n10.28#1\n-Финиш. (7)",
+			Callsigns: []domain.Callsign{{Code: "7", Label: "Игрок"}},
+		}},
+	}
+	got := FormatEventForNetwork(event, "Тест", false)
+	for _, expected := range []string{
+		"<b>10:15</b>", "<b>10:18</b>", "<b>10:28</b>",
+		"/1/ Начало раунда.", "/1/ Уточнение.", "/1/ Финиш.",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("в Telegram нет %q:\n%s", expected, got)
+		}
+	}
+	if strings.Contains(got, "10.18#") || strings.Contains(got, "10.28#1") {
+		t.Fatalf("служебная решётка попала в Telegram: %s", got)
 	}
 }
 
@@ -332,9 +357,9 @@ func TestDestinationKeepsIndependentBlocksWithoutDuplicates(t *testing.T) {
 	}
 }
 
-// Удалённая вручную публикация не восстанавливается автоматически. Её UUID
-// подавляется, а параллельная обработка не создаёт повторов и не блокирует очередь.
-func TestDestinationSuppressesManuallyDeletedMessage(t *testing.T) {
+// Само ручное удаление не обнаруживается и не создаёт публикацию заново.
+// Первая следующая содержательная редакция восстанавливает тот же UUID один раз.
+func TestDestinationRestoresManuallyDeletedMessageOnNewContent(t *testing.T) {
 	t.Parallel()
 	var sends, edits, deletes atomic.Int32
 	var nextID atomic.Int64
@@ -385,15 +410,27 @@ func TestDestinationSuppressesManuallyDeletedMessage(t *testing.T) {
 	}
 	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
 	event := domain.Event{
-		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
-		SourceAt: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
-		Position: domain.Position{UnitName: "позиция"},
-		Blocks:   []domain.ContentBlock{{Key: "12.00", Text: "12.00\n-Первое"}},
+		ID: "event-v1", ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"},
+		CreatedAt:       time.Date(2026, 10, 26, 12, 0, 0, 1, time.UTC),
+		SourceAt:        time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
+		Position:        domain.Position{UnitName: "позиция"},
+		SourceBlockUUID: "block-1",
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Key: "12.00", Text: "12.00\n-Первое", UpdatedAt: "2026-10-26 12:00:00",
+		}},
 	}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
+	// Telegram не присылает боту событие ручного удаления. Точный повтор v1
+	// должен остаться локальным no-op и не пытаться восстановить публикацию.
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
 	event.Blocks[0].Text = "12.00\n-Первое исправлено"
+	event.Blocks[0].UpdatedAt = "2026-10-26 12:01:00"
+	event.ID = "event-v2"
+	event.CreatedAt = event.CreatedAt.Add(time.Minute)
 	event.SourceAt = event.SourceAt.Add(time.Minute)
 	start := make(chan struct{})
 	errorsFound := make(chan error, 2)
@@ -414,47 +451,59 @@ func TestDestinationSuppressesManuallyDeletedMessage(t *testing.T) {
 			t.Fatalf("восстановление завершилось ошибкой: %v", deliveryErr)
 		}
 	}
-	if sends.Load() != 1 || edits.Load() != 1 || deletes.Load() != 1 {
-		t.Fatalf("удалённое сообщение не должно восстанавливаться: sends=%d edits=%d deletes=%d", sends.Load(), edits.Load(), deletes.Load())
+	if sends.Load() != 2 || edits.Load() != 1 || deletes.Load() != 1 {
+		t.Fatalf("новая редакция не восстановлена ровно один раз: sends=%d edits=%d deletes=%d", sends.Load(), edits.Load(), deletes.Load())
 	}
 	current, err := loadDestinationState(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	block := current.Items["point-01|source-1"].Blocks["12.00"]
-	if !block.Suppressed || len(block.MessageIDs) != 0 || len(block.DeletedMessageIDs) != 1 || block.DeletedMessageIDs[0] != 101 {
-		t.Fatalf("удалённый message_id не зафиксирован как подавленный: %#v", block)
+	block := current.Items["point-01|source-1"].Blocks["block-1"]
+	if block.Suppressed || !reflect.DeepEqual(block.MessageIDs, []int64{102}) ||
+		!reflect.DeepEqual(block.DeletedMessageIDs, []int64{101}) || block.SourceVersion != "2026-10-26 12:01:00" {
+		t.Fatalf("новый и удалённый message_id связаны неверно: %#v", block)
 	}
-	if !strings.Contains(logs.String(), "не будет восстановлена автоматически") {
-		t.Fatalf("в журнале нет результата подавления: %s", logs.String())
+	if !strings.Contains(logs.String(), "восстанавливается новой редакцией") {
+		t.Fatalf("в журнале нет результата восстановления: %s", logs.String())
 	}
 	event.Blocks[0].Text = "12.00\n-Третья редакция"
+	event.Blocks[0].UpdatedAt = "2026-10-26 12:02:00"
+	event.ID = "event-v3"
+	event.CreatedAt = event.CreatedAt.Add(time.Minute)
 	event.SourceAt = event.SourceAt.Add(time.Minute)
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
-	if sends.Load() != 1 || edits.Load() != 1 {
-		t.Fatalf("следующая версия восстановила удалённое сообщение: sends=%d edits=%d", sends.Load(), edits.Load())
+	if sends.Load() != 2 || edits.Load() != 2 {
+		t.Fatalf("следующая версия не изменила восстановленное сообщение: sends=%d edits=%d", sends.Load(), edits.Load())
 	}
 }
 
-// Подавление удалённого сообщения переживает перезапуск. Даже новая редакция
-// того же block_uuid не создаёт публикацию, пока оператор явно не разрешит её.
-func TestDestinationKeepsDeletedMessageSuppressedAfterRestart(t *testing.T) {
+// Перезапуск не восстанавливает удалённую публикацию по точному повтору, но
+// следующая содержательная версия создаёт новую привязку и дальше редактируется.
+func TestDestinationRestoresDeletedMessageAfterRestartOnlyForNewVersion(t *testing.T) {
 	t.Parallel()
 	var methods []string
+	nextID := int64(100)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
 		methods = append(methods, method)
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
 		switch method {
 		case "sendMessage":
+			nextID++
 			_ = json.NewEncoder(writer).Encode(map[string]any{
-				"ok": true, "result": map[string]any{"message_id": 101},
+				"ok": true, "result": map[string]any{"message_id": nextID},
 			})
 		case "editMessageText":
-			_ = json.NewEncoder(writer).Encode(map[string]any{
-				"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found",
-			})
+			if int64(body["message_id"].(float64)) == 101 {
+				_ = json.NewEncoder(writer).Encode(map[string]any{
+					"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found",
+				})
+			} else {
+				_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+			}
 		case "deleteMessage":
 			_ = json.NewEncoder(writer).Encode(map[string]any{
 				"ok": false, "error_code": 400, "description": "Bad Request: message to delete not found",
@@ -471,38 +520,58 @@ func TestDestinationKeepsDeletedMessageSuppressedAfterRestart(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
 	event := domain.Event{
-		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
-		SourceAt: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
-		Position: domain.Position{UnitName: "позиция"},
-		Blocks:   []domain.ContentBlock{{UUID: "block-1", Key: "12.00", Text: "12.00\n-Первое"}},
+		ID: "event-v1", ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"},
+		CreatedAt:       time.Date(2026, 10, 26, 12, 0, 0, 1, time.UTC),
+		SourceAt:        time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
+		Position:        domain.Position{UnitName: "позиция"},
+		SourceBlockUUID: "block-1",
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Key: "12.00", Text: "12.00\n-Первое", UpdatedAt: "2026-10-26 12:00:00",
+		}},
 	}
 	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
-	event.Blocks[0].Text = "12.00\n-Первое исправлено"
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
-		t.Fatal(err)
-	}
 	restarted := Destination{API: api, ChatID: -1001, StatePath: statePath}
-	event.Blocks[0].Text = "12.00\n-Третья редакция"
 	if err := restarted.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"sendMessage", "editMessageText", "deleteMessage"}
+	event.ID = "event-v2"
+	event.CreatedAt = event.CreatedAt.Add(time.Minute)
+	event.SourceAt = event.SourceAt.Add(time.Minute)
+	event.Blocks[0].Text = "12.00\n-Первое исправлено"
+	event.Blocks[0].UpdatedAt = "2026-10-26 12:01:00"
+	if err := restarted.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	restartedAgain := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	if err := restartedAgain.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	event.ID = "event-v3"
+	event.CreatedAt = event.CreatedAt.Add(time.Minute)
+	event.SourceAt = event.SourceAt.Add(time.Minute)
+	event.Blocks[0].Text = "12.00\n-Третья редакция"
+	event.Blocks[0].UpdatedAt = "2026-10-26 12:02:00"
+	if err := restartedAgain.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"sendMessage", "editMessageText", "deleteMessage", "sendMessage", "editMessageText"}
 	if !reflect.DeepEqual(methods, want) {
-		t.Fatalf("после перезапуска удалённая публикация восстановлена: %v", methods)
+		t.Fatalf("неверные операции после перезапуска: %v", methods)
 	}
 	current, err := loadDestinationState(statePath)
-	if err != nil || !current.Items["point-01|source-1"].Blocks["block-1"].Suppressed {
-		t.Fatalf("подавление не сохранено: %#v err=%v", current, err)
+	block := current.Items["point-01|source-1"].Blocks["block-1"]
+	if err != nil || block.Suppressed || !reflect.DeepEqual(block.MessageIDs, []int64{102}) || block.SourceVersion != "2026-10-26 12:02:00" {
+		t.Fatalf("восстановленная привязка не сохранена: %#v err=%v", current, err)
 	}
 }
 
 func TestDestinationRepublishesOnlyExplicitlySelectedBlock(t *testing.T) {
 	t.Parallel()
 	var methods []string
-	nextID := int64(100)
+	nextID := int64(102)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
 		methods = append(methods, method)
@@ -530,22 +599,27 @@ func TestDestinationRepublishesOnlyExplicitlySelectedBlock(t *testing.T) {
 	api.sends.globalInterval = 0
 	api.sends.groupInterval = 0
 	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {ThreadID: 42, Blocks: map[string]destinationBlock{
+			"block-1": {
+				DeletedMessageIDs: []int64{101}, Suppressed: true,
+				SuppressedReason: "сообщение удалено вручную в Telegram",
+				SourceVersion:    "2026-10-26 12:00:00",
+			},
+			"block-2": {MessageIDs: []int64{102}, SourceHash: "second", Sequence: 1},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
 	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
 	event := domain.Event{
-		ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
-		Position: domain.Position{UnitName: "позиция"},
-		Blocks: []domain.ContentBlock{
-			{UUID: "block-1", Sequence: 0, Text: "12.00\n-Первое"},
-			{UUID: "block-2", Sequence: 1, Text: "12.01\n-Второе"},
-		},
-	}
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
-		t.Fatal(err)
-	}
-	event.Blocks[0].Text = "12.00\n-Первое исправлено"
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
-		t.Fatal(err)
+		ID: "manual-v1", ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"}, CreatedAt: time.Now(),
+		Position:        domain.Position{UnitName: "позиция"},
+		SourceBlockUUID: "block-1",
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Sequence: 0, Text: "12.00\n-Первое", UpdatedAt: "2026-10-26 12:00:00",
+		}},
 	}
 	allowed, err := destination.AllowRepublish("block-1")
 	if err != nil || !allowed {
@@ -571,9 +645,76 @@ func TestDestinationRepublishesOnlyExplicitlySelectedBlock(t *testing.T) {
 		!reflect.DeepEqual(second.MessageIDs, []int64{102}) {
 		t.Fatalf("неверная привязка после ручной публикации: first=%#v second=%#v", first, second)
 	}
-	want := []string{"sendMessage", "sendMessage", "editMessageText", "deleteMessage", "sendMessage"}
+	want := []string{"sendMessage"}
 	if !reflect.DeepEqual(methods, want) {
 		t.Fatalf("чужой блок затронут при повторной публикации: %v", methods)
+	}
+}
+
+func TestDestinationDoesNotDuplicateUncertainSendAfterRestart(t *testing.T) {
+	t.Parallel()
+	var sends atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			sends.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"message_id": 301},
+			})
+			return
+		}
+		http.Error(writer, "неожиданный метод", http.StatusNotFound)
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {Blocks: map[string]destinationBlock{
+			"block-1": {
+				SendPending: true, SendPendingAt: "2026-10-28T12:00:00Z",
+				SourceVersion: "2026-10-28 12:00:00",
+			},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "event-1", ClientID: "point-01", CreatedAt: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC),
+		Source: domain.SourceRecord{UUID: "source-1"}, Position: domain.Position{UnitName: "позиция"},
+		SourceBlockUUID: "block-1", HasActiveBlocks: true,
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Text: "12.00\n-Первое", UpdatedAt: "2026-10-28 12:00:00",
+		}},
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	if err := destination.Deliver(context.Background(), event, delivery); err == nil || !application.IsPermanentDeliveryError(err) {
+		t.Fatalf("неопределённая отправка не изолирована: %v", err)
+	}
+	if sends.Load() != 0 {
+		t.Fatalf("после неопределённой отправки создан автоматический дубль: sends=%d", sends.Load())
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := current.Items["point-01|source-1"].Blocks["block-1"]
+	if !block.Suppressed || block.SendPending || !strings.Contains(block.SuppressedReason, "дубль запрещён") {
+		t.Fatalf("неопределённая попытка не получила безопасное состояние: %#v", block)
+	}
+	allowed, err := destination.AllowRepublish("block-1")
+	if err != nil || !allowed {
+		t.Fatalf("оператор не может разрешить публикацию после проверки Telegram: allowed=%v err=%v", allowed, err)
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if sends.Load() != 1 {
+		t.Fatalf("ручное разрешение не создало ровно одно сообщение: sends=%d", sends.Load())
 	}
 }
 
@@ -605,8 +746,8 @@ func TestDestinationScopedEventNeverChangesSiblingBlock(t *testing.T) {
 	event := domain.Event{
 		ID: "event-a", ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"},
 		Position: domain.Position{UnitName: "позиция"}, SourceBlockUUID: "block-a",
-		ActiveBlockUUIDs: []string{"block-a", "block-b"},
-		Blocks:           []domain.ContentBlock{{UUID: "block-a", Text: "12.00\n-Первый исправлен"}},
+		HasActiveBlocks: true,
+		Blocks:          []domain.ContentBlock{{UUID: "block-a", Text: "12.00\n-Первый исправлен"}},
 	}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
@@ -618,7 +759,7 @@ func TestDestinationScopedEventNeverChangesSiblingBlock(t *testing.T) {
 	}
 	event.ID = "delete-a"
 	event.SourceBlockDeleted = true
-	event.ActiveBlockUUIDs = []string{"block-b"}
+	event.HasActiveBlocks = true
 	event.Blocks[0].DeletedAt = "2026-10-27 19:00:00"
 	event.Blocks[0].Text = ""
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
@@ -629,11 +770,355 @@ func TestDestinationScopedEventNeverChangesSiblingBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := current.Items["point-01|source-1"]
-	if _, exists := item.Blocks["block-a"]; exists || !reflect.DeepEqual(item.Blocks["block-b"].MessageIDs, []int64{102}) {
+	deleted := item.Blocks["block-a"]
+	if !deleted.SourceDeleted || len(deleted.MessageIDs) != 0 || !reflect.DeepEqual(deleted.DeletedMessageIDs, []int64{101}) ||
+		!reflect.DeepEqual(item.Blocks["block-b"].MessageIDs, []int64{102}) {
 		t.Fatalf("удаление одного блока затронуло соседний: %#v", item)
 	}
 	if want := []string{"editMessageText", "deleteMessage"}; !reflect.DeepEqual(methods, want) {
 		t.Fatalf("неверные Telegram-операции: got=%v want=%v", methods, want)
+	}
+}
+
+func TestDestinationSourceTombstoneRejectsLateEditAndAllowsNewerRestore(t *testing.T) {
+	t.Parallel()
+	var methods, texts []string
+	nextID := int64(100)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		methods = append(methods, method)
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if text, ok := body["text"].(string); ok {
+			texts = append(texts, text)
+		}
+		if method == "sendMessage" {
+			nextID++
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": nextID}})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	destination := Destination{API: api, ChatID: -1001, StatePath: filepath.Join(t.TempDir(), "state.json")}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	created := time.Date(2026, 10, 28, 10, 0, 0, 1, time.UTC)
+	event := domain.Event{
+		ID: "v1", ClientID: "point-01", CreatedAt: created, SourceAt: created,
+		Source: domain.SourceRecord{UUID: "source-1"}, Position: domain.Position{UnitName: "Игровая команда"},
+		SourceBlockUUID: "block-1", HasActiveBlocks: true,
+		Blocks: []domain.ContentBlock{{UUID: "block-1", Text: "10.00\n-Старт", UpdatedAt: "2026-10-28 10:00:00"}},
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	deletion := event
+	deletion.ID = "v3-delete"
+	deletion.CreatedAt = created.Add(3 * time.Minute)
+	deletion.SourceAt = deletion.CreatedAt
+	deletion.SourceBlockDeleted = true
+	deletion.HasActiveBlocks = false
+	deletion.Blocks = []domain.ContentBlock{{UUID: "block-1", DeletedAt: "2026-10-28 10:03:00"}}
+	if err := destination.Deliver(context.Background(), deletion, delivery); err != nil {
+		t.Fatal(err)
+	}
+	stale := event
+	stale.ID = "v2-late"
+	stale.CreatedAt = created.Add(2 * time.Minute)
+	stale.SourceAt = stale.CreatedAt
+	stale.Blocks[0].Text = "10.00\n-Старая запоздалая редакция"
+	stale.Blocks[0].UpdatedAt = "2026-10-28 10:02:00"
+	if err := destination.Deliver(context.Background(), stale, delivery); err != nil {
+		t.Fatal(err)
+	}
+	restored := event
+	restored.ID = "v4-restore"
+	restored.CreatedAt = created.Add(4 * time.Minute)
+	restored.SourceAt = restored.CreatedAt
+	restored.Blocks[0].Text = "10.00\n-Новая версия после восстановления источника"
+	restored.Blocks[0].UpdatedAt = "2026-10-28 10:04:00"
+	if err := destination.Deliver(context.Background(), restored, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Deliver(context.Background(), deletion, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"sendMessage", "deleteMessage", "sendMessage"}; !reflect.DeepEqual(methods, want) {
+		t.Fatalf("устаревшая версия изменила Telegram: got=%v want=%v", methods, want)
+	}
+	if len(texts) != 2 || !strings.Contains(texts[1], "Новая версия после восстановления источника\n\n(отредактировано 13:04:00)") {
+		t.Fatalf("восстановленная версия оформлена неверно: %#v", texts)
+	}
+	current, err := loadDestinationState(destination.StatePath)
+	block := current.Items["point-01|source-1"].Blocks["block-1"]
+	if err != nil || block.SourceDeleted || !reflect.DeepEqual(block.MessageIDs, []int64{102}) ||
+		!reflect.DeepEqual(block.DeletedMessageIDs, []int64{101}) || block.SourceVersion != "2026-10-28 10:04:00" {
+		t.Fatalf("неверное состояние после tombstone/restore: %#v err=%v", block, err)
+	}
+}
+
+func TestDestinationVersionedStateRejectsLateThreadMove(t *testing.T) {
+	t.Parallel()
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		methods = append(methods, request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:])
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	storedAt := time.Date(2026, 10, 28, 11, 0, 0, 0, time.UTC)
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {
+			ThreadID: 42, UpdatedAt: storedAt,
+			Blocks: map[string]destinationBlock{
+				"block-1": {
+					SourceHash: "current", MessageIDs: []int64{101},
+					SourceVersion: "2026-10-28 11:00:00", SourceEventAt: storedAt,
+				},
+			},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	event := domain.Event{
+		ID: "late-v1", ClientID: "point-01", CreatedAt: storedAt.Add(-time.Minute),
+		Source: domain.SourceRecord{UUID: "source-1", UpdatedAt: "2026-10-28 10:59:00"}, SourceBlockUUID: "block-1",
+		Position: domain.Position{UnitName: "Игровая команда"},
+		Blocks:   []domain.ContentBlock{{UUID: "block-1", Text: "10.59\n-Старая версия"}},
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 99}}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 0 {
+		t.Fatalf("запоздалое событие rc90 изменило Telegram: %v", methods)
+	}
+	current, err := loadDestinationState(statePath)
+	item := current.Items["point-01|source-1"]
+	if err != nil || item.ThreadID != 42 || !reflect.DeepEqual(item.Blocks["block-1"].MessageIDs, []int64{101}) {
+		t.Fatalf("запоздалое событие изменило legacy-состояние: %#v err=%v", item, err)
+	}
+}
+
+func TestDestinationVersionedStateRejectsLateEditInSameThread(t *testing.T) {
+	t.Parallel()
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		methods = append(methods, request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:])
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	storedAt := time.Date(2026, 10, 28, 11, 0, 0, 0, time.UTC)
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {
+			ThreadID: 42, UpdatedAt: storedAt,
+			Blocks: map[string]destinationBlock{
+				"block-1": {
+					SourceHash: "current", MessageIDs: []int64{101},
+					SourceVersion: "2026-10-28 11:00:00", SourceEventAt: storedAt,
+				},
+			},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	event := domain.Event{
+		ID: "late-v1", ClientID: "point-01", CreatedAt: storedAt.Add(-time.Minute),
+		Source: domain.SourceRecord{UUID: "source-1", UpdatedAt: "2026-10-28 10:59:00"}, SourceBlockUUID: "block-1",
+		Position: domain.Position{UnitName: "Игровая команда"},
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Text: "10.59\n-Старая версия", UpdatedAt: "2026-10-28 10:59:00",
+		}},
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 0 {
+		t.Fatalf("запоздалая правка откатила ту же тему: %v", methods)
+	}
+}
+
+func TestDestinationLegacyStateAcceptsNewBacklogRevisionOlderThanLocalWrite(t *testing.T) {
+	t.Parallel()
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		methods = append(methods, request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:])
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	localWriteAt := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {
+			ThreadID: 42, UpdatedAt: localWriteAt,
+			Blocks: map[string]destinationBlock{
+				"block-1": {SourceHash: "legacy-content", MessageIDs: []int64{101}},
+			},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	eventCreatedAt := localWriteAt.Add(-2 * time.Hour)
+	event := domain.Event{
+		ID: "backlog-v2", ClientID: "point-01", CreatedAt: eventCreatedAt, SourceAt: eventCreatedAt,
+		Source:          domain.SourceRecord{UUID: "source-1", UpdatedAt: "2026-10-28 10:00:00"},
+		SourceBlockUUID: "block-1", Position: domain.Position{UnitName: "Игровая команда"},
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Text: "10.00\n-Новая редакция из очереди", UpdatedAt: "2026-10-28 10:00:00",
+		}},
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(methods, []string{"editMessageText"}) {
+		t.Fatalf("новая backlog-редакция не обновила legacy-публикацию: %v", methods)
+	}
+	current, err := loadDestinationState(statePath)
+	block := current.Items["point-01|source-1"].Blocks["block-1"]
+	if err != nil || block.SourceVersion != "2026-10-28 10:00:00" || !block.SourceEventAt.Equal(eventCreatedAt) {
+		t.Fatalf("истинная ревизия backlog не закреплена: %#v err=%v", block, err)
+	}
+}
+
+func TestDestinationLegacyCleanupUsesIndependentBlockBaselines(t *testing.T) {
+	t.Parallel()
+	var deleted []int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if strings.HasSuffix(request.URL.Path, "/deleteMessage") {
+			deleted = append(deleted, int64(body["message_id"].(float64)))
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	baseline := time.Date(2026, 10, 28, 11, 0, 0, 0, time.UTC)
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {ThreadID: 42, UpdatedAt: baseline, Blocks: map[string]destinationBlock{
+			"block-a": {MessageIDs: []int64{101}}, "block-b": {MessageIDs: []int64{102}},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	cleanup := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteSkip}}
+	for index, blockUUID := range []string{"block-a", "block-b"} {
+		event := domain.Event{
+			ID: fmt.Sprintf("delete-%d", index), ClientID: "point-01",
+			CreatedAt: baseline.Add(time.Duration(index+1) * time.Minute),
+			Source:    domain.SourceRecord{UUID: "source-1"}, SourceBlockUUID: blockUUID,
+			SourceBlockDeleted: true,
+			Blocks: []domain.ContentBlock{{
+				UUID: blockUUID, DeletedAt: baseline.Add(time.Duration(index+1) * time.Minute).Format("2006-01-02 15:04:05"),
+			}},
+		}
+		if err := destination.Deliver(context.Background(), event, cleanup); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(deleted, []int64{101, 102}) {
+		t.Fatalf("второй cleanup ошибочно стал stale: %v", deleted)
+	}
+	current, err := loadDestinationState(statePath)
+	item := current.Items["point-01|source-1"]
+	if err != nil || !item.Blocks["block-a"].SourceDeleted || !item.Blocks["block-b"].SourceDeleted {
+		t.Fatalf("не оба блока зафиксированы удалёнными: %#v err=%v", item, err)
+	}
+}
+
+func TestDestinationThreadMoveNeverDeletesSiblingBlock(t *testing.T) {
+	t.Parallel()
+	var methods []string
+	nextID := int64(100)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		methods = append(methods, method)
+		if method == "sendMessage" {
+			nextID++
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": nextID}})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	destination := Destination{API: api, ChatID: -1001, StatePath: filepath.Join(t.TempDir(), "state.json")}
+	base := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	makeEvent := func(id, blockUUID, version, text string, created time.Time) domain.Event {
+		return domain.Event{
+			ID: id, ClientID: "point-01", CreatedAt: created, SourceAt: created,
+			Source: domain.SourceRecord{UUID: "source-1"}, SourceBlockUUID: blockUUID,
+			Position: domain.Position{UnitName: "Игровая команда"},
+			Blocks:   []domain.ContentBlock{{UUID: blockUUID, Text: text, UpdatedAt: version}},
+		}
+	}
+	thread42 := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	thread99 := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 99}}
+	a1 := makeEvent("a-v1", "block-a", "2026-10-28 10:01:00", "10.01\n-A1", base.Add(time.Minute))
+	b1 := makeEvent("b-v1", "block-b", "2026-10-28 10:01:00", "10.01\n-B1", base.Add(time.Minute))
+	if err := destination.Deliver(context.Background(), a1, thread42); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Deliver(context.Background(), b1, thread42); err != nil {
+		t.Fatal(err)
+	}
+	b2 := makeEvent("b-v2", "block-b", "2026-10-28 10:02:00", "10.01\n-B2", base.Add(2*time.Minute))
+	if err := destination.Deliver(context.Background(), b2, thread99); err != nil {
+		t.Fatal(err)
+	}
+	a0 := makeEvent("a-v0-late", "block-a", "2026-10-28 10:00:00", "10.01\n-A0", base)
+	if err := destination.Deliver(context.Background(), a0, thread42); err != nil {
+		t.Fatal(err)
+	}
+	current, err := loadDestinationState(destination.StatePath)
+	item := current.Items["point-01|source-1"]
+	if err != nil || !reflect.DeepEqual(item.Blocks["block-a"].MessageIDs, []int64{101}) ||
+		item.Blocks["block-a"].ThreadID != 42 || !reflect.DeepEqual(item.Blocks["block-b"].MessageIDs, []int64{103}) ||
+		item.Blocks["block-b"].ThreadID != 99 {
+		t.Fatalf("смена темы повредила соседний блок: %#v err=%v", item, err)
+	}
+	if want := []string{"sendMessage", "sendMessage", "deleteMessage", "sendMessage"}; !reflect.DeepEqual(methods, want) {
+		t.Fatalf("неверные Telegram-операции при поблочном переносе: got=%v want=%v", methods, want)
 	}
 }
 
@@ -832,6 +1317,211 @@ func TestDestinationStateKeepsOldIdentityForLateEdit(t *testing.T) {
 	}
 	if _, exists := current.Items["recent"]; !exists {
 		t.Fatal("актуальное состояние удалено")
+	}
+}
+
+func TestDestinationStateBoundsDiagnosticDeletionHistory(t *testing.T) {
+	t.Parallel()
+	blocks := make(map[string]destinationBlock)
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	for index := 0; index < 4100; index++ {
+		blocks[fmt.Sprintf("block-%04d", index)] = destinationBlock{
+			SourceDeleted: true, SourceEventAt: base.Add(time.Duration(index) * time.Second),
+		}
+	}
+	compactTelegramTombstones(blocks)
+	if len(blocks) != 4096 {
+		t.Fatalf("надгробия Telegram не ограничены: %d", len(blocks))
+	}
+	if _, exists := blocks["block-0000"]; exists {
+		t.Fatal("самое старое надгробие не вытеснено")
+	}
+	var ids []int64
+	for value := int64(1); value <= 100; value++ {
+		ids = appendUniqueIDs(ids, value)
+	}
+	if len(ids) != 64 || ids[0] != 37 || ids[len(ids)-1] != 100 {
+		t.Fatalf("история message_id не ограничена последними 64: %v", ids)
+	}
+}
+
+func TestDestinationRecordCleanupRejectsDelayedScopedEventAndAllowsNewerRevision(t *testing.T) {
+	t.Parallel()
+	var methods []string
+	nextID := int64(100)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		methods = append(methods, method)
+		if method == "sendMessage" {
+			nextID++
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"message_id": nextID},
+			})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	destination := Destination{API: api, ChatID: -1001, StatePath: filepath.Join(t.TempDir(), "state.json")}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	base := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	event := domain.Event{
+		ID: "v1", ClientID: "point-01", CreatedAt: base, SourceAt: base,
+		Source:   domain.SourceRecord{UUID: "source-1", UpdatedAt: "2026-10-28 10:00:00"},
+		Position: domain.Position{UnitName: "Игровая команда"}, SourceBlockUUID: "block-1",
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-1", Text: "10.00\n-Первая версия", UpdatedAt: "2026-10-28 10:00:00",
+		}},
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	cleanup := event
+	cleanup.ID = "v3-cleanup"
+	cleanup.CreatedAt = base.Add(3 * time.Minute)
+	cleanup.SourceAt = cleanup.CreatedAt
+	cleanup.Source.UpdatedAt = "2026-10-28 10:03:00"
+	cleanup.SourceBlockUUID = ""
+	cleanup.Blocks = nil
+	if err := destination.Deliver(context.Background(), cleanup, domain.PlannedDelivery{
+		Decision: domain.RouteDecision{Action: domain.RouteSkip},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Барьер удаления записи хранится отдельно от компактируемых неактивных
+	// публикаций. Имитируем длительную работу после очистки: целевая запись
+	// должна исчезнуть из Items, но её монотонный барьер обязан сохраниться.
+	compacted, err := loadDestinationState(destination.StatePath)
+	targetKey := "point-01|source-1"
+	target := compacted.Items[targetKey]
+	target.UpdatedAt = base.Add(-time.Hour)
+	compacted.Items[targetKey] = target
+	for index := 0; index < maxTelegramInactiveItems+4; index++ {
+		compacted.Items[fmt.Sprintf("other-%05d", index)] = destinationItem{
+			UpdatedAt: base.Add(time.Duration(index) * time.Second),
+			Blocks: map[string]destinationBlock{
+				"deleted": {SourceDeleted: true, SourceEventAt: base},
+			},
+		}
+	}
+	if err := saveDestinationState(destination.StatePath, compacted); err != nil {
+		t.Fatal(err)
+	}
+	compacted, err = loadDestinationState(destination.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := compacted.Items[targetKey]; exists {
+		t.Fatal("целевая неактивная запись не прошла штатную компактацию")
+	}
+	if barrier := compacted.RecordTombstones[targetKey]; barrier.SourceVersion != "2026-10-28 10:03:00" {
+		t.Fatalf("долговечный барьер потерян после 4096 надгробий: %#v", barrier)
+	}
+	equal := event
+	equal.ID = "v3-equal-delayed"
+	equal.CreatedAt = cleanup.CreatedAt
+	equal.SourceAt = cleanup.SourceAt
+	equal.Source.UpdatedAt = "2026-10-28 10:03:00"
+	equal.Blocks[0].UpdatedAt = "2026-10-28 10:03:00"
+	equal.Blocks[0].Text = "10.00\n-Равная удалению запоздалая версия"
+	if err := destination.Deliver(context.Background(), equal, delivery); err != nil {
+		t.Fatal(err)
+	}
+	delayed := event
+	delayed.ID = "v2-delayed"
+	delayed.CreatedAt = base.Add(2 * time.Minute)
+	delayed.SourceAt = delayed.CreatedAt
+	delayed.Source.UpdatedAt = "2026-10-28 10:02:00"
+	delayed.Blocks[0].UpdatedAt = "2026-10-28 10:02:00"
+	delayed.Blocks[0].Text = "10.00\n-Запоздалая версия"
+	if err := destination.Deliver(context.Background(), delayed, delivery); err != nil {
+		t.Fatal(err)
+	}
+	newer := event
+	newer.ID = "v4-new"
+	newer.CreatedAt = base.Add(4 * time.Minute)
+	newer.SourceAt = newer.CreatedAt
+	newer.Source.UpdatedAt = "2026-10-28 10:04:00"
+	newer.Blocks[0].UpdatedAt = "2026-10-28 10:04:00"
+	newer.Blocks[0].Text = "10.00\n-Новая версия после удаления записи"
+	if err := destination.Deliver(context.Background(), newer, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"sendMessage", "deleteMessage", "sendMessage"}; !reflect.DeepEqual(methods, want) {
+		t.Fatalf("запоздалое событие воскресило публикацию: got=%v want=%v", methods, want)
+	}
+	current, err := loadDestinationState(destination.StatePath)
+	item := current.Items["point-01|source-1"]
+	barrier := current.RecordTombstones["point-01|source-1"]
+	if err != nil || barrier.SourceVersion != "2026-10-28 10:03:00" ||
+		!reflect.DeepEqual(item.Blocks["block-1"].MessageIDs, []int64{102}) {
+		t.Fatalf("барьер удаления записи или новая публикация не сохранены: item=%#v barrier=%#v err=%v", item, barrier, err)
+	}
+}
+
+func TestDestinationStateCompactsOnlyInactiveItemsAndEnforcesHardLimits(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	current := destinationState{Items: make(map[string]destinationItem)}
+	for index := 0; index < maxTelegramInactiveItems+4; index++ {
+		current.Items[fmt.Sprintf("inactive-%05d", index)] = destinationItem{
+			RecordCleanupSourceVersion: "2026-10-01 00:00:00",
+			UpdatedAt:                  base.Add(time.Duration(index) * time.Second),
+		}
+	}
+	current.Items["active"] = destinationItem{
+		UpdatedAt: base,
+		Blocks: map[string]destinationBlock{
+			"block-1": {MessageIDs: []int64{777}},
+		},
+	}
+	compactTelegramInactiveItems(&current)
+	if len(current.Items) != maxTelegramInactiveItems+1 {
+		t.Fatalf("неактивное состояние не ограничено: %d", len(current.Items))
+	}
+	if _, exists := current.Items["active"]; !exists {
+		t.Fatal("активная привязка Telegram была вытеснена")
+	}
+	if _, exists := current.Items["inactive-00000"]; exists {
+		t.Fatal("самый старый неактивный барьер не вытеснен")
+	}
+	if _, exists := current.Items[fmt.Sprintf("inactive-%05d", maxTelegramInactiveItems+3)]; !exists {
+		t.Fatal("новый барьер удаления потерян при компактации")
+	}
+
+	limited := destinationState{Items: map[string]destinationItem{
+		"a": {Blocks: map[string]destinationBlock{"block": {MessageIDs: []int64{1}}}},
+		"b": {Blocks: map[string]destinationBlock{"block": {MessageIDs: []int64{2}}}},
+	}}
+	if err := enforceTelegramActiveItemLimit(limited, 1); err == nil || !application.IsPermanentDeliveryError(err) {
+		t.Fatalf("жёсткий предел активного состояния не дал постоянную ошибку: %v", err)
+	}
+	limited.RecordTombstones = map[string]destinationRecordTombstone{
+		"a": {}, "b": {},
+	}
+	if err := enforceTelegramRecordTombstoneLimit(limited, 1); err == nil || !application.IsPermanentDeliveryError(err) {
+		t.Fatalf("жёсткий предел долговечных барьеров не дал постоянную ошибку: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "oversized.json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxTelegramStateBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadDestinationState(path); err == nil || !application.IsPermanentDeliveryError(err) {
+		t.Fatalf("слишком большой state не дал постоянную эксплуатационную ошибку: %v", err)
 	}
 }
 

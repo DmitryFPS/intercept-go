@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"intercept/internal/application"
 	"intercept/internal/domain"
 	"intercept/internal/infrastructure/share"
 )
@@ -100,7 +101,10 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 		// папку назначения сменили, прежние записи нельзя считать доставленными:
 		// для новой папки создаётся независимая нумерация и документ.
 		if current.Scope != "" && current.Scope != scope {
-			current = state{Scope: scope, Blocks: make(map[string]blockRecord)}
+			current = state{
+				Scope: scope, Blocks: make(map[string]blockRecord),
+				RecordTombstones: make(map[string]recordRevisionBarrier),
+			}
 		} else {
 			current.Scope = scope
 		}
@@ -113,12 +117,28 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 	prefix := sourceKey + "|"
 	legacyPrefix := legacySourceKey + "|"
 	scopedBlockUUID := strings.TrimSpace(event.SourceBlockUUID)
+	willStoreRecordCleanup := scopedBlockUUID == "" && delivery.Decision.Action == domain.RouteSkip &&
+		(event.SourceVersion() != "" || !event.CreatedAt.IsZero())
+	if willStoreRecordCleanup {
+		if _, exists := current.RecordTombstones[sourceKey]; !exists &&
+			len(current.RecordTombstones) >= maxWordRecordTombstones {
+			return application.NewPermanentDeliveryError(errors.New(
+				"достигнут предел 100000 барьеров удаления записей Word",
+			))
+		}
+	}
+	if docxRecordCleanupRejects(current, sourceKey, event) {
+		return nil
+	}
 	if delivery.Decision.Action == domain.RouteSkip {
 		if scopedBlockUUID != "" {
-			if err := destination.removeScopedBlock(&current, prefix, legacyPrefix, scopedBlockUUID, len(event.ActiveBlockUUIDs) == 0); err != nil {
+			if err := destination.removeScopedBlock(&current, prefix, legacyPrefix, event, scopedBlockUUID, !event.HasActiveBlocks); err != nil {
 				return err
 			}
 			return saveState(destination.StatePath, current)
+		}
+		if docxRecordMutationIsStale(current, prefix, legacyPrefix, event) {
+			return nil
 		}
 		for key, record := range current.Blocks {
 			if !strings.HasPrefix(key, prefix) && !strings.HasPrefix(key, legacyPrefix) {
@@ -135,10 +155,11 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 			}
 			delete(current.Blocks, key)
 		}
+		storeWordRecordCleanup(&current, sourceKey, event)
 		return saveState(destination.StatePath, current)
 	}
 	if event.SourceBlockDeleted && scopedBlockUUID != "" {
-		if err := destination.removeScopedBlock(&current, prefix, legacyPrefix, scopedBlockUUID, len(event.ActiveBlockUUIDs) == 0); err != nil {
+		if err := destination.removeScopedBlock(&current, prefix, legacyPrefix, event, scopedBlockUUID, !event.HasActiveBlocks); err != nil {
 			return err
 		}
 		return saveState(destination.StatePath, current)
@@ -176,10 +197,6 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 			exists = true
 			technicalMigration = true
 		}
-		if !exists {
-			current.LastNumber++
-			record.Number = current.LastNumber
-		}
 		content := strings.TrimSpace(block.Text)
 		digest := digestText(content)
 		document := Document{
@@ -189,6 +206,25 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 			Callsigns: block.Callsigns,
 		}
 		render := renderDigest(document)
+		revisionOrder := 1
+		if exists && (record.SourceVersion != "" || !record.SourceEventAt.IsZero()) {
+			revisionOrder = domain.CompareSourceRevision(
+				event.SourceVersion(), event.CreatedAt, record.SourceVersion, record.SourceEventAt,
+			)
+			if revisionOrder < 0 || (record.Tombstone && revisionOrder <= 0) {
+				continue
+			}
+		}
+		if record.Tombstone {
+			record.Tombstone = false
+			record.Edited = true
+			record.Hash = ""
+			record.Render = ""
+		}
+		if !exists || record.Number <= 0 {
+			current.LastNumber++
+			record.Number = current.LastNumber
+		}
 		filename := destination.documentName(record.Number, event.Position.UnitName)
 		previousFilename := record.Filename
 		target, err := safeDestinationPath(destination.Folder, filename)
@@ -218,6 +254,8 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 			record.Edited = document.Edited
 			record.UpdatedAt = time.Now().UTC()
 		}
+		record.SourceVersion = event.SourceVersion()
+		record.SourceEventAt = event.CreatedAt
 		current.Blocks[key] = record
 		if migratedBlockKey != "" && migratedBlockKey != key {
 			delete(current.Blocks, migratedBlockKey)
@@ -261,13 +299,14 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 }
 
 func (destination Destination) removeScopedBlock(
-	current *state, prefix, legacyPrefix, blockUUID string, lastBlock bool,
+	current *state, prefix, legacyPrefix string, event domain.Event, blockUUID string, lastBlock bool,
 ) error {
 	keys := []string{prefix + blockUUID, legacyPrefix + blockUUID}
 	if lastBlock {
 		keys = append(keys, prefix+"record", legacyPrefix+"record")
 	}
 	seen := make(map[string]bool)
+	tombstone := blockRecord{}
 	for _, key := range keys {
 		if seen[key] {
 			continue
@@ -276,6 +315,15 @@ func (destination Destination) removeScopedBlock(
 		record, exists := current.Blocks[key]
 		if !exists {
 			continue
+		}
+		if record.SourceVersion != "" || !record.SourceEventAt.IsZero() {
+			order := domain.CompareSourceRevision(event.SourceVersion(), event.CreatedAt, record.SourceVersion, record.SourceEventAt)
+			if order < 0 || (order == 0 && record.Tombstone) {
+				return nil
+			}
+		}
+		if tombstone.Number == 0 || strings.HasSuffix(key, blockUUID) {
+			tombstone = record
 		}
 		if record.Filename != "" {
 			path, err := safeDestinationPath(destination.Folder, record.Filename)
@@ -288,7 +336,54 @@ func (destination Destination) removeScopedBlock(
 		}
 		delete(current.Blocks, key)
 	}
+	tombstone.Hash = ""
+	tombstone.Render = ""
+	tombstone.Edited = true
+	tombstone.Tombstone = true
+	tombstone.SourceVersion = event.SourceVersion()
+	tombstone.SourceEventAt = event.CreatedAt
+	tombstone.UpdatedAt = time.Now().UTC()
+	current.Blocks[prefix+blockUUID] = tombstone
 	return nil
+}
+
+func docxRecordMutationIsStale(current state, prefix, legacyPrefix string, event domain.Event) bool {
+	for key, record := range current.Blocks {
+		if !strings.HasPrefix(key, prefix) && !strings.HasPrefix(key, legacyPrefix) {
+			continue
+		}
+		if record.SourceVersion == "" && record.SourceEventAt.IsZero() {
+			continue
+		}
+		if domain.CompareSourceRevision(
+			event.SourceVersion(), event.CreatedAt, record.SourceVersion, record.SourceEventAt,
+		) < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func storeWordRecordCleanup(current *state, sourceKey string, event domain.Event) {
+	if event.SourceVersion() == "" && event.CreatedAt.IsZero() {
+		return
+	}
+	if current.RecordTombstones == nil {
+		current.RecordTombstones = make(map[string]recordRevisionBarrier)
+	}
+	current.RecordTombstones[sourceKey] = recordRevisionBarrier{
+		SourceVersion: event.SourceVersion(), SourceEventAt: event.CreatedAt, UpdatedAt: time.Now().UTC(),
+	}
+}
+
+func docxRecordCleanupRejects(current state, sourceKey string, event domain.Event) bool {
+	barrier, exists := current.RecordTombstones[sourceKey]
+	if !exists || (barrier.SourceVersion == "" && barrier.SourceEventAt.IsZero()) {
+		return false
+	}
+	return domain.CompareSourceRevision(
+		event.SourceVersion(), event.CreatedAt, barrier.SourceVersion, barrier.SourceEventAt,
+	) <= 0
 }
 
 func docxEventBlocks(event domain.Event) []domain.ContentBlock {

@@ -175,7 +175,7 @@ func (client *Client) CheckTransport(ctx context.Context) error {
 		return err
 	}
 	transport.Key = key
-	probeID, err := transport.SendProbe(ctx, cfg.ClientID)
+	probeID, err := transport.SendProbe(ctx, cfg.ClientID, client.shiftSnapshotForProbe(ctx, cfg))
 	if err != nil {
 		return fmt.Errorf("отправить проверку связи: %w", err)
 	}

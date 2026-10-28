@@ -2,6 +2,7 @@ package domain
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -71,5 +72,32 @@ func TestPresentInterceptDoesNotPreferCardNumberOverDescription(t *testing.T) {
 	if len(correspondents) != 1 || correspondents[0].Number != 1 ||
 		correspondents[0].Label != "Марс" || correspondents[0].Description != "оператор" {
 		t.Fatalf("внутренний номер карточки повлиял на представление: %#v", correspondents)
+	}
+}
+
+func TestPresentInterceptIgnoresMarkerOnlyInExactTimeHeaders(t *testing.T) {
+	t.Parallel()
+	_, lines := PresentIntercept(strings.Join([]string{
+		"10.15",
+		"-Начало. (7)",
+		"10.18#",
+		"-Продолжение. (7)",
+		"10:28#1",
+		"11.15#2",
+		"25.61#3",
+		"-Решётка #4 внутри реплики. (7)",
+	}, "\n"), []Callsign{{Code: "7", Label: "Игрок"}})
+	want := []PresentedLine{
+		{Text: "10:15", Time: true},
+		{Text: "/1/ Начало."},
+		{Text: "10:18", Time: true},
+		{Text: "/1/ Продолжение."},
+		{Text: "10:28", Time: true},
+		{Text: "11:15", Time: true},
+		{Text: "25.61#3"},
+		{Text: "/1/ Решётка #4 внутри реплики."},
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("помеченное время оформлено неверно:\nполучено: %#v\nожидалось: %#v", lines, want)
 	}
 }

@@ -23,16 +23,35 @@ const (
 
 // ClientHealth — безопасный снимок качества связи с рабочей точкой.
 type ClientHealth struct {
-	ClientID      string     `json:"client_id"`
-	Number        string     `json:"number"`
-	Name          string     `json:"name"`
-	Status        string     `json:"status"`
-	Quality       string     `json:"quality"`
-	LastSeenAt    *time.Time `json:"last_seen_at,omitempty"`
-	LastProbeAt   *time.Time `json:"last_probe_at,omitempty"`
-	LastEventAt   *time.Time `json:"last_event_at,omitempty"`
-	DelaySeconds  int64      `json:"delay_seconds"`
-	CurrentReason string     `json:"current_reason,omitempty"`
+	ClientID           string               `json:"client_id"`
+	Number             string               `json:"number"`
+	Name               string               `json:"name"`
+	Status             string               `json:"status"`
+	Quality            string               `json:"quality"`
+	LastSeenAt         *time.Time           `json:"last_seen_at,omitempty"`
+	LastProbeAt        *time.Time           `json:"last_probe_at,omitempty"`
+	LastEventAt        *time.Time           `json:"last_event_at,omitempty"`
+	DelaySeconds       int64                `json:"delay_seconds"`
+	CurrentReason      string               `json:"current_reason,omitempty"`
+	ShiftReadState     string               `json:"shift_read_state,omitempty"`
+	LastShiftProbeAt   *time.Time           `json:"last_shift_probe_at,omitempty"`
+	LastShiftSuccessAt *time.Time           `json:"last_shift_success_at,omitempty"`
+	Shifts             []ClientShiftSession `json:"shifts,omitempty"`
+}
+
+// ClientShiftSession is one deduplicated EAVC shift lifecycle. Repeated
+// connection probes only refresh LastSeenAt and never create another row.
+type ClientShiftSession struct {
+	ClientID        string     `json:"client_id"`
+	ClientName      string     `json:"client_name,omitempty"`
+	PositionName    string     `json:"position_name"`
+	SessionUUID     string     `json:"session_uuid"`
+	SourceSessionID int64      `json:"source_session_id"`
+	OpenedAt        time.Time  `json:"opened_at"`
+	ClosedAt        *time.Time `json:"closed_at,omitempty"`
+	FirstSeenAt     time.Time  `json:"first_seen_at"`
+	LastSeenAt      time.Time  `json:"last_seen_at"`
+	Current         bool       `json:"current"`
 }
 
 // ConnectionIncident фиксирует период отсутствия связи и её восстановление.
@@ -94,6 +113,7 @@ type ServerHistoryPage struct {
 	Items         []ServerHistoryItem  `json:"items"`
 	Clients       []ClientHealth       `json:"clients,omitempty"`
 	Incidents     []ConnectionIncident `json:"incidents,omitempty"`
+	ShiftHistory  []ClientShiftSession `json:"shift_history,omitempty"`
 	Total         int                  `json:"total"`
 	Limit         int                  `json:"limit"`
 	Offset        int                  `json:"offset"`
@@ -285,7 +305,11 @@ func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, o
 		if err != nil {
 			return ServerHistoryPage{}, err
 		}
-		page.Clients, page.Incidents, page.Total = clients, incidents, total
+		shiftHistory, err := store.shiftHistory(ctx, filter, 100)
+		if err != nil {
+			return ServerHistoryPage{}, err
+		}
+		page.Clients, page.Incidents, page.ShiftHistory, page.Total = clients, incidents, shiftHistory, total
 		page.RetentionDays = 90
 		return page, nil
 	}
@@ -311,8 +335,10 @@ func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, o
 
 func (store *ServerStore) clientHealth(ctx context.Context, now time.Time) ([]ClientHealth, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT c.client_id,c.client_number,c.name,h.status,h.last_seen_at,h.last_probe_at,h.last_event_at,h.last_reason
+		SELECT c.client_id,c.client_number,c.name,h.status,h.last_seen_at,h.last_probe_at,h.last_event_at,h.last_reason,
+			s.read_state,s.last_probe_at,s.last_success_at
 		FROM server_clients c LEFT JOIN client_health h ON h.client_id=c.client_id
+		LEFT JOIN client_shift_sync s ON s.client_id=c.client_id
 		WHERE c.active=1 ORDER BY c.client_number,c.name`)
 	if err != nil {
 		return nil, err
@@ -321,8 +347,9 @@ func (store *ServerStore) clientHealth(ctx context.Context, now time.Time) ([]Cl
 	var result []ClientHealth
 	for rows.Next() {
 		var item ClientHealth
-		var status, lastSeen, lastProbe, lastEvent, reason sql.NullString
-		if err := rows.Scan(&item.ClientID, &item.Number, &item.Name, &status, &lastSeen, &lastProbe, &lastEvent, &reason); err != nil {
+		var status, lastSeen, lastProbe, lastEvent, reason, shiftState, shiftProbe, shiftSuccess sql.NullString
+		if err := rows.Scan(&item.ClientID, &item.Number, &item.Name, &status, &lastSeen, &lastProbe, &lastEvent, &reason,
+			&shiftState, &shiftProbe, &shiftSuccess); err != nil {
 			return nil, err
 		}
 		item.Status, item.Quality = "unknown", "unknown"
@@ -333,6 +360,9 @@ func (store *ServerStore) clientHealth(ctx context.Context, now time.Time) ([]Cl
 		item.LastProbeAt = parseNullableTime(lastProbe)
 		item.LastEventAt = parseNullableTime(lastEvent)
 		item.CurrentReason = reason.String
+		item.ShiftReadState = shiftState.String
+		item.LastShiftProbeAt = parseNullableTime(shiftProbe)
+		item.LastShiftSuccessAt = parseNullableTime(shiftSuccess)
 		if item.LastSeenAt != nil {
 			item.DelaySeconds = max64(0, int64(now.Sub(*item.LastSeenAt).Seconds()))
 			switch {
@@ -344,6 +374,11 @@ func (store *ServerStore) clientHealth(ctx context.Context, now time.Time) ([]Cl
 				item.Quality = "degraded"
 			}
 		}
+		shifts, shiftErr := store.currentClientShifts(ctx, item.ClientID)
+		if shiftErr != nil {
+			return nil, shiftErr
+		}
+		item.Shifts = shifts
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -359,7 +394,11 @@ func filterClientHealth(clients []ClientHealth, filter HistoryFilter) []ClientHe
 		if filter.Quality != "" && client.Quality != filter.Quality {
 			continue
 		}
-		searchable := strings.ToLower(strings.Join([]string{client.Number, client.Name, client.CurrentReason}, " "))
+		shiftTerms := make([]string, 0, len(client.Shifts)*2)
+		for _, shift := range client.Shifts {
+			shiftTerms = append(shiftTerms, shift.PositionName, shift.SessionUUID)
+		}
+		searchable := strings.ToLower(strings.Join(append([]string{client.Number, client.Name, client.CurrentReason}, shiftTerms...), " "))
 		if query != "" && !strings.Contains(searchable, query) {
 			continue
 		}

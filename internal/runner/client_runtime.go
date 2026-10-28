@@ -49,7 +49,9 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 		cycle = 2 * time.Minute
 	}
 	started := time.Now()
+	attempts := 0
 	for {
+		attempts++
 		handle, err := client.storageOpener(ctx, path)
 		if err == nil {
 			return handle, nil
@@ -62,7 +64,10 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 			"Данные сохранены. Программа повторит открытие автоматически.",
 			err,
 		)
-		if time.Since(started) >= cycle {
+		// Даже если первая попытка сама заняла весь короткий цикл, выполняем
+		// хотя бы один реальный повтор. Это важно после краткой блокировки SQLite
+		// антивирусом или предыдущим процессом во время обновления.
+		if attempts >= 2 && time.Since(started) >= cycle {
 			return localQueueHandle{}, errLocalStorageRetryCycle
 		}
 		if !waitForRetry(ctx, delay) {
@@ -221,7 +226,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		Key:               key,
 	}
 	service := &application.ClientService{
-		ClientID: cfg.ClientID, Queue: queue, State: queue,
+		ClientID: cfg.ClientID, Queue: queue, State: queue, TimeState: queue,
 		Sender: transport,
 		KeyID:  cfg.Cryptography.KeyID, Key: key, BatchSize: cfg.Polling.BatchSize,
 		CatchUpExisting: cfg.Polling.CatchUpExisting,
@@ -281,6 +286,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		if source == nil {
 			client.dispatchSavedQueue(ctx, service, queue)
 		} else {
+			client.refreshShiftSnapshot(ctx, source, location)
 			client.collectAndDispatch(ctx, service, queue)
 		}
 		select {
@@ -324,7 +330,7 @@ func (client *Client) heartbeatLoop(ctx context.Context, clientID string, transp
 			return
 		case <-timer.C:
 			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			_, err := transport.SendProbe(probeCtx, clientID)
+			_, err := transport.SendProbe(probeCtx, clientID, client.currentShiftSnapshot())
 			cancel()
 			if err != nil && ctx.Err() == nil {
 				client.Logger.Warn("не удалось отправить контрольный пакет связи", "error", err)

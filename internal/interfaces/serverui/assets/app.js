@@ -616,6 +616,7 @@ function renderHistory() {
   const data = historyData || {};
   const clients = data.clients || [];
   const incidents = data.incidents || [];
+  const shiftHistory = data.shift_history || [];
   const items = historyKind === 'clients' ? incidents : (data.items || []);
   const healthList = $('clientHealthList');
   const columnLabels = historyColumnLabels[historyKind];
@@ -623,7 +624,26 @@ function renderHistory() {
   columns.classList.toggle('hidden', !columnLabels);
   columns.innerHTML = columnLabels ? columnLabels.map(label => `<span>${escapeHTML(label)}</span>`).join('') : '';
   healthList.classList.toggle('hidden', historyKind !== 'clients');
-  healthList.innerHTML = clients.map(client => `
+  healthList.innerHTML = clients.map(client => {
+    const currentShifts = client.shifts || [];
+    const recentShifts = shiftHistory.filter(item => item.client_id === client.client_id).slice(0, 4);
+    const shiftState = client.shift_read_state === 'unavailable'
+      ? 'EAVC временно недоступен; последнее подтверждённое состояние сохранено'
+      : (client.shift_read_state === 'conflict'
+        ? 'Обнаружено противоречие истории EAVC; прежнее состояние сохранено'
+        : (currentShifts.length ? currentShifts.map(item => {
+          const position = item.position_name || 'Позиция без названия';
+          return item.closed_at
+            ? `${position}: закрыта ${formatDate(item.closed_at)}`
+            : `${position}: открыта ${formatDate(item.opened_at)}`;
+        }).join(' · ') : 'Смена ещё не обнаружена'));
+    const recent = recentShifts.length
+      ? recentShifts.map(item => {
+        const position = item.position_name || 'Позиция без названия';
+        return `<div><b>${escapeHTML(position)}</b>: ${formatDate(item.opened_at)} — ${item.closed_at ? formatDate(item.closed_at) : 'открыта'}</div>`;
+      }).join('')
+      : '<span>История смен пока пуста</span>';
+    return `
     <article class="health-card">
       <strong>${escapeHTML(client.number)} · ${escapeHTML(client.name)}</strong>
       <span class="quality ${escapeHTML(client.quality)}">${escapeHTML(qualityLabel(client))}</span>
@@ -631,9 +651,13 @@ function renderHistory() {
         <dt>Последний сигнал</dt><dd>${client.last_seen_at ? `${formatDate(client.last_seen_at)} · ${formatDelay(client.delay_seconds)}` : 'Ещё не получен'}</dd>
         <dt>Контрольный пакет</dt><dd>${formatDate(client.last_probe_at)}</dd>
         <dt>Последние данные</dt><dd>${formatDate(client.last_event_at)}</dd>
+        <dt>Смена EAVC</dt><dd>${escapeHTML(shiftState)}</dd>
+        <dt>Состояние смены получено</dt><dd>${formatDate(client.last_shift_success_at)}</dd>
         <dt>Причина</dt><dd>${escapeHTML(client.current_reason || 'Ошибок связи нет')}</dd>
       </dl>
-    </article>`).join('');
+      <div class="shift-history"><small>Последние смены без повторов</small>${recent}</div>
+    </article>`;
+  }).join('');
 
   const incidentLauncher = $('clientIncidentLauncher');
   incidentLauncher.classList.toggle('hidden', historyKind !== 'clients');

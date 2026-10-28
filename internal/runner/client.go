@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"intercept/internal/application"
 	"intercept/internal/config"
 	"intercept/internal/domain"
 	"intercept/internal/infrastructure/secrets"
@@ -160,6 +161,8 @@ type Client struct {
 	rootStop       context.CancelFunc
 	background     sync.WaitGroup
 	pendingProbeID string
+	shiftSnapshot  application.ShiftSnapshot
+	shiftReadError string
 	storageOpener  localQueueOpener
 	storageRetry   time.Duration
 	storageCycle   time.Duration
@@ -170,6 +173,7 @@ func NewClient(baseDir, version string, logger *slog.Logger) *Client {
 	return &Client{
 		BaseDir: baseDir, Version: version, Logger: logger,
 		status:        ClientStatus{State: "setup", Title: "Нужны настройки", Detail: "Загрузите файл настроек, который прислал администратор.", Version: version},
+		shiftSnapshot: application.UnavailableShiftSnapshot(),
 		storageOpener: openLocalQueueOnce,
 		storageRetry:  5 * time.Second,
 		storageCycle:  2 * time.Minute,

@@ -109,6 +109,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		transportAuditBufferSize,
 	)
 	var background sync.WaitGroup
+	var transportProducers sync.WaitGroup
 	background.Add(2)
 	go func() {
 		defer background.Done()
@@ -119,9 +120,11 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 		transportAudit.run()
 	}()
 	defer func() {
-		// После выхода из run получатель больше не создаёт наблюдения. Закрываем
-		// вход, дренируем аудит независимо от отменённого рабочего контекста и
-		// только затем завершаем остановку/перезапуск центра.
+		// Сначала дожидаемся всех обработчиков, которые способны вызвать
+		// receiver.Observe. Только после этого можно закрыть вход аудита: иначе
+		// одновременная остановка и классификация пакета приводили к отправке в
+		// уже закрытый канал и аварийному завершению Центра.
+		transportProducers.Wait()
 		transportAudit.shutdown()
 		background.Wait()
 	}()
@@ -172,9 +175,9 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	// может быстро освободить суточную Telegram-очередь, даже если проверка,
 	// подтверждение или конечные получатели временно задерживаются.
 	transportContext, stopTransport := context.WithCancel(ctx)
-	background.Add(1)
+	transportProducers.Add(1)
 	go func() {
-		defer background.Done()
+		defer transportProducers.Done()
 		server.transportInboxLoop(transportContext, receiver, reception)
 	}()
 	server.transportIntakeLoop(transportContext, receiver)
@@ -313,6 +316,21 @@ func (server *Server) processTransportInboxItem(
 				"sender_bot", packet.SenderBotUsername, "error", err)
 			complete()
 			return
+		}
+		shiftChange, err := server.Store.RecordClientShiftSnapshot(
+			ctx, packet.ProbeClientID, packet.ProbeSentAt, packet.ProbeShift,
+		)
+		if err != nil {
+			retry("не удалось сохранить состояние смены рабочей точки", err)
+			return
+		}
+		if shiftChange.Conflict {
+			server.Logger.Error("состояние смены EAVC противоречит уже подтверждённой истории; прежнее состояние сохранено",
+				"client_id", packet.ProbeClientID, "probe_id", packet.ProbeID)
+		} else if shiftChange.Opened > 0 || shiftChange.Closed > 0 {
+			server.Logger.Info("обновлена история смен рабочей точки",
+				"client_id", packet.ProbeClientID, "opened", shiftChange.Opened, "closed", shiftChange.Closed,
+				"probe_id", packet.ProbeID)
 		}
 		if err := server.Store.RecordClientSignalByTransport(
 			ctx, packet.SenderBotID, packet.ChatID, packet.ThreadID, true, packet.SentAt,

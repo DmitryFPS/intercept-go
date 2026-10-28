@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"time"
 
+	"intercept/internal/application"
 	"intercept/internal/config"
 	"intercept/internal/infrastructure/eavc"
 	"intercept/internal/infrastructure/secrets"
@@ -126,4 +129,65 @@ func (client *Client) configuredEAVCPathForUpdate(cfg config.Client) (string, er
 
 func (client *Client) localSettingsPath() string {
 	return filepath.Join(client.BaseDir, "data", "client-local.dat")
+}
+
+func (client *Client) refreshShiftSnapshot(ctx context.Context, source *eavc.Source, location *time.Location) {
+	snapshot, err := source.ShiftSnapshot(ctx, location)
+	client.rememberShiftSnapshot(snapshot, err)
+}
+
+func (client *Client) shiftSnapshotForProbe(ctx context.Context, cfg config.Client) application.ShiftSnapshot {
+	location, err := time.LoadLocation(cfg.EAVCTimeZone())
+	if err != nil {
+		client.rememberShiftSnapshot(application.ShiftSnapshot{}, err)
+		return application.UnavailableShiftSnapshot()
+	}
+	path, err := client.resolveEAVCPath(ctx, cfg)
+	if err != nil {
+		client.rememberShiftSnapshot(application.ShiftSnapshot{}, err)
+		return application.UnavailableShiftSnapshot()
+	}
+	source, err := eavc.Open(ctx, path)
+	if err != nil {
+		client.rememberShiftSnapshot(application.ShiftSnapshot{}, err)
+		return application.UnavailableShiftSnapshot()
+	}
+	defer source.Close()
+	snapshot, err := source.ShiftSnapshot(ctx, location)
+	client.rememberShiftSnapshot(snapshot, err)
+	return client.currentShiftSnapshot()
+}
+
+func (client *Client) currentShiftSnapshot() application.ShiftSnapshot {
+	client.mu.RLock()
+	snapshot := application.NormalizeShiftSnapshot(client.shiftSnapshot)
+	client.mu.RUnlock()
+	return snapshot
+}
+
+func (client *Client) rememberShiftSnapshot(snapshot application.ShiftSnapshot, readErr error) {
+	if readErr != nil {
+		snapshot = application.UnavailableShiftSnapshot()
+	}
+	snapshot = application.NormalizeShiftSnapshot(snapshot)
+	errorText := ""
+	if readErr != nil {
+		errorText = readErr.Error()
+	}
+	client.mu.Lock()
+	changed := !reflect.DeepEqual(client.shiftSnapshot, snapshot)
+	errorChanged := client.shiftReadError != errorText
+	client.shiftSnapshot = snapshot
+	client.shiftReadError = errorText
+	client.mu.Unlock()
+	if readErr != nil {
+		if errorChanged && client.Logger != nil {
+			client.Logger.Warn("не удалось прочитать состояние смен EAVC; связь с Центром проверяется без изменения последнего состояния смены", "error", readErr)
+		}
+		return
+	}
+	if changed && client.Logger != nil {
+		client.Logger.Info("обновлён снимок смен EAVC для следующей проверки связи",
+			"open_shifts", len(snapshot.Active), "last_closed_shifts", len(snapshot.LastClosed))
+	}
 }

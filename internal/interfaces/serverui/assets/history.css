@@ -113,6 +113,18 @@
 }
 .health-card dt { color: #7b889d; }
 .health-card dd { margin: 0; font-weight: 650; }
+.shift-history {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f2f6fb;
+  color: #4e5f78;
+  font-size: 12px;
+}
+.shift-history small { color: #7b889d; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.shift-history b { color: #25344d; }
 .history-row {
   display: grid;
   grid-template-columns: minmax(190px, 1.3fr) minmax(220px, 1fr) minmax(165px, .7fr);

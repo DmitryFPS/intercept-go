@@ -33,3 +33,13 @@
 *.db-wal
 *.exe
 *.zip
+/preflight.err
+/preflight.out
+/rc*-clean-*.err
+/rc*-clean-*.json
+/rc*-clean-*.out
+/update-rc*.err
+/update-rc*.out
+/vmrun-list.err
+/vmrun-list.out
+/scripts/temporary-*.ps1

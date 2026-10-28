@@ -130,6 +130,17 @@ type apiError struct {
 	description string
 }
 
+// sendAttemptError отличает отмену до HTTP-запроса от неопределённого исхода
+// после его начала. Это нужно, чтобы после аварии не создать второй экземпляр
+// уже принятого Telegram сообщения.
+type sendAttemptError struct {
+	attempted bool
+	err       error
+}
+
+func (err *sendAttemptError) Error() string { return err.err.Error() }
+func (err *sendAttemptError) Unwrap() error { return err.err }
+
 func (err *apiError) Error() string {
 	return fmt.Sprintf("telegram: %s (код %d)", err.description, err.code)
 }
@@ -318,7 +329,7 @@ func (client *Client) SendText(ctx context.Context, chatID, threadID int64, text
 // SendHTML публикует подготовленное сообщение в формате Telegram HTML.
 func (client *Client) SendHTML(ctx context.Context, chatID, threadID int64, text string) (Message, error) {
 	if err := client.sends.wait(ctx, chatID); err != nil {
-		return Message{}, err
+		return Message{}, &sendAttemptError{attempted: false, err: err}
 	}
 	request := map[string]any{
 		"chat_id": chatID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true,
@@ -328,6 +339,9 @@ func (client *Client) SendHTML(ctx context.Context, chatID, threadID int64, text
 	}
 	var message Message
 	err := client.callJSON(ctx, "sendMessage", request, &message)
+	if err != nil {
+		return Message{}, &sendAttemptError{attempted: true, err: err}
+	}
 	return message, err
 }
 

@@ -206,3 +206,52 @@ CREATE TABLE transport_inbox (
 CREATE INDEX transport_inbox_due_idx
 	ON transport_inbox(next_attempt_at, update_id);
 `
+
+// Каноническая максимальная ревизия хранится отдельно от истории приёма.
+// Это одновременно устраняет полный scan received_events на каждом пакете и
+// корректно переживает старые базы, где v3 могла быть записана раньше поздней v2.
+const serverRevisionBarrierMigration = `
+CREATE TABLE source_revision_barriers (
+	client_id TEXT NOT NULL,
+	source_uuid TEXT NOT NULL,
+	source_version TEXT NOT NULL,
+	source_event_at TEXT NOT NULL,
+	content_digest TEXT NOT NULL,
+	event_id TEXT NOT NULL,
+	route_json BLOB NOT NULL,
+	PRIMARY KEY(client_id, source_uuid)
+);
+CREATE INDEX received_events_lineage_idx
+	ON received_events(client_id, source_uuid, received_at DESC);
+`
+
+// Состояние смен хранится отдельно от контрольных пакетов. Одна строка на
+// UUID смены устраняет дубли от периодических проверок связи, а last_probe_at
+// не позволяет запоздавшему Telegram-пакету откатить более новое состояние.
+const serverShiftStateMigration = `
+CREATE TABLE client_shift_sync (
+	client_id TEXT PRIMARY KEY,
+	read_state TEXT NOT NULL CHECK(read_state IN ('ok', 'unavailable', 'conflict')),
+	last_probe_at TEXT NOT NULL,
+	last_success_at TEXT,
+	FOREIGN KEY(client_id) REFERENCES server_clients(client_id) ON DELETE CASCADE
+);
+CREATE TABLE client_shift_sessions (
+	client_id TEXT NOT NULL,
+	position_name TEXT NOT NULL,
+	session_uuid TEXT NOT NULL,
+	source_session_id INTEGER NOT NULL,
+	opened_at TEXT NOT NULL,
+	closed_at TEXT,
+	first_seen_at TEXT NOT NULL,
+	last_seen_at TEXT NOT NULL,
+	last_probe_at TEXT NOT NULL,
+	is_current INTEGER NOT NULL DEFAULT 0 CHECK(is_current IN (0,1)),
+	PRIMARY KEY(client_id, session_uuid),
+	FOREIGN KEY(client_id) REFERENCES server_clients(client_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX client_shift_current_position_idx
+	ON client_shift_sessions(client_id, position_name) WHERE is_current=1;
+CREATE INDEX client_shift_history_idx
+	ON client_shift_sessions(client_id, opened_at DESC, session_uuid);
+`

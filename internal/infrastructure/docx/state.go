@@ -12,27 +12,48 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"intercept/internal/application"
+)
+
+const (
+	maxWordStateBytes       = 64 << 20
+	maxWordActiveBlocks     = 100_000
+	maxWordRecordTombstones = 100_000
 )
 
 var badFilename = regexp.MustCompile(`[<>:"/\\|?*]`)
 
 type state struct {
-	Scope      string                 `json:"scope,omitempty"`
-	LastNumber int                    `json:"last_number"`
-	Blocks     map[string]blockRecord `json:"blocks"`
+	Scope            string                           `json:"scope,omitempty"`
+	LastNumber       int                              `json:"last_number"`
+	Blocks           map[string]blockRecord           `json:"blocks"`
+	RecordTombstones map[string]recordRevisionBarrier `json:"record_tombstones,omitempty"`
+}
+
+type recordRevisionBarrier struct {
+	SourceVersion string    `json:"source_version,omitempty"`
+	SourceEventAt time.Time `json:"source_event_at,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type blockRecord struct {
-	Number    int       `json:"number"`
-	Hash      string    `json:"hash"`
-	Render    string    `json:"render,omitempty"`
-	Filename  string    `json:"filename"`
-	Edited    bool      `json:"edited,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Number        int       `json:"number"`
+	Hash          string    `json:"hash"`
+	Render        string    `json:"render,omitempty"`
+	Filename      string    `json:"filename"`
+	Edited        bool      `json:"edited,omitempty"`
+	Tombstone     bool      `json:"tombstone,omitempty"`
+	SourceVersion string    `json:"source_version,omitempty"`
+	SourceEventAt time.Time `json:"source_event_at,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 func loadState(path string) (state, error) {
 	current := state{Blocks: make(map[string]blockRecord)}
+	if info, err := os.Stat(path); err == nil && info.Size() > maxWordStateBytes {
+		return current, wordStateLimitError("файл состояния Word превышает 64 МиБ")
+	}
 	payload, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return current, nil
@@ -45,6 +66,15 @@ func loadState(path string) (state, error) {
 	}
 	if current.Blocks == nil {
 		current.Blocks = make(map[string]blockRecord)
+	}
+	if current.RecordTombstones == nil {
+		current.RecordTombstones = make(map[string]recordRevisionBarrier)
+	}
+	if err := enforceWordActiveBlockLimit(current, maxWordActiveBlocks); err != nil {
+		return state{Blocks: make(map[string]blockRecord), RecordTombstones: make(map[string]recordRevisionBarrier)}, err
+	}
+	if err := enforceWordRecordTombstoneLimit(current, maxWordRecordTombstones); err != nil {
+		return state{Blocks: make(map[string]blockRecord), RecordTombstones: make(map[string]recordRevisionBarrier)}, err
 	}
 	legacyTime := time.Now().UTC()
 	if info, statErr := os.Stat(path); statErr == nil {
@@ -63,9 +93,19 @@ func saveState(path string, current state) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("создать папку состояния Word: %w", err)
 	}
+	compactWordTombstones(&current)
+	if err := enforceWordActiveBlockLimit(current, maxWordActiveBlocks); err != nil {
+		return err
+	}
+	if err := enforceWordRecordTombstoneLimit(current, maxWordRecordTombstones); err != nil {
+		return err
+	}
 	payload, err := json.MarshalIndent(current, "", "  ")
 	if err != nil {
 		return fmt.Errorf("кодировать состояние Word: %w", err)
+	}
+	if len(payload) > maxWordStateBytes {
+		return wordStateLimitError("файл состояния Word превысит 64 МиБ")
 	}
 	temporary := path + ".tmp"
 	if err := os.WriteFile(temporary, payload, 0o600); err != nil {
@@ -75,6 +115,58 @@ func saveState(path string, current state) error {
 		return fmt.Errorf("зафиксировать состояние Word: %w", err)
 	}
 	return nil
+}
+
+func wordStateLimitError(message string) error {
+	return application.NewPermanentDeliveryError(errors.New(message))
+}
+
+func enforceWordActiveBlockLimit(current state, limit int) error {
+	active := 0
+	for _, record := range current.Blocks {
+		if !record.Tombstone {
+			active++
+		}
+	}
+	if limit >= 0 && active > limit {
+		return wordStateLimitError(fmt.Sprintf("число активных блоков состояния Word превышает %d", limit))
+	}
+	return nil
+}
+
+func enforceWordRecordTombstoneLimit(current state, limit int) error {
+	if limit >= 0 && len(current.RecordTombstones) > limit {
+		return application.NewPermanentDeliveryError(fmt.Errorf(
+			"число барьеров удаления записей Word превышает %d", limit,
+		))
+	}
+	return nil
+}
+
+func compactWordTombstones(current *state) {
+	const maxWordTombstones = 4096
+	if current == nil {
+		return
+	}
+	type candidate struct {
+		key string
+		at  time.Time
+	}
+	var tombstones []candidate
+	for key, record := range current.Blocks {
+		if record.Tombstone {
+			tombstones = append(tombstones, candidate{key: key, at: record.UpdatedAt})
+		}
+	}
+	if len(tombstones) <= maxWordTombstones {
+		return
+	}
+	sort.SliceStable(tombstones, func(left, right int) bool {
+		return tombstones[left].at.Before(tombstones[right].at)
+	})
+	for _, item := range tombstones[:len(tombstones)-maxWordTombstones] {
+		delete(current.Blocks, item.key)
+	}
 }
 
 func writeAtomic(ctx context.Context, path string, payload []byte) error {
@@ -134,7 +226,9 @@ func StateNumbers(path string) ([]int, error) {
 	}
 	result := make([]int, 0, len(current.Blocks))
 	for _, record := range current.Blocks {
-		result = append(result, record.Number)
+		if !record.Tombstone && record.Number > 0 {
+			result = append(result, record.Number)
+		}
 	}
 	sort.Ints(result)
 	return result, nil

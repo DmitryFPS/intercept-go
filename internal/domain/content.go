@@ -9,7 +9,11 @@ import (
 )
 
 var (
-	timeBlockLine     = regexp.MustCompile(`^\d{1,2}\.\d{2}\s*$`)
+	// timeBlockLine принимает только целую строку заголовка. Решётка и её
+	// необязательный цифровой номер являются служебной частью EAVC и никогда не
+	// входят в отображаемое время. Любой иной текст после решётки оставляет
+	// строку обычной репликой.
+	timeBlockLine     = regexp.MustCompile(`^\s*(\d{1,2})[.:](\d{2})\s*(?:#\s*\d*)?\s*$`)
 	correspondentCode = regexp.MustCompile(`\((\d{1,10})\)`)
 )
 
@@ -27,8 +31,11 @@ type ContentBlock struct {
 	UUID      string     `json:"uuid,omitempty"`
 	Key       string     `json:"key"`
 	Sequence  int        `json:"sequence"`
+	TimeKey   int        `json:"time_key,omitempty"`
+	DayOffset int        `json:"day_offset,omitempty"`
 	Text      string     `json:"text"`
 	Hash      string     `json:"hash"`
+	UpdatedBy string     `json:"updated_by,omitempty"`
 	UpdatedAt string     `json:"updated_at,omitempty"`
 	DeletedAt string     `json:"deleted_at,omitempty"`
 	Callsigns []Callsign `json:"callsigns,omitempty"`
@@ -46,7 +53,10 @@ func (block ContentBlock) Identity() string {
 	return "block-" + strconv.Itoa(block.Sequence+1)
 }
 
-// SplitContentBlocks повторяет разбиение рабочей Python-версии.
+// SplitContentBlocks разделяет каждую целую строку времени в самостоятельный
+// блок. Служебные варианты 10.10, 10.10#, 10.10 #1 и 10:10 # 1 имеют один
+// канонический заголовок 10:10, но каждое отдельное вхождение остаётся отдельным
+// блоком. Случайная решётка в реплике сохраняется дословно.
 func SplitContentBlocks(content string) []ContentBlock {
 	content = normalizeBlockText(content)
 	if content == "" {
@@ -55,7 +65,7 @@ func SplitContentBlocks(content string) []ContentBlock {
 	lines := strings.Split(content, "\n")
 	starts := make([]int, 0)
 	for index, line := range lines {
-		if timeBlockLine.MatchString(strings.TrimSpace(line)) {
+		if _, _, ok := CanonicalTimeHeader(line); ok {
 			starts = append(starts, index)
 		}
 	}
@@ -78,11 +88,19 @@ func SplitContentBlocks(content string) []ContentBlock {
 			if index+1 < len(starts) {
 				end = starts[index+1]
 			}
-			add(strings.TrimSpace(lines[start]), lines[start:end])
+			canonical, _, _ := CanonicalTimeHeader(lines[start])
+			chunk := append([]string(nil), lines[start:end]...)
+			chunk[0] = canonical
+			text := strings.TrimSpace(strings.Join(chunk, "\n"))
+			if text != "" {
+				parts = append(parts, part{key: canonical, text: text})
+			}
 		}
 	}
 	seen := make(map[string]int)
 	blocks := make([]ContentBlock, 0, len(parts))
+	dayOffset := 0
+	previousMinutes := -1
 	for sequence, item := range parts {
 		seen[item.key]++
 		key := item.key
@@ -93,8 +111,32 @@ func SplitContentBlocks(content string) []ContentBlock {
 		blocks = append(blocks, ContentBlock{
 			Key: key, Sequence: sequence, Text: item.text, Hash: fmt.Sprintf("%x", digest[:]),
 		})
+		if _, minutes, ok := CanonicalTimeHeader(strings.Split(item.text, "\n")[0]); ok {
+			blocks[len(blocks)-1].TimeKey = minutes
+			if previousMinutes >= 0 && minutes < previousMinutes {
+				dayOffset++
+			}
+			previousMinutes = minutes
+			blocks[len(blocks)-1].DayOffset = dayOffset
+		}
 	}
 	return blocks
+}
+
+// CanonicalTimeHeader распознаёт только полную строку заголовка и возвращает
+// время HH:MM и число минут от начала суток. Пробелы, решётка и её номер не
+// участвуют в результате.
+func CanonicalTimeHeader(value string) (string, int, bool) {
+	match := timeBlockLine.FindStringSubmatch(value)
+	if match == nil {
+		return "", 0, false
+	}
+	hour, hourErr := strconv.Atoi(match[1])
+	minute, minuteErr := strconv.Atoi(match[2])
+	if hourErr != nil || minuteErr != nil || hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return "", 0, false
+	}
+	return fmt.Sprintf("%02d:%02d", hour, minute), hour*60 + minute, true
 }
 
 // ExtractCorrespondentCodes возвращает ID в порядке первого появления.
