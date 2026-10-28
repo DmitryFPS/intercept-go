@@ -718,6 +718,76 @@ func TestDestinationDoesNotDuplicateUncertainSendAfterRestart(t *testing.T) {
 	}
 }
 
+func TestDestinationResumesMissingChunksWithoutCompletingPartialPublication(t *testing.T) {
+	t.Parallel()
+	var sendCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		switch method {
+		case "editMessageText":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+		case "sendMessage":
+			call := sendCalls.Add(1)
+			if call == 2 {
+				_ = json.NewEncoder(writer).Encode(map[string]any{
+					"ok": false, "error_code": 500, "description": "временная ошибка тестового Telegram",
+				})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"message_id": 700 + call},
+			})
+		default:
+			http.Error(writer, "неожиданный метод", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	event := domain.Event{
+		ID: "event-long", ClientID: "point-01", CreatedAt: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC),
+		Source: domain.SourceRecord{UUID: "source-long"}, Position: domain.Position{UnitName: "позиция"},
+		SourceBlockUUID: "block-long", HasActiveBlocks: true,
+		Blocks: []domain.ContentBlock{{
+			UUID: "block-long", Sequence: 0, UpdatedAt: "2026-10-28 12:00:00",
+			Text: "12.00\n" + strings.Repeat("-Длинная контрольная строка для проверки частей. (10001)\n", 420),
+		}},
+	}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	expected := len(formatBlockChunks(event, event.Blocks[0], delivery, "", "", ""))
+	if expected < 2 {
+		t.Fatalf("тестовый перехват не разбит на части: %d", expected)
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err == nil {
+		t.Fatal("первая доставка должна остановиться на второй части")
+	}
+	partial, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(partial.Blocks) != 1 {
+		t.Fatalf("не удалось прочитать частичную квитанцию: %#v err=%v", partial, err)
+	}
+	if partial.Blocks[0].Complete || partial.Blocks[0].ExpectedMessageCount != expected ||
+		!reflect.DeepEqual(partial.Blocks[0].MessageIDs, []int64{701}) {
+		t.Fatalf("частичная публикация ошибочно завершена: %#v", partial.Blocks[0])
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatalf("недостающие части не продолжены: %v", err)
+	}
+	complete, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(complete.Blocks) != 1 || !complete.Blocks[0].Complete {
+		t.Fatalf("публикация не стала полной: %#v err=%v", complete, err)
+	}
+	if complete.Blocks[0].MessageIDs[0] != 701 ||
+		len(complete.Blocks[0].MessageIDs) != complete.Blocks[0].ExpectedMessageCount {
+		t.Fatalf("первая часть продублирована или потеряна: %#v", complete.Blocks[0])
+	}
+}
+
 func TestDestinationScopedEventNeverChangesSiblingBlock(t *testing.T) {
 	t.Parallel()
 	var methods []string

@@ -35,8 +35,9 @@ func TestPersistReceiptIndependentlyIgnoresCancelledRequestAndRetries(t *testing
 
 func TestReceiptHasPublishedBlock(t *testing.T) {
 	receipt := application.DeliveryReceipt{Blocks: []application.DeliveryBlockReceipt{
-		{BlockUUID: "block-1", MessageIDs: []int64{101}},
-		{BlockUUID: "block-2", Suppressed: true, MessageIDs: []int64{202}},
+		{BlockUUID: "block-1", MessageIDs: []int64{101}, ExpectedMessageCount: 1, Complete: true},
+		{BlockUUID: "block-2", Suppressed: true, MessageIDs: []int64{202}, ExpectedMessageCount: 1, Complete: true},
+		{BlockUUID: "block-3", MessageIDs: []int64{301}, ExpectedMessageCount: 2, Complete: false},
 	}}
 	if !receiptHasPublishedBlock(receipt, "BLOCK-1") {
 		t.Fatal("опубликованный блок не распознан")
@@ -45,6 +46,9 @@ func TestReceiptHasPublishedBlock(t *testing.T) {
 		t.Fatal("подавленный блок ошибочно признан опубликованным")
 	}
 	if receiptHasPublishedBlock(receipt, "block-3") {
+		t.Fatal("частично опубликованный блок ошибочно признан завершённым")
+	}
+	if receiptHasPublishedBlock(receipt, "block-4") {
 		t.Fatal("несуществующий блок ошибочно признан опубликованным")
 	}
 }

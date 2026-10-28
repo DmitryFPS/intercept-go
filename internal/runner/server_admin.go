@@ -449,21 +449,33 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 		// случае повторное действие оператора не создаёт дубль, а только
 		// восстанавливает результат доставки из устойчивого состояния шлюза.
 		receipt, receiptErr := gateway.DeliveryReceipt(job.Event, job.Delivery)
-		if receiptErr != nil || !receiptHasPublishedBlock(receipt, blockUUID) {
+		if receiptErr != nil {
+			return fmt.Errorf("проверить состояние публикации Telegram: %w", receiptErr)
+		}
+		found, complete := receiptBlockPublicationState(receipt, blockUUID)
+		if !found {
 			return errors.New("блок не отмечен как удалённый в Telegram")
 		}
-		if persistErr := persistReceiptIndependently(func(saveContext context.Context) error {
-			return server.Store.ReplaceDeliveryReceipt(
-				saveContext, job.Event.ID, job.Delivery.Destination.ID, time.Now().UTC(), receipt,
+		if complete {
+			if persistErr := persistReceiptIndependently(func(saveContext context.Context) error {
+				return server.Store.ReplaceDeliveryReceipt(
+					saveContext, job.Event.ID, job.Delivery.Destination.ID, time.Now().UTC(), receipt,
+				)
+			}); persistErr != nil {
+				return persistErr
+			}
+			server.Logger.Info("результат повторной публикации восстановлен без создания дубля",
+				"event_id", job.Event.ID, "destination_id", destinationID, "block_uuid", blockUUID,
+				"final_message_ids", receipt.MessageIDs,
 			)
-		}); persistErr != nil {
-			return persistErr
+			return nil
 		}
-		server.Logger.Info("результат повторной публикации восстановлен без создания дубля",
+		// У длинного перехвата могла сохраниться только первая часть. Продолжаем
+		// тот же набор message_id вместо ошибочного завершения или новой отправки.
+		server.Logger.Warn("незавершённая публикация Telegram будет продолжена",
 			"event_id", job.Event.ID, "destination_id", destinationID, "block_uuid", blockUUID,
-			"final_message_ids", receipt.MessageIDs,
+			"known_message_ids", receipt.MessageIDs,
 		)
-		return nil
 	}
 	if err := gateway.Deliver(ctx, job.Event, job.Delivery); err != nil {
 		return fmt.Errorf("повторно опубликовать блок: %w", err)
@@ -471,6 +483,9 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 	receipt, err := gateway.DeliveryReceipt(job.Event, job.Delivery)
 	if err != nil {
 		return fmt.Errorf("прочитать ID повторной публикации: %w", err)
+	}
+	if !receiptHasPublishedBlock(receipt, blockUUID) {
+		return errors.New("повторная публикация Telegram не завершена: сохранены не все части")
 	}
 	if err := persistReceiptIndependently(func(saveContext context.Context) error {
 		return server.Store.ReplaceDeliveryReceipt(
@@ -488,13 +503,17 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 }
 
 func receiptHasPublishedBlock(receipt application.DeliveryReceipt, blockUUID string) bool {
+	_, complete := receiptBlockPublicationState(receipt, blockUUID)
+	return complete
+}
+
+func receiptBlockPublicationState(receipt application.DeliveryReceipt, blockUUID string) (found, complete bool) {
 	for _, block := range receipt.Blocks {
-		if strings.EqualFold(strings.TrimSpace(block.BlockUUID), strings.TrimSpace(blockUUID)) &&
-			!block.Suppressed && len(block.MessageIDs) > 0 {
-			return true
+		if strings.EqualFold(strings.TrimSpace(block.BlockUUID), strings.TrimSpace(blockUUID)) {
+			return true, block.Complete && !block.Suppressed && len(block.MessageIDs) > 0
 		}
 	}
-	return false
+	return false, false
 }
 
 // persistReceiptIndependently не связывает уже выполненную внешнюю публикацию

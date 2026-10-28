@@ -229,6 +229,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 			}
 			stored.DeletedMessageIDs = appendUniqueIDs(stored.DeletedMessageIDs, oldIDs...)
 			stored.MessageIDs = nil
+			stored.ExpectedMessageCount = 0
 			stored.Recovering = true
 			stored.ThreadID = threadID
 			storeTelegramRevision(&stored, event)
@@ -244,7 +245,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 				)
 			}
 		}
-		if exists && storedBaseHash == baseHash && !stored.Recovering {
+		if exists && storedBaseHash == baseHash && telegramBlockPublicationComplete(stored, len(baseChunks)) {
 			stored.Sequence = block.Sequence
 			stored.ThreadID = threadID
 			storeTelegramRevision(&stored, event)
@@ -261,6 +262,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 			stored.SourceDeleted = false
 			stored.Recovering = true
 			stored.MessageIDs = nil
+			stored.ExpectedMessageCount = 0
 			if destination.Logger != nil {
 				destination.Logger.Info("новая редакция восстанавливает удалённую публикацию Telegram",
 					"event_id", event.ID, "trace_id", event.ID, "block_uuid", blockKey,
@@ -282,6 +284,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		renderHash := hashChunks(chunks)
 		progress := func(messageIDs []int64, recovering bool) error {
 			stored.MessageIDs = append([]int64(nil), messageIDs...)
+			stored.ExpectedMessageCount = len(chunks)
 			stored.Recovering = recovering
 			stored.SendPending = false
 			stored.SendPendingIndex = 0
@@ -293,6 +296,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 			return destination.saveItem(itemKey, item, false)
 		}
 		sendIntent := func(pending bool, index int) error {
+			stored.ExpectedMessageCount = len(chunks)
 			stored.SendPending = pending
 			stored.SendPendingIndex = index
 			if pending {
@@ -350,8 +354,9 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		// публикацией бесследно пропадала из интерфейса и журналов.
 		item.Blocks[blockKey] = destinationBlock{
 			Hash: renderHash, SourceHash: baseHash, MessageIDs: messageIDs,
-			DeletedMessageIDs: append([]int64(nil), stored.DeletedMessageIDs...),
-			Sequence:          block.Sequence, SourceVersion: event.SourceVersion(), SourceEventAt: event.CreatedAt,
+			DeletedMessageIDs:    append([]int64(nil), stored.DeletedMessageIDs...),
+			ExpectedMessageCount: len(chunks),
+			Sequence:             block.Sequence, SourceVersion: event.SourceVersion(), SourceEventAt: event.CreatedAt,
 			ThreadID: threadID,
 		}
 		if err := destination.saveItem(itemKey, item, false); err != nil {
@@ -384,7 +389,8 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 }
 
 // DeliveryReceipt возвращает сохранённые ID конечной публикации, а не ID
-// транспортного .icevent-файла. Метод вызывается только после успешной Deliver.
+// транспортного .icevent-файла. Complete отличает полностью опубликованный
+// длинный перехват от безопасно сохранённого промежуточного состояния.
 func (destination *Destination) DeliveryReceipt(
 	event domain.Event, delivery domain.PlannedDelivery,
 ) (application.DeliveryReceipt, error) {
@@ -414,6 +420,8 @@ func (destination *Destination) DeliveryReceipt(
 	receiptThreadID := item.ThreadID
 	for _, entry := range ordered {
 		block := entry.block
+		expectedMessageCount := destination.expectedMessageCount(event, delivery, entry.key, block)
+		complete := telegramBlockPublicationComplete(block, expectedMessageCount)
 		if scoped := strings.TrimSpace(event.SourceBlockUUID); scoped != "" && block.ThreadID != 0 {
 			receiptThreadID = block.ThreadID
 		}
@@ -422,8 +430,9 @@ func (destination *Destination) DeliveryReceipt(
 		}
 		blockReceipts = append(blockReceipts, application.DeliveryBlockReceipt{
 			BlockUUID: entry.key, MessageIDs: append([]int64(nil), block.MessageIDs...),
-			DeletedMessageIDs: append([]int64(nil), block.DeletedMessageIDs...),
-			Suppressed:        block.Suppressed, SuppressedReason: block.SuppressedReason,
+			DeletedMessageIDs:    append([]int64(nil), block.DeletedMessageIDs...),
+			ExpectedMessageCount: expectedMessageCount, Complete: complete,
+			Suppressed: block.Suppressed, SuppressedReason: block.SuppressedReason,
 		})
 	}
 	if scoped := strings.TrimSpace(event.SourceBlockUUID); scoped != "" && len(blockReceipts) == 0 {
@@ -433,6 +442,57 @@ func (destination *Destination) DeliveryReceipt(
 		Kind: "telegram", ChatID: destination.ChatID,
 		ThreadID: receiptThreadID, MessageIDs: messageIDs, Blocks: blockReceipts,
 	}, nil
+}
+
+// expectedMessageCount восстанавливает ожидаемое число частей и для состояния,
+// записанного версиями до появления этого поля. SourceHash связывает сохранённую
+// публикацию с точным исходным содержимым и не позволяет принять чужую редакцию.
+func (destination *Destination) expectedMessageCount(
+	event domain.Event, delivery domain.PlannedDelivery, blockUUID string, stored destinationBlock,
+) int {
+	for _, block := range eventBlocks(event) {
+		if !strings.EqualFold(block.Identity(), strings.TrimSpace(blockUUID)) {
+			continue
+		}
+		chunks := formatBlockChunks(
+			event, block, delivery, destination.Network, destination.Protection, destination.MessageTemplate,
+		)
+		if len(chunks) == 0 {
+			return 0
+		}
+		baseHash := hashChunks(chunks)
+		if stored.SourceHash != "" && stored.SourceHash != baseHash {
+			return 0
+		}
+		if stored.ExpectedMessageCount > 0 {
+			return stored.ExpectedMessageCount
+		}
+		// В старом состоянии количество не сохранялось. Совпадение SourceHash
+		// (либо Hash у ещё более старой версии) доказывает, что это те же части.
+		if stored.SourceHash == baseHash || stored.Hash == baseHash {
+			return len(chunks)
+		}
+		return 0
+	}
+	return stored.ExpectedMessageCount
+}
+
+func telegramBlockPublicationComplete(block destinationBlock, expectedMessageCount int) bool {
+	if expectedMessageCount <= 0 || len(block.MessageIDs) != expectedMessageCount ||
+		block.Recovering || block.Suppressed || block.SourceDeleted || block.SendPending {
+		return false
+	}
+	seen := make(map[int64]struct{}, len(block.MessageIDs))
+	for _, messageID := range block.MessageIDs {
+		if messageID <= 0 {
+			return false
+		}
+		if _, exists := seen[messageID]; exists {
+			return false
+		}
+		seen[messageID] = struct{}{}
+	}
+	return true
 }
 
 // deleteScopedBlock удаляет только публикацию выбранного временного блока.
@@ -455,6 +515,7 @@ func (destination *Destination) deleteScopedBlock(
 	}
 	stored.DeletedMessageIDs = appendUniqueIDs(stored.DeletedMessageIDs, stored.MessageIDs...)
 	stored.MessageIDs = nil
+	stored.ExpectedMessageCount = 0
 	stored.Hash = ""
 	stored.SourceHash = ""
 	stored.Recovering = false
@@ -604,6 +665,7 @@ func (destination *Destination) AllowRepublish(blockUUID string) (bool, error) {
 	block.Hash = ""
 	block.SourceHash = ""
 	block.MessageIDs = nil
+	block.ExpectedMessageCount = 0
 	block.Recovering = false
 	block.SendPending = false
 	block.SendPendingIndex = 0
