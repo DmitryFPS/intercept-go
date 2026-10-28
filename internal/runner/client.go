@@ -166,18 +166,55 @@ type Client struct {
 	storageOpener  localQueueOpener
 	storageRetry   time.Duration
 	storageCycle   time.Duration
+	processRestart chan struct{}
+	restartAllowed bool
 }
 
 // NewClient собирает переносимое приложение вокруг выбранной рабочей папки.
 func NewClient(baseDir, version string, logger *slog.Logger) *Client {
 	return &Client{
 		BaseDir: baseDir, Version: version, Logger: logger,
-		status:        ClientStatus{State: "setup", Title: "Нужны настройки", Detail: "Загрузите файл настроек, который прислал администратор.", Version: version},
-		shiftSnapshot: application.UnavailableShiftSnapshot(),
-		storageOpener: openLocalQueueOnce,
-		storageRetry:  5 * time.Second,
-		storageCycle:  2 * time.Minute,
+		status:         ClientStatus{State: "setup", Title: "Нужны настройки", Detail: "Загрузите файл настроек, который прислал администратор.", Version: version},
+		shiftSnapshot:  application.UnavailableShiftSnapshot(),
+		storageOpener:  openLocalQueueOnce,
+		storageRetry:   5 * time.Second,
+		storageCycle:   2 * time.Minute,
+		processRestart: make(chan struct{}, 1),
+		restartAllowed: true,
 	}
+}
+
+// ProcessRestartRequests reports that reopening SQLite inside the current
+// process did not recover after a complete retry cycle. The executable can
+// then replace only its process while preserving all files and queued events.
+func (client *Client) ProcessRestartRequests() <-chan struct{} {
+	return client.processRestart
+}
+
+// DisableProcessRestart prevents a restart loop in the one recovery process
+// that was already launched specifically to replace a poisoned SQLite process.
+func (client *Client) DisableProcessRestart() {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	client.restartAllowed = false
+}
+
+func (client *Client) requestProcessRestart() bool {
+	client.mu.Lock()
+	if !client.restartAllowed {
+		client.mu.Unlock()
+		return false
+	}
+	client.restartAllowed = false
+	client.status.State = "restarting"
+	client.status.Title = "Перезапуск программы"
+	client.status.Detail = "Локальное хранилище освобождено. Программа безопасно перезапускается без потери очереди."
+	client.mu.Unlock()
+	select {
+	case client.processRestart <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // Start загружает сохранённые настройки и поддерживает рабочий процесс до

@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +32,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
 		fmt.Printf("EAVC Connect Station %s\n", buildVersion())
 		return
+	}
+	if parentPID := integerArgument("--restart-after-pid="); parentPID > 0 {
+		if err := selfupdate.WaitForRecoveryParent(parentPID); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			return
+		}
 	}
 	baseDir, err := executableDir()
 	if err != nil {
@@ -77,6 +84,9 @@ func main() {
 	ctx, shutdown := context.WithCancel(signalContext)
 	defer shutdown()
 	application := runner.NewClient(baseDir, buildVersion(), logger)
+	if hasArgument("--storage-recovery-process") {
+		application.DisableProcessRestart()
+	}
 	defer application.Close()
 	if hasArgument("--update-validation") {
 		if err := application.ValidateForUpdate(ctx); err != nil {
@@ -85,6 +95,18 @@ func main() {
 	} else {
 		application.Start(ctx)
 	}
+	go func() {
+		select {
+		case <-application.ProcessRestartRequests():
+			if err := selfupdate.StartRecoveryRestart(executable, baseDir, os.Getpid()); err != nil {
+				logger.Error("не удалось перезапустить процесс после блокировки хранилища", "error", err)
+				_ = application.StartProcessing()
+				return
+			}
+			shutdown()
+		case <-ctx.Done():
+		}
+	}()
 	operationalErrors := observability.StartOperationalRecorder(ctx, baseDir, "station", buildVersion(), func() any { return application.OperationalStatus() })
 	go func() {
 		for err := range operationalErrors {
@@ -110,6 +132,12 @@ func argumentValue(prefix string) string {
 		}
 	}
 	return ""
+}
+
+func integerArgument(prefix string) int {
+	value := argumentValue(prefix)
+	parsed, _ := strconv.Atoi(value)
+	return parsed
 }
 
 func hasArgument(expected string) bool {

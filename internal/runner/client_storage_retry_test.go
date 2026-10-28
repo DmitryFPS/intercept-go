@@ -81,3 +81,29 @@ func TestClientSupervisorRestartsOnlyTransientCycle(t *testing.T) {
 		t.Fatal("остановленный клиент не должен перезапускаться")
 	}
 }
+
+func TestClientRequestsOneProcessRestartAfterStorageCycle(t *testing.T) {
+	client := NewClient(t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !client.requestProcessRestart() {
+		t.Fatal("first exhausted storage cycle did not request a process restart")
+	}
+	select {
+	case <-client.ProcessRestartRequests():
+	default:
+		t.Fatal("process restart request was not published")
+	}
+	if client.requestProcessRestart() {
+		t.Fatal("a second process restart was requested")
+	}
+	if got := client.Status().State; got != "restarting" {
+		t.Fatalf("unexpected restart status: %q", got)
+	}
+}
+
+func TestRecoveryProcessCannotRequestAnotherRestart(t *testing.T) {
+	client := NewClient(t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client.DisableProcessRestart()
+	if client.requestProcessRestart() {
+		t.Fatal("recovery process would create a restart loop")
+	}
+}

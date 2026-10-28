@@ -87,7 +87,10 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 // Windows, не требуя от оператора нажимать «Стоп» и «Старт».
 func (client *Client) runSupervised(ctx context.Context, cfg config.Client) {
 	for {
-		client.run(ctx, cfg)
+		runErr := client.run(ctx, cfg)
+		if errors.Is(runErr, errLocalStorageRetryCycle) && client.requestProcessRestart() {
+			return
+		}
 		if !shouldRestartClientCycle(ctx.Err(), client.Status().State) {
 			return
 		}
@@ -166,23 +169,23 @@ func (client *Client) stopWorkerLocked() {
 	client.update(func(status *ClientStatus) { status.Processing = false })
 }
 
-func (client *Client) run(ctx context.Context, cfg config.Client) {
+func (client *Client) run(ctx context.Context, cfg config.Client) error {
 	// Локальная очередь и транспорт открываются до EAVC. Так сохранённые пакеты
 	// продолжают уходить в центр даже при холодном запуске без доступной базы EAVC.
 	storage, err := client.waitForLocalQueue(ctx, filepath.Join(client.BaseDir, "data", "client.db"))
 	if err != nil {
 		if ctx.Err() != nil {
-			return
+			return ctx.Err()
 		}
 		if errors.Is(err, errLocalStorageRetryCycle) {
-			return
+			return err
 		}
 		client.fail(
 			"Не удалось открыть локальное хранилище",
 			"Схема локального хранилища несовместима с этой версией. Установите актуальное обновление.",
 			err,
 		)
-		return
+		return err
 	}
 	db, queue := storage.database, storage.queue
 	defer db.Close()
@@ -193,7 +196,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 			"Загрузите новый файл настроек, созданный в центре управления.",
 			err,
 		)
-		return
+		return err
 	}
 	for {
 		if err := api.DeleteWebhook(ctx, false); err == nil {
@@ -206,7 +209,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 			)
 		}
 		if !waitForRetry(ctx, 5*time.Second) {
-			return
+			return ctx.Err()
 		}
 	}
 	key, _ := cfg.Key()
@@ -217,7 +220,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 			"Создайте файл настроек рабочей точки заново.",
 			err,
 		)
-		return
+		return err
 	}
 	transport := &telegram.ClientTransport{
 		API: api, ChatID: cfg.Transport.ChatID, ThreadID: cfg.Transport.ThreadID,
@@ -291,7 +294,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) {
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-ticker.C:
 		}
 	}
