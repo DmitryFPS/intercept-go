@@ -444,7 +444,26 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 		return err
 	}
 	if !allowed {
-		return errors.New("блок не отмечен как удалённый в Telegram")
+		// Предыдущая попытка могла уже успешно создать сообщение Telegram, но
+		// потерять HTTP-контекст до записи нового message_id в SQLite. В таком
+		// случае повторное действие оператора не создаёт дубль, а только
+		// восстанавливает результат доставки из устойчивого состояния шлюза.
+		receipt, receiptErr := gateway.DeliveryReceipt(job.Event, job.Delivery)
+		if receiptErr != nil || !receiptHasPublishedBlock(receipt, blockUUID) {
+			return errors.New("блок не отмечен как удалённый в Telegram")
+		}
+		if persistErr := persistReceiptIndependently(func(saveContext context.Context) error {
+			return server.Store.ReplaceDeliveryReceipt(
+				saveContext, job.Event.ID, job.Delivery.Destination.ID, time.Now().UTC(), receipt,
+			)
+		}); persistErr != nil {
+			return persistErr
+		}
+		server.Logger.Info("результат повторной публикации восстановлен без создания дубля",
+			"event_id", job.Event.ID, "destination_id", destinationID, "block_uuid", blockUUID,
+			"final_message_ids", receipt.MessageIDs,
+		)
+		return nil
 	}
 	if err := gateway.Deliver(ctx, job.Event, job.Delivery); err != nil {
 		return fmt.Errorf("повторно опубликовать блок: %w", err)
@@ -453,11 +472,51 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 	if err != nil {
 		return fmt.Errorf("прочитать ID повторной публикации: %w", err)
 	}
-	if err := server.Store.ReplaceDeliveryReceipt(ctx, job.Event.ID, job.Delivery.Destination.ID, time.Now().UTC(), receipt); err != nil {
+	if err := persistReceiptIndependently(func(saveContext context.Context) error {
+		return server.Store.ReplaceDeliveryReceipt(
+			saveContext, job.Event.ID, job.Delivery.Destination.ID, time.Now().UTC(), receipt,
+		)
+	}); err != nil {
+		server.Logger.Error("Telegram опубликован, но новый message_id пока не сохранён",
+			"event_id", job.Event.ID, "destination_id", destinationID, "block_uuid", blockUUID,
+			"final_message_ids", receipt.MessageIDs, "error", err,
+		)
 		return err
 	}
 	server.Logger.Info("временной блок повторно опубликован оператором", "event_id", job.Event.ID, "destination_id", destinationID, "block_uuid", blockUUID)
 	return nil
+}
+
+func receiptHasPublishedBlock(receipt application.DeliveryReceipt, blockUUID string) bool {
+	for _, block := range receipt.Blocks {
+		if strings.EqualFold(strings.TrimSpace(block.BlockUUID), strings.TrimSpace(blockUUID)) &&
+			!block.Suppressed && len(block.MessageIDs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// persistReceiptIndependently не связывает уже выполненную внешнюю публикацию
+// с жизненным циклом браузерного HTTP-запроса. Ограниченные повторы закрывают
+// кратковременную блокировку SQLite, но не могут зависнуть бесконечно.
+func persistReceiptIndependently(operation func(context.Context) error) error {
+	const attempts = 4
+	delay := 100 * time.Millisecond
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		saveContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		lastErr = operation(saveContext)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if attempt < attempts {
+			time.Sleep(delay)
+			delay *= 2
+		}
+	}
+	return fmt.Errorf("сохранить ID повторной публикации после %d попыток: %w", attempts, lastErr)
 }
 
 // ClientConfig повторно выдаёт защищённо сохранённую конфигурацию точки.
