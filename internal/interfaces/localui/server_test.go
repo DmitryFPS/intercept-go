@@ -2,8 +2,10 @@ package localui
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -95,5 +97,27 @@ func TestIsRunningRecognizesSameProtectedInterface(t *testing.T) {
 	}
 	if IsRunning(authority, "другой-ключ") {
 		t.Fatal("интерфейс с другим ключом ошибочно распознан как свой")
+	}
+}
+
+func TestIsRunningDoesNotDisclosePersistentTokenToUnknownPort(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	var disclosed bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		payload, _ := io.ReadAll(request.Body)
+		disclosed = request.Header.Get(accessHeaderName) == token ||
+			bytes.Contains([]byte(request.URL.String()), []byte(token)) ||
+			bytes.Contains(payload, []byte(token))
+		writer.Header().Set(instanceProofHeader, "поддельное-доказательство")
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	authority := strings.TrimPrefix(server.URL, "http://")
+	if IsRunning(authority, token) {
+		t.Fatal("посторонний процесс ошибочно распознан как EAVC Connect")
+	}
+	if disclosed {
+		t.Fatal("постоянный ключ доступа был передан постороннему процессу")
 	}
 }

@@ -60,10 +60,18 @@ func main() {
 	defer releaseInstance()
 	if alreadyRunning {
 		if openBrowser {
-			for attempt := 0; attempt < 20 && !localui.IsRunning(address, accessToken); attempt++ {
+			verified := false
+			for attempt := 0; attempt < 20; attempt++ {
+				if verified = localui.IsRunning(address, accessToken); verified {
+					break
+				}
 				time.Sleep(100 * time.Millisecond)
 			}
-			_ = localui.OpenBrowser(localui.AccessURL(address, accessToken))
+			if verified {
+				_ = localui.OpenBrowser(localui.AccessURL(address, accessToken))
+			} else {
+				logger.Error("занятый порт не принадлежит EAVC Connect; защищённая ссылка не открыта", "address", address)
+			}
 		}
 		return
 	}
@@ -104,7 +112,6 @@ func main() {
 	handler := serverui.Handler{Server: application, Context: ctx, Updater: updater, Shutdown: shutdown}.Routes()
 	if err := localui.ListenAndServe(ctx, address, handler, openBrowser, accessToken); err != nil {
 		logger.Error("локальный интерфейс завершён", "error", err)
-		_ = localui.OpenBrowser(localui.AccessURL(address, accessToken))
 	}
 }
 

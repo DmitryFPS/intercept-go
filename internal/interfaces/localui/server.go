@@ -2,7 +2,11 @@ package localui
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +20,12 @@ import (
 )
 
 const accessHeaderName = "X-EAVC-Access"
+
+const (
+	instanceChallengeHeader = "X-EAVC-Instance-Challenge"
+	instanceProofHeader     = "X-EAVC-Instance-Proof"
+	instanceProofPath       = "/api/instance-proof"
+)
 
 // ListenAndServe запускает интерфейс только на loopback-адресе.
 func ListenAndServe(ctx context.Context, address string, handler http.Handler, open bool, accessToken string) error {
@@ -58,25 +68,36 @@ func AccessURL(address, accessToken string) string {
 	return "http://" + address + "/#access=" + accessToken
 }
 
-// IsRunning проверяет, принадлежит ли уже занятый адрес экземпляру программы с тем же ключом доступа.
+// IsRunning проверяет владельца занятого порта по одноразовому вызову-ответу.
+// Постоянный ключ доступа не передаётся процессу на проверяемом порту: настоящий
+// экземпляр доказывает владение ключом с помощью HMAC от случайного вызова.
 func IsRunning(address, accessToken string) bool {
+	challenge := make([]byte, 32)
+	if _, err := rand.Read(challenge); err != nil {
+		return false
+	}
+	encodedChallenge := base64.RawURLEncoding.EncodeToString(challenge)
 	client := &http.Client{
 		Timeout: 750 * time.Millisecond,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	request, err := http.NewRequest(http.MethodGet, "http://"+address+"/api/status", nil)
+	request, err := http.NewRequest(http.MethodGet, "http://"+address+instanceProofPath, nil)
 	if err != nil {
 		return false
 	}
-	request.Header.Set(accessHeaderName, accessToken)
+	request.Header.Set(instanceChallengeHeader, encodedChallenge)
 	response, err := client.Do(request)
 	if err != nil {
 		return false
 	}
 	defer response.Body.Close()
-	return response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices
+	if response.StatusCode != http.StatusNoContent {
+		return false
+	}
+	expected := instanceProof(accessToken, encodedChallenge)
+	return constantEqual(response.Header.Get(instanceProofHeader), expected)
 }
 
 func protectLocalUI(authority, token string, next http.Handler) http.Handler {
@@ -84,6 +105,21 @@ func protectLocalUI(authority, token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if !constantEqual(request.Host, authority) {
 			http.Error(writer, "Интерфейс доступен только по локальному адресу программы.", http.StatusMisdirectedRequest)
+			return
+		}
+		if request.URL.Path == instanceProofPath {
+			if request.Method != http.MethodGet {
+				writer.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			challenge := strings.TrimSpace(request.Header.Get(instanceChallengeHeader))
+			decoded, err := base64.RawURLEncoding.DecodeString(challenge)
+			if err != nil || len(decoded) != 32 {
+				http.Error(writer, "Некорректная проверка экземпляра.", http.StatusBadRequest)
+				return
+			}
+			writer.Header().Set(instanceProofHeader, instanceProof(token, challenge))
+			writer.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if strings.HasPrefix(request.URL.Path, "/api/") && !constantEqual(request.Header.Get(accessHeaderName), token) {
@@ -102,6 +138,12 @@ func protectLocalUI(authority, token string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(writer, request)
 	})
+}
+
+func instanceProof(token, challenge string) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	_, _ = mac.Write([]byte("eavc-connect-instance:" + challenge))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func constantEqual(left, right string) bool {
