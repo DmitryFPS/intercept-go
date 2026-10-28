@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"intercept/internal/infrastructure/secrets"
 	stateDB "intercept/internal/infrastructure/sqlite"
 	"intercept/internal/infrastructure/telegram"
+	"intercept/internal/observability"
 )
 
 type localQueueHandle struct {
@@ -59,7 +61,7 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 		if stateDB.IsPermanentMigrationError(err) {
 			return localQueueHandle{}, err
 		}
-		client.transientFailure(
+		client.storageTransientFailure(
 			"Локальное хранилище временно недоступно",
 			"Данные сохранены. Программа повторит открытие автоматически.",
 			err,
@@ -80,6 +82,24 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 			}
 		}
 	}
+}
+
+func (client *Client) storageTransientFailure(title, detail string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	safeError := observability.SafeText(err.Error())
+	if baseDir := strings.TrimSpace(client.BaseDir); baseDir != "" {
+		safeError = strings.ReplaceAll(safeError, baseDir, "<application>")
+	}
+	client.Logger.Warn(title, "error", err)
+	client.update(func(status *ClientStatus) {
+		status.State = "waiting"
+		status.Title = title
+		status.Detail = detail
+		status.TelegramOK = false
+		status.StorageError = safeError
+	})
 }
 
 // runSupervised перезапускает весь рабочий цикл после затянувшегося временного
@@ -189,6 +209,7 @@ func (client *Client) run(ctx context.Context, cfg config.Client) error {
 	}
 	db, queue := storage.database, storage.queue
 	defer db.Close()
+	client.update(func(status *ClientStatus) { status.StorageError = "" })
 	api, err := telegram.New(cfg.Transport.BotToken, nil)
 	if err != nil {
 		client.fail(

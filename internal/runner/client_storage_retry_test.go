@@ -33,6 +33,9 @@ func TestClientRetriesTransientLocalStorageFailure(t *testing.T) {
 	if status.State != "waiting" {
 		t.Fatalf("ожидалось понятное состояние ожидания, получено %q", status.State)
 	}
+	if status.StorageError != "database is temporarily locked" {
+		t.Fatalf("storage diagnostic was not retained: %q", status.StorageError)
+	}
 }
 
 func TestClientDoesNotRetryPermanentMigrationFailure(t *testing.T) {

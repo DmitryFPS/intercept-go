@@ -37,6 +37,7 @@ type ClientStatus struct {
 	Queue              stateDB.ClientStats `json:"queue"`
 	Version            string              `json:"version"`
 	Processing         bool                `json:"processing"`
+	StorageError       string              `json:"storage_error,omitempty"`
 }
 
 // QueueEventsPage — безопасная страница локальной очереди сообщений.
