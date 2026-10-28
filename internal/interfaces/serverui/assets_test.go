@@ -126,6 +126,40 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	}
 }
 
+func TestClientShiftHistoryUsesAlignedOperatorLayout(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assets.ReadFile("assets/history.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	javascript := string(application)
+	css := string(styles)
+	for _, expected := range []string{
+		`<div class="shift-history"><small>Смены</small>`,
+		`class="shift-row"`,
+		`class="shift-period"`,
+		`'по н.в.'`,
+		`${closed ? 'закрыта' : 'открыта'}`,
+		`client.shift_read_state === 'error'`,
+		`data.shift_warning`,
+	} {
+		if !strings.Contains(javascript, expected) {
+			t.Errorf("оформление истории смен неполно: нет %q", expected)
+		}
+	}
+	if strings.Contains(javascript, "Последние смены без повторов") {
+		t.Error("в интерфейсе осталось прежнее техническое название истории смен")
+	}
+	for _, expected := range []string{".shift-row {", ".shift-period {", ".shift-status.open", ".shift-status.closed"} {
+		if !strings.Contains(css, expected) {
+			t.Errorf("для выравнивания истории смен нет стиля %q", expected)
+		}
+	}
+}
+
 func TestBrowserDialogsAreReplacedWithBrandedModal(t *testing.T) {
 	application, err := assets.ReadFile("assets/app.js")
 	if err != nil {

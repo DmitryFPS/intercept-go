@@ -627,20 +627,29 @@ function renderHistory() {
   healthList.innerHTML = clients.map(client => {
     const currentShifts = client.shifts || [];
     const recentShifts = shiftHistory.filter(item => item.client_id === client.client_id).slice(0, 4);
-    const shiftState = client.shift_read_state === 'unavailable'
-      ? 'EAVC временно недоступен; последнее подтверждённое состояние сохранено'
-      : (client.shift_read_state === 'conflict'
+    const shiftState = client.shift_read_state === 'error'
+      ? (client.shift_status_reason || 'Состояние смен временно недоступно; обработка перехватов продолжается')
+      : (client.shift_read_state === 'unavailable'
+        ? 'EAVC временно недоступен; последнее подтверждённое состояние сохранено'
+        : (client.shift_read_state === 'conflict'
         ? 'Обнаружено противоречие истории EAVC; прежнее состояние сохранено'
         : (currentShifts.length ? currentShifts.map(item => {
           const position = item.position_name || 'Позиция без названия';
           return item.closed_at
             ? `${position}: закрыта ${formatDate(item.closed_at)}`
             : `${position}: открыта ${formatDate(item.opened_at)}`;
-        }).join(' · ') : 'Смена ещё не обнаружена'));
-    const recent = recentShifts.length
+        }).join(' · ') : 'Смена ещё не обнаружена')));
+    const recent = data.shift_warning
+      ? `<span class="shift-warning">${escapeHTML(data.shift_warning)}</span>`
+      : recentShifts.length
       ? recentShifts.map(item => {
         const position = item.position_name || 'Позиция без названия';
-        return `<div><b>${escapeHTML(position)}</b>: ${formatDate(item.opened_at)} — ${item.closed_at ? formatDate(item.closed_at) : 'открыта'}</div>`;
+        const closed = Boolean(item.closed_at);
+        return `<div class="shift-row">
+          <b class="shift-position">${escapeHTML(position)}:</b>
+          <span class="shift-period"><time>${formatDate(item.opened_at)}</time><span aria-hidden="true">—</span><time>${closed ? formatDate(item.closed_at) : 'по н.в.'}</time></span>
+          <span class="shift-status ${closed ? 'closed' : 'open'}">${closed ? 'закрыта' : 'открыта'}</span>
+        </div>`;
       }).join('')
       : '<span>История смен пока пуста</span>';
     return `
@@ -655,7 +664,7 @@ function renderHistory() {
         <dt>Состояние смены получено</dt><dd>${formatDate(client.last_shift_success_at)}</dd>
         <dt>Причина</dt><dd>${escapeHTML(client.current_reason || 'Ошибок связи нет')}</dd>
       </dl>
-      <div class="shift-history"><small>Последние смены без повторов</small>${recent}</div>
+      <div class="shift-history"><small>Смены</small>${recent}</div>
     </article>`;
   }).join('');
 

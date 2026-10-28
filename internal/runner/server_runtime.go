@@ -321,10 +321,13 @@ func (server *Server) processTransportInboxItem(
 			ctx, packet.ProbeClientID, packet.ProbeSentAt, packet.ProbeShift,
 		)
 		if err != nil {
-			retry("не удалось сохранить состояние смены рабочей точки", err)
-			return
-		}
-		if shiftChange.Conflict {
+			// История смен — дополнительная диагностическая функция. Её локальная
+			// ошибка не должна задерживать подтверждение связи, копить контрольные
+			// пакеты или останавливать обработку перехватов. Следующий probe снова
+			// попробует сохранить актуальный снимок.
+			server.Logger.Error("не удалось сохранить состояние смены рабочей точки; связь и обработка перехватов продолжаются",
+				"client_id", packet.ProbeClientID, "probe_id", packet.ProbeID, "error", err)
+		} else if shiftChange.Conflict {
 			server.Logger.Error("состояние смены EAVC противоречит уже подтверждённой истории; прежнее состояние сохранено",
 				"client_id", packet.ProbeClientID, "probe_id", packet.ProbeID)
 		} else if shiftChange.Opened > 0 || shiftChange.Closed > 0 {

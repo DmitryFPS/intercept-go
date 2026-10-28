@@ -376,7 +376,16 @@ func (server *Server) Clients(ctx context.Context) ([]application.RegisteredClie
 type HistoryFilter = stateDB.HistoryFilter
 
 func (server *Server) History(ctx context.Context, kind string, limit, offset int, filter HistoryFilter) (stateDB.ServerHistoryPage, error) {
-	return server.Store.HistoryPage(ctx, kind, limit, offset, time.Now().UTC(), filter)
+	page, err := server.Store.HistoryPage(ctx, kind, limit, offset, time.Now().UTC(), filter)
+	if err != nil {
+		return page, err
+	}
+	for _, warning := range page.InternalWarnings {
+		if server.Logger != nil {
+			server.Logger.Warn("история смен прочитана не полностью; рабочая обработка продолжается", "error", warning)
+		}
+	}
+	return page, nil
 }
 
 // ClearHistory очищает представление завершённой истории, не затрагивая очередь.

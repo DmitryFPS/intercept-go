@@ -108,3 +108,48 @@ func TestClosedShiftCannotBeReopenedByNewerConflictingSnapshot(t *testing.T) {
 		t.Fatalf("противоречивый снимок откатил историю: %+v err=%v", page, err)
 	}
 }
+
+func TestBrokenShiftRowsDoNotBreakClientHealthPage(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	openedAt := time.Date(2026, 10, 28, 6, 0, 0, 0, time.UTC)
+	if _, err := store.RecordClientShiftSnapshot(ctx, "textile", openedAt.Add(time.Minute), application.ShiftSnapshot{
+		ReadState: application.ShiftReadOK,
+		Active: []application.ShiftSession{{
+			SessionID: 1, SessionUUID: "broken-shift", PositionName: "Позиция", OpenedAt: openedAt,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE client_shift_sessions SET opened_at='повреждённое время'
+		WHERE client_id='textile' AND session_uuid='broken-shift'`); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := store.HistoryPage(ctx, "clients", 30, 0, openedAt.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("ошибка данных смены закрыла всю карточку рабочих точек: %v", err)
+	}
+	if len(page.Clients) != 1 || page.Clients[0].ShiftReadState != "error" || page.ShiftWarning == "" || len(page.InternalWarnings) == 0 {
+		t.Fatalf("повреждение смены не изолировано и не объяснено: %+v", page)
+	}
+}
+
+func TestMissingShiftTablesDoNotHideConnectionHealth(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	if _, err := store.db.ExecContext(ctx, `
+		DROP TABLE client_shift_sessions;
+		DROP TABLE client_shift_sync;`); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := store.HistoryPage(ctx, "clients", 30, 0, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ошибка вспомогательных таблиц смен закрыла состояние связи: %v", err)
+	}
+	if len(page.Clients) != 1 || page.Clients[0].ShiftReadState != "error" || page.ShiftWarning == "" || len(page.InternalWarnings) < 2 {
+		t.Fatalf("отсутствующие таблицы смен не изолированы: %+v", page)
+	}
+}

@@ -34,6 +34,7 @@ type ClientHealth struct {
 	DelaySeconds       int64                `json:"delay_seconds"`
 	CurrentReason      string               `json:"current_reason,omitempty"`
 	ShiftReadState     string               `json:"shift_read_state,omitempty"`
+	ShiftStatusReason  string               `json:"shift_status_reason,omitempty"`
 	LastShiftProbeAt   *time.Time           `json:"last_shift_probe_at,omitempty"`
 	LastShiftSuccessAt *time.Time           `json:"last_shift_success_at,omitempty"`
 	Shifts             []ClientShiftSession `json:"shifts,omitempty"`
@@ -109,16 +110,20 @@ type ServerHistoryItem struct {
 
 // ServerHistoryPage объединяет текущую связь и постраничную историю.
 type ServerHistoryPage struct {
-	Kind          string               `json:"kind"`
-	Items         []ServerHistoryItem  `json:"items"`
-	Clients       []ClientHealth       `json:"clients,omitempty"`
-	Incidents     []ConnectionIncident `json:"incidents,omitempty"`
-	ShiftHistory  []ClientShiftSession `json:"shift_history,omitempty"`
-	Total         int                  `json:"total"`
-	Limit         int                  `json:"limit"`
-	Offset        int                  `json:"offset"`
-	Clearable     bool                 `json:"clearable"`
-	RetentionDays int                  `json:"retention_days"`
+	Kind         string               `json:"kind"`
+	Items        []ServerHistoryItem  `json:"items"`
+	Clients      []ClientHealth       `json:"clients,omitempty"`
+	Incidents    []ConnectionIncident `json:"incidents,omitempty"`
+	ShiftHistory []ClientShiftSession `json:"shift_history,omitempty"`
+	ShiftWarning string               `json:"shift_warning,omitempty"`
+	// InternalWarnings передаются runner только для эксплуатационного журнала
+	// и намеренно не раскрываются в локальном API.
+	InternalWarnings []string `json:"-"`
+	Total            int      `json:"total"`
+	Limit            int      `json:"limit"`
+	Offset           int      `json:"offset"`
+	Clearable        bool     `json:"clearable"`
+	RetentionDays    int      `json:"retention_days"`
 }
 
 // HistoryFilter ограничивает историю операторскими признаками. Поиск по тексту
@@ -296,7 +301,7 @@ func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, o
 		filter = filters[0]
 	}
 	if kind == "clients" {
-		clients, err := store.clientHealth(ctx, now.UTC())
+		clients, warnings, err := store.clientHealth(ctx, now.UTC())
 		if err != nil {
 			return ServerHistoryPage{}, err
 		}
@@ -307,9 +312,16 @@ func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, o
 		}
 		shiftHistory, err := store.shiftHistory(ctx, filter, 100)
 		if err != nil {
-			return ServerHistoryPage{}, err
+			warnings = append(warnings, fmt.Errorf("прочитать историю смен: %w", err))
+			shiftHistory = nil
 		}
 		page.Clients, page.Incidents, page.ShiftHistory, page.Total = clients, incidents, shiftHistory, total
+		if len(warnings) > 0 {
+			page.ShiftWarning = "История смен временно доступна не полностью. Связь и обработка перехватов продолжаются."
+			for _, warning := range warnings {
+				page.InternalWarnings = append(page.InternalWarnings, warning.Error())
+			}
+		}
 		page.RetentionDays = 90
 		return page, nil
 	}
@@ -333,24 +345,21 @@ func (store *ServerStore) HistoryPage(ctx context.Context, kind string, limit, o
 	return page, err
 }
 
-func (store *ServerStore) clientHealth(ctx context.Context, now time.Time) ([]ClientHealth, error) {
+func (store *ServerStore) clientHealth(ctx context.Context, now time.Time) ([]ClientHealth, []error, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT c.client_id,c.client_number,c.name,h.status,h.last_seen_at,h.last_probe_at,h.last_event_at,h.last_reason,
-			s.read_state,s.last_probe_at,s.last_success_at
+		SELECT c.client_id,c.client_number,c.name,h.status,h.last_seen_at,h.last_probe_at,h.last_event_at,h.last_reason
 		FROM server_clients c LEFT JOIN client_health h ON h.client_id=c.client_id
-		LEFT JOIN client_shift_sync s ON s.client_id=c.client_id
 		WHERE c.active=1 ORDER BY c.client_number,c.name`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer rows.Close()
 	var result []ClientHealth
 	for rows.Next() {
 		var item ClientHealth
-		var status, lastSeen, lastProbe, lastEvent, reason, shiftState, shiftProbe, shiftSuccess sql.NullString
-		if err := rows.Scan(&item.ClientID, &item.Number, &item.Name, &status, &lastSeen, &lastProbe, &lastEvent, &reason,
-			&shiftState, &shiftProbe, &shiftSuccess); err != nil {
-			return nil, err
+		var status, lastSeen, lastProbe, lastEvent, reason sql.NullString
+		if err := rows.Scan(&item.ClientID, &item.Number, &item.Name, &status, &lastSeen, &lastProbe, &lastEvent, &reason); err != nil {
+			rows.Close()
+			return nil, nil, err
 		}
 		item.Status, item.Quality = "unknown", "unknown"
 		if status.Valid {
@@ -360,9 +369,6 @@ func (store *ServerStore) clientHealth(ctx context.Context, now time.Time) ([]Cl
 		item.LastProbeAt = parseNullableTime(lastProbe)
 		item.LastEventAt = parseNullableTime(lastEvent)
 		item.CurrentReason = reason.String
-		item.ShiftReadState = shiftState.String
-		item.LastShiftProbeAt = parseNullableTime(shiftProbe)
-		item.LastShiftSuccessAt = parseNullableTime(shiftSuccess)
 		if item.LastSeenAt != nil {
 			item.DelaySeconds = max64(0, int64(now.Sub(*item.LastSeenAt).Seconds()))
 			switch {
@@ -374,14 +380,43 @@ func (store *ServerStore) clientHealth(ctx context.Context, now time.Time) ([]Cl
 				item.Quality = "degraded"
 			}
 		}
-		shifts, shiftErr := store.currentClientShifts(ctx, item.ClientID)
-		if shiftErr != nil {
-			return nil, shiftErr
-		}
-		item.Shifts = shifts
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, err
+	}
+
+	warnings := make([]error, 0)
+	for index := range result {
+		item := &result[index]
+		var shiftState, shiftProbe, shiftSuccess sql.NullString
+		syncErr := store.db.QueryRowContext(ctx, `
+			SELECT read_state,last_probe_at,last_success_at
+			FROM client_shift_sync WHERE client_id=?`, item.ClientID,
+		).Scan(&shiftState, &shiftProbe, &shiftSuccess)
+		if syncErr != nil && !errors.Is(syncErr, sql.ErrNoRows) {
+			item.ShiftReadState = "error"
+			item.ShiftStatusReason = "Состояние смен временно недоступно; обработка перехватов продолжается"
+			warnings = append(warnings, fmt.Errorf("прочитать состояние смен точки %s: %w", item.ClientID, syncErr))
+			continue
+		}
+		item.ShiftReadState = shiftState.String
+		item.LastShiftProbeAt = parseNullableTime(shiftProbe)
+		item.LastShiftSuccessAt = parseNullableTime(shiftSuccess)
+		shifts, shiftErr := store.currentClientShifts(ctx, item.ClientID)
+		if shiftErr != nil {
+			item.ShiftReadState = "error"
+			item.ShiftStatusReason = "Состояние смен временно недоступно; обработка перехватов продолжается"
+			warnings = append(warnings, fmt.Errorf("прочитать смены точки %s: %w", item.ClientID, shiftErr))
+			continue
+		}
+		item.Shifts = shifts
+	}
+	return result, warnings, nil
 }
 
 func filterClientHealth(clients []ClientHealth, filter HistoryFilter) []ClientHealth {

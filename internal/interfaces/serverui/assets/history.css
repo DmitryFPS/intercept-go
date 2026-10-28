@@ -125,6 +125,34 @@
 }
 .shift-history small { color: #7b889d; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .shift-history b { color: #25344d; }
+.shift-row {
+  display: grid;
+  grid-template-columns: minmax(130px, .65fr) minmax(310px, 1.35fr) auto;
+  gap: 8px 14px;
+  align-items: center;
+  min-height: 24px;
+}
+.shift-position { min-width: 0; overflow-wrap: anywhere; }
+.shift-period {
+  display: grid;
+  grid-template-columns: max-content 14px max-content;
+  align-items: center;
+  color: #4e5f78;
+  font-variant-numeric: tabular-nums;
+}
+.shift-period > span { text-align: center; }
+.shift-period time { white-space: nowrap; }
+.shift-status {
+  min-width: 62px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 750;
+}
+.shift-status.open { background: #daf4e7; color: #087548; }
+.shift-status.closed { background: #e8edf5; color: #526078; }
+.shift-warning { color: #8a5a08; line-height: 1.45; }
 .history-row {
   display: grid;
   grid-template-columns: minmax(190px, 1.3fr) minmax(220px, 1fr) minmax(165px, .7fr);
@@ -256,6 +284,8 @@
   .incident-row time { grid-column: 2; text-align: left; }
   .history-columns { display: none; }
   .health-card dl { grid-template-columns: 1fr 1fr; }
+  .shift-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .shift-period { grid-column: 1 / -1; grid-row: 2; }
   .history-item-meta { grid-template-columns: 1fr; }
   .history-footer { align-items: stretch; flex-direction: column; }
   .history-pagination { justify-content: space-between; }
