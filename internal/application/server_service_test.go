@@ -98,6 +98,39 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	}
 }
 
+func TestServerServiceSelectsTraceAckOnlyForOptedInEncryptedEvent(t *testing.T) {
+	t.Parallel()
+	key := bytes.Repeat([]byte{0x31}, 32)
+	for _, optedIn := range []bool{false, true} {
+		event := serverServiceEvent()
+		originalDigest := event.ContentDigest
+		event.AckTraceV4 = optedIn
+		if event.CanonicalContentDigest() != originalDigest {
+			t.Fatal("транспортная возможность изменила отпечаток данных EAVC")
+		}
+		envelope, err := protocol.Seal(event, "key-1", key, time.Now(), bytes.NewReader(make([]byte, 12)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Schema != protocol.SchemaV2 {
+			t.Fatalf("включение ACK/4 сломало базовую схему пакета: %s", envelope.Schema)
+		}
+		payload, _ := json.Marshal(envelope)
+		service := ServerService{
+			Clients: memoryRegistry{client: RegisteredClient{
+				ID: "textile", Number: "001", Name: "Текстиль", SenderBotID: 11, SenderBotUsername: "textile_bot",
+				ChatID: -1001, ThreadID: 42, KeyID: "key-1", Key: key, Active: true,
+			}},
+			Rules: memoryRules{rules: serverServiceRules()}, Store: &memoryServerStore{},
+		}
+		packet := IncomingPacket{SenderBotID: 11, SenderBotUsername: "textile_bot", ChatID: -1001, ThreadID: 42, Payload: payload}
+		result, err := service.Receive(context.Background(), packet)
+		if err != nil || !result.Accepted || result.AckTraceV4 != optedIn {
+			t.Fatalf("сервер неверно выбрал формат ACK (optedIn=%v): result=%+v err=%v", optedIn, result, err)
+		}
+	}
+}
+
 func TestServerServiceKeepsAuthenticatedMalformedPacketForQuarantine(t *testing.T) {
 	t.Parallel()
 	key := bytes.Repeat([]byte{0x62}, 32)

@@ -64,6 +64,10 @@ type Event struct {
 	UpdatedBy            string         `json:"updated_by,omitempty"`
 	ContentDigest        string         `json:"content_digest"`
 	ContentDigestVersion string         `json:"content_digest_version,omitempty"`
+	// AckTraceV4 — возможность транспорта Клиента, а не часть данных EAVC.
+	// Поле находится внутри зашифрованного пакета, но не влияет на отпечаток
+	// перехвата: старый Центр его игнорирует и отвечает прежним ACK/3.
+	AckTraceV4 bool `json:"ack_trace_v4,omitempty"`
 }
 
 // Expired сообщает, что событие больше нельзя впервые передавать получателям.

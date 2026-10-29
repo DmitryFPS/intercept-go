@@ -53,7 +53,14 @@ func TestClientServiceSeparatesUploadFromServerAcknowledgement(t *testing.T) {
 	if queue.states[queue.events[0].ID] != "uploaded" {
 		t.Fatalf("загрузка не должна означать подтверждение: %#v", queue.states)
 	}
-	sender.acks = []Acknowledgement{{EventID: queue.events[0].ID, AcceptedAt: now}}
+	if len(sender.sent) != 1 {
+		t.Fatalf("новый Клиент не отправил пакет: %d", len(sender.sent))
+	}
+	opened, err := protocol.Open(sender.sent[0], service.Key)
+	if err != nil || !opened.AckTraceV4 || opened.ContentDigest != queue.events[0].ContentDigest {
+		t.Fatalf("в уже поставленном событии не запрошен совместимый ACK/4: event=%+v err=%v", opened, err)
+	}
+	sender.acks = []Acknowledgement{{EventID: queue.events[0].ID, AcceptedAt: now, Status: "accepted"}}
 	acknowledged, err := service.ReceiveAcknowledgements(context.Background())
 	if err != nil || acknowledged.Events != 1 {
 		t.Fatalf("ack: %+v, %v", acknowledged, err)
@@ -532,9 +539,11 @@ func (source *memorySource) Scan(_ context.Context, _ Cursor, limit int) ([]Sour
 
 type memorySender struct {
 	acks []Acknowledgement
+	sent []protocol.Envelope
 }
 
-func (sender *memorySender) Send(_ context.Context, _ protocol.Envelope) (int64, error) {
+func (sender *memorySender) Send(_ context.Context, envelope protocol.Envelope) (int64, error) {
+	sender.sent = append(sender.sent, envelope)
 	return 77, nil
 }
 
@@ -686,6 +695,21 @@ func (state *memoryClientState) MarkAcknowledged(_ context.Context, eventID stri
 	}
 	state.states[eventID] = "acknowledged"
 	return nil
+}
+
+func (state *memoryClientState) MarkServerDisposition(
+	_ context.Context, eventID string, _ time.Time, status string, _ int64,
+) (bool, error) {
+	previous, exists := state.states[eventID]
+	if !exists {
+		return false, nil
+	}
+	if status == "accepted" {
+		state.states[eventID] = "acknowledged"
+	} else if status == "expired" && state.states[eventID] != "acknowledged" {
+		state.states[eventID] = "expired"
+	}
+	return previous != "acknowledged" && (previous != "expired" || status == "accepted"), nil
 }
 
 func (state *memoryClientState) MarkRetry(_ context.Context, eventID string, _ time.Time, _ string) error {

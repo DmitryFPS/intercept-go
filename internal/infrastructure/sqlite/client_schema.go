@@ -144,3 +144,9 @@ CREATE TABLE client_time_state (
 const clientTimeStateRetentionMigration = `
 CREATE INDEX client_time_state_updated_idx ON client_time_state(updated_at);
 `
+
+// ID, полученный непосредственно от Telegram после Send, и ID пакета,
+// подтверждённого Центром, могут различаться при повторе после тайм-аута.
+const clientConfirmedTransportMigration = `
+ALTER TABLE client_events ADD COLUMN center_transport_message_id INTEGER;
+`

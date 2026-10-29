@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,51 @@ func TestClientTransportRejectsUnsignedAndTamperedAcknowledgements(t *testing.T)
 	}
 	if len(acks) != 0 {
 		t.Fatalf("поддельные подтверждения приняты: %#v", acks)
+	}
+}
+
+func TestClientTransportAcceptsLegacyAndSignedTraceButRejectsTampering(t *testing.T) {
+	t.Parallel()
+	key := make([]byte, 32)
+	validV4 := AcknowledgementTraceText("event-1", "accepted", 123, key)
+	validV3 := AcknowledgementText("event-2", "expired", key)
+	texts := []struct{ value, username string }{
+		{validV4, "server_bot"},
+		{validV3, "server_bot"},
+		{strings.Replace(validV4, " 123 ", " 124 ", 1), "server_bot"},
+		{strings.Replace(validV4, " accepted ", " expired ", 1), "server_bot"},
+		{validV4 + "00", "server_bot"},
+		{validV4, "other_bot"},
+		{strings.Replace(validV4, " 123 ", " 0123 ", 1), "server_bot"},
+		{strings.Replace(validV4, " 123 ", " -1 ", 1), "server_bot"},
+	}
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		result := make([]any, 0, len(texts))
+		for index, value := range texts {
+			result = append(result, map[string]any{
+				"update_id": index + 1,
+				"message": map[string]any{
+					"message_id": index + 10, "date": 1_700_000_000,
+					"from": map[string]any{"id": 7, "is_bot": true, "username": value.username},
+					"chat": map[string]any{"id": 7, "type": "private"}, "text": value.value,
+				},
+			})
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": result})
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := ClientTransport{API: client, ServerBotID: 7, ServerBotUsername: "server_bot", Key: key}
+	acks, next, err := transport.Acknowledgements(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acks) != 2 || next != int64(len(texts)+1) || acks[0].TransportMessageID != 123 ||
+		acks[0].Status != "accepted" || acks[1].TransportMessageID != 0 || acks[1].Status != "expired" {
+		t.Fatalf("неверная совместимость или проверка подписи: acks=%+v offset=%d", acks, next)
 	}
 }
 

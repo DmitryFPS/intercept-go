@@ -898,6 +898,133 @@ func TestLateUploadAfterTerminalRecordWasClearedIsSuccessful(t *testing.T) {
 	}
 }
 
+func TestSignedTraceAcknowledgementSurvivesLateUploadAndRetry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "ack-before-send", ClientID: "client", CreatedAt: now, ObservedAt: now, SourceAt: now,
+		ExpiresAt: now.Add(time.Hour), Source: domain.SourceRecord{UUID: "source-ack-before-send"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "текст", ContentDigest: "digest-ack-before-send",
+	}
+	if _, err := queue.Enqueue(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := queue.MarkServerDisposition(ctx, event.ID, now, "accepted", 123)
+	if err != nil || !changed {
+		t.Fatalf("подтверждение до ответа Send: changed=%v err=%v", changed, err)
+	}
+	if err := queue.MarkRetry(ctx, event.ID, now.Add(time.Minute), "sendDocument timeout"); err != nil {
+		t.Fatalf("поздний тайм-аут после ACK дал ложную ошибку: %v", err)
+	}
+	if err := queue.MarkUploaded(ctx, event.ID, 456); err != nil {
+		t.Fatalf("поздний ответ Send дал ошибку: %v", err)
+	}
+	changed, err = queue.MarkServerDisposition(ctx, event.ID, now.Add(time.Minute), "accepted", 999)
+	if err != nil || changed {
+		t.Fatalf("повтор ACK посчитан новым: changed=%v err=%v", changed, err)
+	}
+	items, _, err := queue.EventsPage(ctx, "acknowledged", 20, 0)
+	if err != nil || len(items) != 1 || items[0].CenterMessageID == nil || *items[0].CenterMessageID != 123 ||
+		items[0].UploadMessageID == nil || *items[0].UploadMessageID != 456 ||
+		items[0].TransportMessageID == nil || *items[0].TransportMessageID != 123 {
+		t.Fatalf("ID подтверждённого пакета потерян или заменён дублем: items=%+v err=%v", items, err)
+	}
+}
+
+func TestLegacyAckCanBeBackfilledAndLateAcceptedOverridesLocalExpiry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "legacy-backfill", ClientID: "client", CreatedAt: now, ObservedAt: now, SourceAt: now,
+		ExpiresAt: now.Add(time.Hour), Source: domain.SourceRecord{UUID: "source-legacy-backfill"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "текст", ContentDigest: "digest-legacy-backfill",
+	}
+	if _, err := queue.Enqueue(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := queue.MarkServerDisposition(ctx, event.ID, now, "accepted", 0)
+	if err != nil || !changed {
+		t.Fatalf("старый ACK/3 не принят: changed=%v err=%v", changed, err)
+	}
+	changed, err = queue.MarkServerDisposition(ctx, event.ID, now.Add(time.Second), "expired", 987)
+	if err != nil || changed {
+		t.Fatalf("противоречивый поздний expired ACK изменил принятое событие: changed=%v err=%v", changed, err)
+	}
+	intermediate, _, err := queue.EventsPage(ctx, "acknowledged", 20, 0)
+	if err != nil || len(intermediate) != 1 || intermediate[0].CenterMessageID != nil {
+		t.Fatalf("expired ACK ошибочно приписал ID принятому событию: items=%+v err=%v", intermediate, err)
+	}
+	changed, err = queue.MarkServerDisposition(ctx, event.ID, now.Add(time.Second), "accepted", 321)
+	if err != nil || changed {
+		t.Fatalf("поздний ACK/4 повторно посчитан: changed=%v err=%v", changed, err)
+	}
+	changed, err = queue.MarkServerDisposition(ctx, event.ID, now.Add(2*time.Second), "accepted", 0)
+	if err != nil || changed {
+		t.Fatalf("старый ACK/3 изменил терминальное состояние: changed=%v err=%v", changed, err)
+	}
+	items, _, err := queue.EventsPage(ctx, "acknowledged", 20, 0)
+	if err != nil || len(items) != 1 || items[0].CenterMessageID == nil || *items[0].CenterMessageID != 321 || !items[0].StatusAt.Equal(now) {
+		t.Fatalf("backfill стёр исходное время/ID: items=%+v err=%v", items, err)
+	}
+	changed, err = queue.MarkServerDisposition(ctx, "already-cleared", now, "accepted", 999)
+	if err != nil || changed {
+		t.Fatalf("неизвестный ACK должен быть безопасно пропущен: changed=%v err=%v", changed, err)
+	}
+
+	expired := event
+	expired.ID, expired.Source.UUID, expired.ContentDigest = "expired-then-ack", "source-expired-then-ack", "digest-expired-then-ack"
+	if _, err := queue.Enqueue(ctx, expired); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = queue.MarkServerDisposition(ctx, expired.ID, now.Add(30*time.Minute), "expired", 555)
+	if err != nil || !changed {
+		t.Fatalf("первый expired ACK не сохранён: changed=%v err=%v", changed, err)
+	}
+	changed, err = queue.MarkServerDisposition(ctx, expired.ID, now.Add(31*time.Minute), "accepted", 654)
+	if err != nil || !changed {
+		t.Fatalf("позднее достоверное accepted не исправило локальную просрочку: changed=%v err=%v", changed, err)
+	}
+	items, _, err = queue.EventsPage(ctx, "acknowledged", 20, 0)
+	if err != nil || len(items) != 2 || items[0].EventID != expired.ID || items[0].Reason != "" ||
+		items[0].CenterMessageID == nil || *items[0].CenterMessageID != 654 {
+		t.Fatalf("поздний accepted не заменил expired ID/состояние: items=%+v err=%v", items, err)
+	}
+	locallyExpired := event
+	locallyExpired.ID, locallyExpired.Source.UUID, locallyExpired.ContentDigest = "local-expired-then-ack", "source-local-expired", "digest-local-expired"
+	if _, err := queue.Enqueue(ctx, locallyExpired); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkExpired(ctx, locallyExpired.ID, now.Add(30*time.Minute), domain.FreshnessExpired); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = queue.MarkServerDisposition(ctx, locallyExpired.ID, now.Add(31*time.Minute), "accepted", 777)
+	if err != nil || !changed {
+		t.Fatalf("поздний accepted после локальной просрочки не принят: changed=%v err=%v", changed, err)
+	}
+}
+
 func TestClientClearedEventsArePrunedByAgeAndLimit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

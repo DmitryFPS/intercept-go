@@ -55,6 +55,8 @@ type QueueEvent struct {
 	ContentDigest      string            `json:"content_digest,omitempty"`
 	Attempts           int               `json:"attempts"`
 	TransportMessageID *int64            `json:"transport_message_id,omitempty"`
+	UploadMessageID    *int64            `json:"telegram_upload_message_id,omitempty"`
+	CenterMessageID    *int64            `json:"center_transport_message_id,omitempty"`
 }
 
 // EventsPage возвращает одну страницу выбранного состояния очереди. Содержимое
@@ -75,7 +77,7 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 	rows, err := queue.db.QueryContext(ctx, `
 		SELECT event_id, payload_json,
 		       COALESCE(expired_at, acknowledged_at, uploaded_at, created_at), last_error,
-		       attempts, telegram_message_id
+		       attempts, telegram_message_id, center_transport_message_id
 		FROM client_events WHERE state=?
 		ORDER BY COALESCE(expired_at, acknowledged_at, uploaded_at, created_at) DESC, event_id DESC
 		LIMIT ? OFFSET ?`, state, limit, offset)
@@ -87,9 +89,9 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 	for rows.Next() {
 		var eventID, statusText, reason string
 		var attempts int
-		var transportMessageID sql.NullInt64
+		var uploadMessageID, centerMessageID sql.NullInt64
 		var protected []byte
-		if err := rows.Scan(&eventID, &protected, &statusText, &reason, &attempts, &transportMessageID); err != nil {
+		if err := rows.Scan(&eventID, &protected, &statusText, &reason, &attempts, &uploadMessageID, &centerMessageID); err != nil {
 			return nil, 0, fmt.Errorf("прочитать сообщение очереди: %w", err)
 		}
 		plain, err := unprotectDatabaseValue(protected)
@@ -105,6 +107,10 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 			return nil, 0, fmt.Errorf("разобрать время сообщения: %w", err)
 		}
 		kind, note := clientQueueContentDescription(event)
+		transportMessageID := nullableInt64(centerMessageID)
+		if transportMessageID == nil {
+			transportMessageID = nullableInt64(uploadMessageID)
+		}
 		result = append(result, QueueEvent{
 			EventID: eventID, Position: event.Position.UnitName, SourceAt: event.SourceAt,
 			StatusAt: statusAt, Reason: reason, Content: event.Content,
@@ -112,7 +118,8 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 			SourceRecord: event.Source.ID, SourceUUID: event.Source.UUID,
 			SourceBlockUUID: event.SourceBlockUUID, SourceBlockDeleted: event.SourceBlockDeleted,
 			SourceVersion: event.SourceVersion(), ContentDigest: event.ContentDigest,
-			Attempts: attempts, TransportMessageID: nullableInt64(transportMessageID),
+			Attempts: attempts, TransportMessageID: transportMessageID,
+			UploadMessageID: nullableInt64(uploadMessageID), CenterMessageID: nullableInt64(centerMessageID),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -537,12 +544,14 @@ func (queue *ClientQueue) MarkUploaded(ctx context.Context, eventID string, tele
 	result, err := queue.db.ExecContext(ctx, `
 		UPDATE client_events
 		SET state = CASE WHEN state IN ('acknowledged','expired') THEN state ELSE 'uploaded' END,
-			telegram_message_id = ?, uploaded_at = COALESCE(uploaded_at, ?),
+			telegram_message_id = CASE WHEN state IN ('acknowledged','expired')
+				THEN COALESCE(telegram_message_id, ?) ELSE ? END,
+			uploaded_at = COALESCE(uploaded_at, ?),
 			last_error = CASE WHEN state='expired' THEN last_error ELSE '' END,
 			next_attempt_at = CASE WHEN state IN ('acknowledged','expired') THEN next_attempt_at ELSE ? END,
 			attempts = attempts + 1
 		WHERE event_id = ? AND state IN ('pending','uploaded','acknowledged','expired')`,
-		telegramMessageID, now.Format(time.RFC3339Nano),
+		telegramMessageID, telegramMessageID, now.Format(time.RFC3339Nano),
 		now.Add(uploadedRetryDelay(attempts+1)).Format(time.RFC3339Nano), eventID,
 	)
 	// Центр может подтвердить маленький пакет быстрее, чем Send вернёт
@@ -605,6 +614,69 @@ func (queue *ClientQueue) MarkAcknowledged(ctx context.Context, eventID string, 
 	return terminalTransition(queue.db, ctx, result, err, eventID, "подтвердить событие")
 }
 
+// MarkServerDisposition атомарно сохраняет исход подтверждения и ID пакета,
+// реально увиденного Центром. Поздний ACK/4 может дополнить уже завершённую
+// запись после ACK/3, но повтор не меняет терминальное состояние и первый ID.
+func (queue *ClientQueue) MarkServerDisposition(
+	ctx context.Context, eventID string, at time.Time, status string, transportMessageID int64,
+) (bool, error) {
+	if transportMessageID < 0 {
+		return false, errors.New("отрицательный ID транспортного сообщения в подтверждении")
+	}
+	var result sql.Result
+	var err error
+	switch status {
+	case "accepted":
+		result, err = queue.db.ExecContext(ctx, `
+			UPDATE client_events SET
+				state='acknowledged',
+				acknowledged_at=COALESCE(acknowledged_at, ?),
+				expired_at=NULL,
+				last_error='',
+				center_transport_message_id=CASE WHEN state='expired'
+					THEN NULLIF(?,0) ELSE COALESCE(center_transport_message_id,NULLIF(?,0)) END
+			WHERE event_id=? AND state IN ('pending','uploaded','expired')`,
+			at.UTC().Format(time.RFC3339Nano), transportMessageID, transportMessageID, eventID)
+	case "expired":
+		result, err = queue.db.ExecContext(ctx, `
+			UPDATE client_events SET
+				state='expired',
+				expired_at=COALESCE(expired_at, ?),
+				last_error=?,
+				center_transport_message_id=COALESCE(center_transport_message_id,NULLIF(?,0))
+			WHERE event_id=? AND state IN ('pending','uploaded')`, at.UTC().Format(time.RFC3339Nano), domain.FreshnessExpired,
+			transportMessageID, eventID)
+	default:
+		return false, fmt.Errorf("неизвестный статус подтверждения %q", status)
+	}
+	if err != nil {
+		return false, fmt.Errorf("сохранить подтверждение Центра: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("определить результат подтверждения Центра: %w", err)
+	}
+	if changed == 1 {
+		return true, nil
+	}
+	if transportMessageID > 0 {
+		// Дополнение трассы после ACK/3 не считается новым подтверждением.
+		result, err = queue.db.ExecContext(ctx, `
+			UPDATE client_events SET center_transport_message_id=?
+			WHERE event_id=? AND ((?='accepted' AND state='acknowledged')
+				OR (?='expired' AND state='expired'))
+			  AND center_transport_message_id IS NULL`, transportMessageID, eventID, status, status)
+		if err != nil {
+			return false, fmt.Errorf("дополнить трассу подтверждения Центра: %w", err)
+		}
+		if err := terminalTransition(queue.db, ctx, result, nil, eventID, "дополнить трассу подтверждения Центра"); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return false, terminalTransition(queue.db, ctx, result, nil, eventID, "проверить повтор подтверждения Центра")
+}
+
 // terminalTransition не позволяет старому или повторному подтверждению
 // отравить Telegram offset. Уже завершённая либо очищенная запись безопасно
 // считается обработанной: изменить активную очередь таким ответом невозможно.
@@ -643,7 +715,9 @@ func (queue *ClientQueue) MarkRetry(ctx context.Context, eventID string, next ti
 		WHERE event_id = ? AND state IN ('pending', 'uploaded')`,
 		next.UTC().Format(time.RFC3339Nano), reason, eventID,
 	)
-	return changedExactlyOnce(result, err, "запланировать повтор")
+	// Пока Telegram возвращает тайм-аут, ACK может уже перевести запись в
+	// терминальное состояние. Такой результат не является ошибкой очереди.
+	return terminalTransition(queue.db, ctx, result, err, eventID, "запланировать повтор")
 }
 
 // Cursor возвращает последнюю надёжно обработанную позицию чтения EAVC.

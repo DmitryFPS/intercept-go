@@ -433,14 +433,16 @@ func (server *Server) processTransportInboxItem(
 		"content_blocks", result.ContentBlocks, "source_mode", result.SourceMode,
 	)
 	acknowledgedAt := time.Now().UTC()
-	if acknowledgementDue(recentAcknowledgements, result.EventID, acknowledgedAt) {
+	ackKey := acknowledgementKey(result)
+	if acknowledgementDue(recentAcknowledgements, ackKey, acknowledgedAt) {
 		if err := receiver.Acknowledge(
 			ctx, result.ClientBotUsername, result.EventID, result.Status, result.AcknowledgementKey,
+			packet.MessageID, result.AckTraceV4,
 		); err != nil {
 			retry("не удалось подтвердить событие рабочей точке", err)
 			return
 		}
-		recentAcknowledgements[result.EventID] = acknowledgedAt
+		recentAcknowledgements[ackKey] = acknowledgedAt
 	}
 	if !complete() {
 		return
@@ -476,6 +478,16 @@ func transportObservation(
 }
 
 const duplicateAcknowledgementInterval = 90 * time.Second
+
+// Смена исхода «просрочено» → «принято» обязана дать отдельный ACK даже внутри
+// защитного окна: иначе Клиент останется в ложном терминальном состоянии.
+func acknowledgementKey(result application.PacketResult) string {
+	schema := "v3"
+	if result.AckTraceV4 {
+		schema = "v4"
+	}
+	return result.EventID + "|" + schema + "|" + result.Status
+}
 
 // acknowledgementDue подавляет плотную серию одинаковых ответов на дубли,
 // но разрешает повтор через интервал — например, если первый ответ потерялся.

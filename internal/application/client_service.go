@@ -294,6 +294,9 @@ func (service *ClientService) DispatchOnce(ctx context.Context) (int, error) {
 			}
 			continue
 		}
+		// Возможность ACK/4 находится внутри AES-GCM, поэтому нельзя подменить
+		// ответ старому Клиенту посредством правки внешнего JSON конверта.
+		event.AckTraceV4 = true
 		envelope, err := protocol.Seal(event, service.KeyID, service.Key, now, rand.Reader)
 		if err != nil {
 			return sent, err
@@ -365,20 +368,19 @@ func (service *ClientService) ReceiveAcknowledgements(ctx context.Context) (Ackn
 			}
 			continue
 		}
-		var err error
-		if acknowledgement.Status == "expired" {
-			err = service.Queue.MarkExpired(ctx, acknowledgement.EventID, acknowledgement.AcceptedAt, domain.FreshnessExpired)
-		} else {
-			err = service.Queue.MarkAcknowledged(ctx, acknowledgement.EventID, acknowledgement.AcceptedAt)
-		}
+		changed, err := service.Queue.MarkServerDisposition(ctx, acknowledgement.EventID,
+			acknowledgement.AcceptedAt, acknowledgement.Status, acknowledgement.TransportMessageID)
 		if err != nil {
 			return result, err
 		}
-		result.Events++
+		if changed {
+			result.Events++
+		}
 		if service.Logger != nil {
 			service.Logger.Info("получено подтверждение сервера",
 				"event_id", acknowledgement.EventID, "trace_id", acknowledgement.EventID,
 				"status", acknowledgement.Status,
+				"transport_message_id", acknowledgement.TransportMessageID,
 				"accepted_at", acknowledgement.AcceptedAt,
 			)
 		}

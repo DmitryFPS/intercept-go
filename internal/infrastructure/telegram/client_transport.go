@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,9 +18,11 @@ import (
 
 const (
 	acknowledgementPrefixV3    = "IC-ACK/3 "
+	acknowledgementPrefixV4    = "IC-ACK/4 "
 	probeAcknowledgementPrefix = "IC-PROBE-ACK/2 "
 	probeSchema                = "IC-PROBE/2"
 	acknowledgementSchema      = "IC-ACK/3"
+	acknowledgementSchemaV4    = "IC-ACK/4"
 	probeAcknowledgementSchema = "IC-PROBE-ACK/2"
 )
 
@@ -143,6 +146,7 @@ func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset i
 		}
 		status := "accepted"
 		eventID := ""
+		transportMessageID := int64(0)
 		switch {
 		case strings.HasPrefix(message.Text, probeAcknowledgementPrefix):
 			parts := strings.Fields(strings.TrimPrefix(message.Text, probeAcknowledgementPrefix))
@@ -152,6 +156,18 @@ func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset i
 				continue
 			}
 			eventID, status = parts[0], "probe"
+		case strings.HasPrefix(message.Text, acknowledgementPrefixV4):
+			parts := strings.Fields(strings.TrimPrefix(message.Text, acknowledgementPrefixV4))
+			if len(parts) != 4 || (parts[1] != "accepted" && parts[1] != "expired") {
+				continue
+			}
+			messageID, parseErr := strconv.ParseInt(parts[2], 10, 64)
+			if parseErr != nil || messageID <= 0 || strconv.FormatInt(messageID, 10) != parts[2] ||
+				!validAcknowledgementMAC(transport.Key, acknowledgementSchemaV4,
+					parts[0], parts[1]+"\x00"+parts[2], parts[3]) {
+				continue
+			}
+			eventID, status, transportMessageID = parts[0], parts[1], messageID
 		case strings.HasPrefix(message.Text, acknowledgementPrefixV3):
 			parts := strings.Fields(strings.TrimPrefix(message.Text, acknowledgementPrefixV3))
 			if len(parts) != 3 || (parts[1] != "accepted" && parts[1] != "expired") ||
@@ -167,6 +183,7 @@ func (transport *ClientTransport) Acknowledgements(ctx context.Context, offset i
 		}
 		acknowledgements = append(acknowledgements, application.Acknowledgement{
 			EventID: eventID, AcceptedAt: time.Unix(message.Date, 0).UTC(), Status: status,
+			TransportMessageID: transportMessageID,
 		})
 	}
 	return acknowledgements, next, nil
@@ -196,6 +213,14 @@ func validAcknowledgementMAC(key []byte, schema, eventID, status, value string) 
 func AcknowledgementText(eventID, status string, key []byte) string {
 	return acknowledgementPrefixV3 + eventID + " " + status + " " +
 		acknowledgementMAC(key, acknowledgementSchema, eventID, status)
+}
+
+// AcknowledgementTraceText связывает подписанное подтверждение с тем
+// транспортным сообщением, которое Центр действительно обработал.
+func AcknowledgementTraceText(eventID, status string, messageID int64, key []byte) string {
+	id := strconv.FormatInt(messageID, 10)
+	return acknowledgementPrefixV4 + eventID + " " + status + " " + id + " " +
+		acknowledgementMAC(key, acknowledgementSchemaV4, eventID, status+"\x00"+id)
 }
 
 func probeAcknowledgementText(probeID string, key []byte) string {

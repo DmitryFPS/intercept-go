@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"intercept/internal/application"
 	"intercept/internal/config"
 	"intercept/internal/domain"
 )
@@ -47,6 +48,28 @@ func TestDuplicateAcknowledgementIsSuppressedOnlyTemporarily(t *testing.T) {
 	}
 	if !acknowledgementDue(recent, "event-2", now) {
 		t.Fatal("подтверждение другого события ошибочно подавлено")
+	}
+}
+
+func TestAcknowledgementOutcomeChangeBypassesDuplicateWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	recent := make(map[string]time.Time)
+	for _, traceV4 := range []bool{false, true} {
+		expired := application.PacketResult{EventID: "event-1", Status: "expired", AckTraceV4: traceV4}
+		accepted := application.PacketResult{EventID: "event-1", Status: "accepted", AckTraceV4: traceV4}
+		expiredKey, acceptedKey := acknowledgementKey(expired), acknowledgementKey(accepted)
+		if !acknowledgementDue(recent, expiredKey, now) {
+			t.Fatal("первый expired ACK подавлен")
+		}
+		recent[expiredKey] = now
+		if !acknowledgementDue(recent, acceptedKey, now.Add(time.Second)) {
+			t.Fatalf("accepted ACK подавлен после expired: v4=%v", traceV4)
+		}
+		recent[acceptedKey] = now.Add(time.Second)
+		if acknowledgementDue(recent, acceptedKey, now.Add(2*time.Second)) {
+			t.Fatalf("дубль accepted ACK не подавлен: v4=%v", traceV4)
+		}
 	}
 }
 

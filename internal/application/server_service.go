@@ -86,6 +86,7 @@ type PacketResult struct {
 	ClientID           string
 	ClientBotUsername  string
 	AcknowledgementKey []byte
+	AckTraceV4         bool
 	Accepted           bool
 	Status             string
 	ContentKind        string
@@ -141,6 +142,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 		return PacketResult{
 			EventID: event.ID, ClientID: client.ID, ClientBotUsername: client.SenderBotUsername,
 			AcknowledgementKey: append([]byte(nil), client.Key...),
+			AckTraceV4:         event.AckTraceV4,
 			Status:             "accepted", ContentKind: eventContentKind(event),
 			ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
 			SourceMode: string(event.Mode),
@@ -150,6 +152,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 		return PacketResult{
 			EventID: event.ID, ClientID: client.ID, ClientBotUsername: client.SenderBotUsername,
 			AcknowledgementKey: append([]byte(nil), client.Key...),
+			AckTraceV4:         event.AckTraceV4,
 			Status:             "expired", ContentKind: eventContentKind(event),
 			ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
 			SourceMode: string(event.Mode),
@@ -188,6 +191,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	return PacketResult{
 		EventID: event.ID, ClientID: client.ID, ClientBotUsername: client.SenderBotUsername,
 		AcknowledgementKey: append([]byte(nil), client.Key...),
+		AckTraceV4:         event.AckTraceV4,
 		Accepted:           accepted, Status: "accepted", ContentKind: eventContentKind(event),
 		ContentChars: utf8.RuneCountInString(event.Content), ContentBlocks: len(event.Blocks),
 		SourceMode: string(event.Mode),

@@ -66,6 +66,9 @@ type ClientQueue interface {
 	MarkUploaded(ctx context.Context, eventID string, telegramMessageID int64) error
 	MarkAcknowledged(ctx context.Context, eventID string, at time.Time) error
 	MarkExpired(ctx context.Context, eventID string, at time.Time, reason string) error
+	// MarkServerDisposition атомарно завершает событие и сохраняет ID пакета,
+	// подтверждённого Центром. Для ACK/3 transportMessageID равен нулю.
+	MarkServerDisposition(ctx context.Context, eventID string, at time.Time, status string, transportMessageID int64) (newlyTerminal bool, err error)
 	ExpireDue(ctx context.Context, now time.Time) (int, error)
 	MarkRetry(ctx context.Context, eventID string, next time.Time, reason string) error
 }
@@ -93,9 +96,10 @@ type TransportSender interface {
 
 // Acknowledgement подтверждает долговечное сохранение события сервером.
 type Acknowledgement struct {
-	EventID    string
-	AcceptedAt time.Time
-	Status     string
+	EventID            string
+	AcceptedAt         time.Time
+	Status             string
+	TransportMessageID int64
 }
 
 // ServerStore распознаёт ранее принятые события и атомарно сохраняет новые.

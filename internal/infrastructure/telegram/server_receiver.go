@@ -289,7 +289,7 @@ func (receiver *ServerReceiver) DeletePacket(ctx context.Context, messageID int6
 }
 
 // Acknowledge сообщает боту точки, что событие записано сервером.
-func (receiver *ServerReceiver) Acknowledge(ctx context.Context, botUsername, eventID, status string, key []byte) error {
+func (receiver *ServerReceiver) Acknowledge(ctx context.Context, botUsername, eventID, status string, key []byte, messageID int64, traceV4 bool) error {
 	if strings.TrimSpace(botUsername) == "" || strings.TrimSpace(eventID) == "" {
 		return errors.New("для подтверждения не задан бот или событие")
 	}
@@ -299,7 +299,14 @@ func (receiver *ServerReceiver) Acknowledge(ctx context.Context, botUsername, ev
 	if len(key) != 32 {
 		return errors.New("для подтверждения не задан ключ рабочей точки")
 	}
-	_, err := receiver.API.SendMessage(ctx, 0, botUsername, AcknowledgementText(eventID, status, key))
+	ackText := AcknowledgementText(eventID, status, key)
+	if traceV4 {
+		if messageID <= 0 {
+			return errors.New("для подтверждения трассы не задан ID транспортного сообщения")
+		}
+		ackText = AcknowledgementTraceText(eventID, status, messageID, key)
+	}
+	_, err := receiver.API.SendMessage(ctx, 0, botUsername, ackText)
 	return err
 }
 

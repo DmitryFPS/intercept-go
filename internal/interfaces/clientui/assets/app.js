@@ -226,7 +226,8 @@ async function loadQueuePage(offset = 0) {
         <div><dt>Версия записи</dt><dd>${escapeHTML(item.source_version || 'не указана')}</dd></div>
         <div><dt>Отпечаток содержимого</dt><dd>${escapeHTML(item.content_digest || 'не указан')}</dd></div>
         <div><dt>Попытки передачи</dt><dd>${escapeHTML(item.attempts)}</dd></div>
-        <div><dt>Telegram message_id служебного пакета</dt><dd>${escapeHTML(item.transport_message_id || 'ещё не присвоен')}</dd></div>
+        <div><dt>Пакет, подтверждённый Центром</dt><dd>${escapeHTML(item.center_transport_message_id || 'ID не передан Центром')}</dd></div>
+        <div><dt>Последняя загрузка Клиента в Telegram</dt><dd>${escapeHTML(item.telegram_upload_message_id || 'Telegram не вернул ID')}</dd></div>
       </dl>
     </article>`).join('');
   }
