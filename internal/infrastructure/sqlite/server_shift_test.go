@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -78,6 +79,71 @@ func TestShiftSnapshotsAreDeduplicatedAndOrderedAcrossRestartSafeStorage(t *test
 	page, err = store.HistoryPage(ctx, "clients", 30, 0, base.Add(8*time.Hour+time.Minute))
 	if err != nil || len(page.ShiftHistory) != 3 || page.Clients[0].Shifts[0].SessionUUID != "shift-3" {
 		t.Fatalf("новая смена не стала текущей без дублей: %+v err=%v", page, err)
+	}
+}
+
+func TestShiftHistorySearchAppliesLimitAfterMatchingOlderShifts(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	base := time.Date(2026, 10, 28, 6, 0, 0, 0, time.UTC)
+	_, err := store.RecordClientShiftSnapshot(ctx, "textile", base.Add(time.Minute), application.ShiftSnapshot{
+		ReadState: application.ShiftReadOK,
+		Active: []application.ShiftSession{{
+			SessionID: 1, SessionUUID: "old-open-shift", PositionName: "Особая позиция",
+			OpenedAt: base,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 120; index++ {
+		openedAt := base.Add(time.Duration(index+1) * time.Minute)
+		if _, err := store.db.ExecContext(ctx, `
+			INSERT INTO client_shift_sessions(
+				client_id,position_name,session_uuid,source_session_id,
+				opened_at,closed_at,first_seen_at,last_seen_at,last_probe_at,is_current
+			) VALUES(?,?,?,?,?,?,?,?,?,0)`,
+			"textile", "Обычная позиция", fmt.Sprintf("newer-%03d", index), index+2,
+			stamp(openedAt), stamp(openedAt.Add(time.Minute)), stamp(openedAt),
+			stamp(openedAt), stamp(openedAt)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, err := store.HistoryPage(ctx, "clients", 30, 0, base.Add(3*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.ShiftHistory) != 100 {
+		t.Fatalf("неограниченная история вместо последних 100 смен: %d", len(page.ShiftHistory))
+	}
+	for _, shift := range page.ShiftHistory {
+		if shift.SessionUUID == "old-open-shift" {
+			t.Fatal("тест не воспроизвёл вытеснение старой смены из истории")
+		}
+	}
+	if len(page.Clients) != 1 || len(page.Clients[0].Shifts) != 1 ||
+		page.Clients[0].Shifts[0].SessionUUID != "old-open-shift" ||
+		len(page.Clients[0].RecentShifts) != 2 ||
+		page.Clients[0].RecentShifts[0].SessionUUID != "old-open-shift" {
+		t.Fatalf("открытая смена пропала из карточки: %+v", page.Clients)
+	}
+
+	filtered, err := store.HistoryPage(ctx, "clients", 30, 0, base.Add(3*time.Hour), HistoryFilter{
+		ClientID: "textile", Query: "ОСОБАЯ",
+	})
+	if err != nil || len(filtered.ShiftHistory) != 1 ||
+		filtered.ShiftHistory[0].SessionUUID != "old-open-shift" {
+		t.Fatalf("поиск старой смены с кириллическим регистром не сработал: %+v err=%v", filtered.ShiftHistory, err)
+	}
+	limited, err := store.shiftHistory(ctx, HistoryFilter{ClientID: "textile", Query: "позиция"}, 3)
+	if err != nil || len(limited) != 3 || limited[0].SessionUUID != "newer-119" ||
+		limited[2].SessionUUID != "newer-117" {
+		t.Fatalf("лимит или сортировка найденных смен неверны: %+v err=%v", limited, err)
+	}
+	missing, err := store.shiftHistory(ctx, HistoryFilter{ClientID: "missing", Query: "ОСОБАЯ"}, 100)
+	if err != nil || len(missing) != 0 {
+		t.Fatalf("фильтр рабочей точки не применён: %+v err=%v", missing, err)
 	}
 }
 

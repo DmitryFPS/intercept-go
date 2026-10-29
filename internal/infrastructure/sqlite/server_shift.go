@@ -226,6 +226,7 @@ func (store *ServerStore) shiftHistory(ctx context.Context, filter HistoryFilter
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	search := strings.ToLower(strings.TrimSpace(filter.Query))
 	where := []string{"1=1"}
 	args := make([]any, 0, 2)
 	if filter.ClientID != "" {
@@ -237,32 +238,38 @@ func (store *ServerStore) shiftHistory(ctx context.Context, filter HistoryFilter
 			s.opened_at,s.closed_at,s.first_seen_at,s.last_seen_at,s.is_current
 		FROM client_shift_sessions s JOIN server_clients c ON c.client_id=s.client_id
 		WHERE ` + strings.Join(where, " AND ") + `
-		ORDER BY s.opened_at DESC,s.session_uuid
-		LIMIT ?`
-	args = append(args, limit)
+		ORDER BY s.opened_at DESC,s.session_uuid`
+	// SQLite lower()/NOCASE do not fold Cyrillic. Keep the existing Unicode-aware
+	// Go search, but apply LIMIT only after matching so an older result is visible.
+	if search == "" {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
 	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items, err := scanShiftSessions(rows)
-	if err != nil {
-		return nil, err
-	}
-	search := strings.ToLower(strings.TrimSpace(filter.Query))
-	if search == "" {
-		return items, nil
-	}
-	filtered := items[:0]
-	for _, item := range items {
-		haystack := strings.ToLower(strings.Join([]string{
-			item.ClientID, item.ClientName, item.PositionName, item.SessionUUID,
-		}, " "))
-		if strings.Contains(haystack, search) {
-			filtered = append(filtered, item)
+	items := make([]ClientShiftSession, 0, limit)
+	for rows.Next() {
+		item, err := scanShiftSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		if search != "" {
+			haystack := strings.ToLower(strings.Join([]string{
+				item.ClientID, item.ClientName, item.PositionName, item.SessionUUID,
+			}, " "))
+			if !strings.Contains(haystack, search) {
+				continue
+			}
+		}
+		items = append(items, item)
+		if len(items) == limit {
+			break
 		}
 	}
-	return filtered, nil
+	return items, rows.Err()
 }
 
 type shiftRows interface {
@@ -271,35 +278,47 @@ type shiftRows interface {
 	Err() error
 }
 
+type shiftScanner interface {
+	Scan(dest ...any) error
+}
+
 func scanShiftSessions(rows shiftRows) ([]ClientShiftSession, error) {
 	result := make([]ClientShiftSession, 0)
 	for rows.Next() {
-		var item ClientShiftSession
-		var opened, firstSeen, lastSeen string
-		var closed sql.NullString
-		var current int
-		if err := rows.Scan(
-			&item.ClientID, &item.ClientName, &item.PositionName, &item.SessionUUID,
-			&item.SourceSessionID, &opened, &closed, &firstSeen, &lastSeen, &current,
-		); err != nil {
+		item, err := scanShiftSession(rows)
+		if err != nil {
 			return nil, err
 		}
-		var err error
-		item.OpenedAt, err = time.Parse(time.RFC3339Nano, opened)
-		if err != nil {
-			return nil, fmt.Errorf("прочитать время открытия смены: %w", err)
-		}
-		item.ClosedAt = parseNullableTime(closed)
-		item.FirstSeenAt, err = time.Parse(time.RFC3339Nano, firstSeen)
-		if err != nil {
-			return nil, fmt.Errorf("прочитать время первого сигнала смены: %w", err)
-		}
-		item.LastSeenAt, err = time.Parse(time.RFC3339Nano, lastSeen)
-		if err != nil {
-			return nil, fmt.Errorf("прочитать время последнего сигнала смены: %w", err)
-		}
-		item.Current = current == 1
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func scanShiftSession(row shiftScanner) (ClientShiftSession, error) {
+	var item ClientShiftSession
+	var opened, firstSeen, lastSeen string
+	var closed sql.NullString
+	var current int
+	if err := row.Scan(
+		&item.ClientID, &item.ClientName, &item.PositionName, &item.SessionUUID,
+		&item.SourceSessionID, &opened, &closed, &firstSeen, &lastSeen, &current,
+	); err != nil {
+		return item, err
+	}
+	var err error
+	item.OpenedAt, err = time.Parse(time.RFC3339Nano, opened)
+	if err != nil {
+		return item, fmt.Errorf("прочитать время открытия смены: %w", err)
+	}
+	item.ClosedAt = parseNullableTime(closed)
+	item.FirstSeenAt, err = time.Parse(time.RFC3339Nano, firstSeen)
+	if err != nil {
+		return item, fmt.Errorf("прочитать время первого сигнала смены: %w", err)
+	}
+	item.LastSeenAt, err = time.Parse(time.RFC3339Nano, lastSeen)
+	if err != nil {
+		return item, fmt.Errorf("прочитать время последнего сигнала смены: %w", err)
+	}
+	item.Current = current == 1
+	return item, nil
 }
