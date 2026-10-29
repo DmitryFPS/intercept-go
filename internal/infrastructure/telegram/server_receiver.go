@@ -42,6 +42,9 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 	next := offset
 	var packets []application.IncomingPacket
 	for _, update := range updates {
+		// При ошибке этого обновления уже скачанный префикс можно сохранить
+		// вместе со смещением до него, не пропуская проблемный пакет.
+		processedUntil := next
 		if update.UpdateID >= next {
 			next = update.UpdateID + 1
 		}
@@ -119,7 +122,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 				observation.Outcome, observation.Reason, observation.Rank =
 					"authorization_retry", "Временная ошибка проверки отправителя", 20
 				receiver.observe(observation)
-				return packets, offset, fmt.Errorf("проверить отправителя пакета: %w", err)
+				return packets, processedUntil, fmt.Errorf("проверить отправителя пакета: %w", err)
 			}
 			if !allowed {
 				observation.Outcome, observation.Reason, observation.Rank =
@@ -142,7 +145,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			observation.Outcome, observation.Reason, observation.Rank =
 				"download_retry", "Временная ошибка получения служебного файла", 20
 			receiver.observe(observation)
-			return packets, offset, fmt.Errorf("получить пакет Telegram: %w", err)
+			return packets, processedUntil, fmt.Errorf("получить пакет Telegram: %w", err)
 		}
 		payload, err := receiver.API.DownloadFile(ctx, file.FilePath, receiver.MaxBytes)
 		if err != nil {
@@ -156,7 +159,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			observation.Outcome, observation.Reason, observation.Rank =
 				"download_retry", "Временная ошибка скачивания служебного файла", 20
 			receiver.observe(observation)
-			return packets, offset, err
+			return packets, processedUntil, err
 		}
 		packet.Payload = payload
 		packet.ReceivedAt = time.Now().UTC()
@@ -196,7 +199,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 					observation.Outcome, observation.Reason, observation.Rank =
 						"authentication_retry", "Временная ошибка проверки содержимого пакета", 20
 					receiver.observe(observation)
-					return packets, offset, fmt.Errorf("проверить содержимое пакета: %w", err)
+					return packets, processedUntil, fmt.Errorf("проверить содержимое пакета: %w", err)
 				}
 				observation.Outcome, observation.Reason, observation.Rank =
 					"rejected_authentication", "Служебный пакет не прошёл проверку подлинности", 200

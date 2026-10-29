@@ -340,3 +340,85 @@ func newRunnerTransportStore(t *testing.T) *sqlite.ServerStore {
 	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
+
+// Уже скачанный префикс пакетов сохраняется до повтора временно недоступного
+// следующего файла. Его удаление в Telegram после ошибки не должно лишать
+// Центр единственной локальной копии.
+func TestServerTransportIntakePersistsDownloadedPrefixOnTransientSuffix(t *testing.T) {
+	store := newRunnerTransportStore(t)
+	var failedSuffix atomic.Bool
+	bAttempt := make(chan struct{}, 1)
+	apiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": []any{
+				map[string]any{"update_id": 11, "message": map[string]any{
+					"message_id": 101, "message_thread_id": 9, "date": time.Now().Unix(),
+					"from":     map[string]any{"id": 11, "is_bot": true, "username": "station_bot"},
+					"chat":     map[string]any{"id": -1001, "type": "supergroup"},
+					"document": map[string]any{"file_id": "first", "file_name": "first.icevent", "file_size": 5},
+				}},
+				map[string]any{"update_id": 12, "message": map[string]any{
+					"message_id": 102, "message_thread_id": 9, "date": time.Now().Unix(),
+					"from":     map[string]any{"id": 11, "is_bot": true, "username": "station_bot"},
+					"chat":     map[string]any{"id": -1001, "type": "supergroup"},
+					"document": map[string]any{"file_id": "second", "file_name": "second.icevent", "file_size": 6},
+				}},
+			}})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			var input struct {
+				FileID string `json:"file_id"`
+			}
+			_ = json.NewDecoder(request.Body).Decode(&input)
+			if input.FileID == "second" {
+				failedSuffix.Store(true)
+				select {
+				case bAttempt <- struct{}{}:
+				default:
+				}
+				writer.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(writer).Encode(map[string]any{"ok": false, "error_code": 500, "description": "temporary"})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": map[string]any{"file_path": "first.icevent"}})
+		case strings.Contains(request.URL.Path, "/file/bot"):
+			_, _ = writer.Write([]byte("first"))
+		default:
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer apiServer.Close()
+	api, err := telegram.NewWithBaseURL("123:token", apiServer.URL, apiServer.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := &telegram.ServerReceiver{
+		API: api, ChatID: -1001, MaxBytes: 1024,
+		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+	}
+	server := &Server{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); server.transportIntakeLoop(ctx, receiver) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-bAttempt:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake Telegram API did not deliver the transient suffix error")
+	}
+	if !failedSuffix.Load() {
+		t.Fatal("transient suffix was not exercised")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		stats, statsErr := store.Stats(context.Background())
+		offset, exists, valueErr := store.Value(context.Background(), serverOffsetName)
+		if statsErr == nil && valueErr == nil && exists && offset == "12" && stats.TransportInbox == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stats, _ := store.Stats(context.Background())
+	offset, exists, _ := store.Value(context.Background(), serverOffsetName)
+	t.Fatalf("downloaded first file not durable after second failed: offset=%q exists=%v inbox=%d", offset, exists, stats.TransportInbox)
+}

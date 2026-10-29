@@ -227,6 +227,23 @@ func (server *Server) transportIntakeLoop(ctx context.Context, receiver *telegra
 	}
 	for ctx.Err() == nil {
 		packets, next, err := receiver.Packets(ctx, offset)
+		// Даже если следующий файл временно недоступен, уже скачанный
+		// префикс должен стать долговечным до повторной попытки.
+		if err == nil || next > offset || len(packets) > 0 {
+			if persistErr := server.Store.PersistTransportBatch(ctx, serverOffsetName, next, packets); persistErr != nil {
+				server.warn("Не удалось сохранить входящие пакеты",
+					"Telegram-смещение не изменено. Центр повторит скачивание без потери данных.", persistErr)
+				if !waitForRetry(ctx, 2*time.Second) {
+					return
+				}
+				continue
+			}
+			offset = next
+			if len(packets) > 0 {
+				server.Logger.Info("пакеты сохранены в локальной входной очереди",
+					"packets", len(packets), "next_transport_offset", next)
+			}
+		}
 		if err != nil {
 			if ctx.Err() == nil {
 				server.warn("Telegram временно недоступен",
@@ -236,19 +253,6 @@ func (server *Server) transportIntakeLoop(ctx context.Context, receiver *telegra
 				return
 			}
 			continue
-		}
-		if err := server.Store.PersistTransportBatch(ctx, serverOffsetName, next, packets); err != nil {
-			server.warn("Не удалось сохранить входящие пакеты",
-				"Telegram-смещение не изменено. Центр повторит скачивание без потери данных.", err)
-			if !waitForRetry(ctx, 2*time.Second) {
-				return
-			}
-			continue
-		}
-		offset = next
-		if len(packets) > 0 {
-			server.Logger.Info("пакеты сохранены в локальной входной очереди",
-				"packets", len(packets), "next_transport_offset", next)
 		}
 		server.transportRecovered()
 	}
