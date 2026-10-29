@@ -191,47 +191,24 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	}, nil
 }
 
-// AuthenticatePacket отбрасывает файл с недействительной подписью AES-GCM до
-// записи в локальную входную очередь. Это защищает очередь при компрометации
-// только Telegram-токена точки, без её отдельного транспортного ключа.
+// AuthenticatePacket проверяет только ключ и подпись AES-GCM до записи во
+// входную очередь. Подлинные пакеты с ошибками контракта остаются в очереди
+// для штатного карантина и объяснения причины оператору.
 func (service *ServerService) AuthenticatePacket(ctx context.Context, packet IncomingPacket) error {
-	_, _, err := service.openAuthenticatedPacket(ctx, packet)
-	return err
+	envelope, client, err := service.authenticatedEnvelopeClient(ctx, packet)
+	if err != nil {
+		return err
+	}
+	if err := protocol.Authenticate(envelope, client.Key); err != nil {
+		return &PermanentPacketError{Err: err}
+	}
+	return nil
 }
 
 func (service *ServerService) openAuthenticatedPacket(ctx context.Context, packet IncomingPacket) (domain.Event, RegisteredClient, error) {
-	if len(packet.Payload) == 0 || len(packet.Payload) > 4*1024*1024 {
-		return domain.Event{}, RegisteredClient{}, permanentPacketError("недопустимый размер транспортного пакета")
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(packet.Payload)))
-	decoder.DisallowUnknownFields()
-	var envelope protocol.Envelope
-	if err := decoder.Decode(&envelope); err != nil {
-		return domain.Event{}, RegisteredClient{}, permanentPacketError("транспортный пакет повреждён")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return domain.Event{}, RegisteredClient{}, permanentPacketError("после транспортного пакета найдены лишние данные")
-	}
-	client, err := service.Clients.Client(ctx, envelope.ClientID)
+	envelope, client, err := service.authenticatedEnvelopeClient(ctx, packet)
 	if err != nil {
-		if errors.Is(err, ErrClientNotFound) {
-			return domain.Event{}, RegisteredClient{}, permanentPacketError("точка не зарегистрирована")
-		}
-		return domain.Event{}, RegisteredClient{}, fmt.Errorf("прочитать регистрацию точки: %w", err)
-	}
-	if !client.Active {
-		return domain.Event{}, RegisteredClient{}, permanentPacketError("точка отключена")
-	}
-	if client.SenderBotID != packet.SenderBotID ||
-		!sameUsername(client.SenderBotUsername, packet.SenderBotUsername) {
-		return domain.Event{}, RegisteredClient{}, permanentPacketError("telegram-бот не принадлежит указанной точке")
-	}
-	if client.ChatID != packet.ChatID || client.ThreadID != packet.ThreadID {
-		return domain.Event{}, RegisteredClient{}, permanentPacketError("пакет поступил не из темы зарегистрированной точки")
-	}
-	if client.KeyID != envelope.KeyID {
-		return domain.Event{}, RegisteredClient{}, permanentPacketError("ключ пакета не зарегистрирован")
+		return domain.Event{}, RegisteredClient{}, err
 	}
 	event, err := protocol.Open(envelope, client.Key)
 	if err != nil {
@@ -241,6 +218,43 @@ func (service *ServerService) openAuthenticatedPacket(ctx context.Context, packe
 		return domain.Event{}, RegisteredClient{}, permanentPacketError("ID точки внутри события не совпадает с регистрацией")
 	}
 	return event, client, nil
+}
+
+func (service *ServerService) authenticatedEnvelopeClient(ctx context.Context, packet IncomingPacket) (protocol.Envelope, RegisteredClient, error) {
+	if len(packet.Payload) == 0 || len(packet.Payload) > 4*1024*1024 {
+		return protocol.Envelope{}, RegisteredClient{}, permanentPacketError("недопустимый размер транспортного пакета")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(packet.Payload)))
+	decoder.DisallowUnknownFields()
+	var envelope protocol.Envelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return protocol.Envelope{}, RegisteredClient{}, permanentPacketError("транспортный пакет повреждён")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return protocol.Envelope{}, RegisteredClient{}, permanentPacketError("после транспортного пакета найдены лишние данные")
+	}
+	client, err := service.Clients.Client(ctx, envelope.ClientID)
+	if err != nil {
+		if errors.Is(err, ErrClientNotFound) {
+			return protocol.Envelope{}, RegisteredClient{}, permanentPacketError("точка не зарегистрирована")
+		}
+		return protocol.Envelope{}, RegisteredClient{}, fmt.Errorf("прочитать регистрацию точки: %w", err)
+	}
+	if !client.Active {
+		return protocol.Envelope{}, RegisteredClient{}, permanentPacketError("точка отключена")
+	}
+	if client.SenderBotID != packet.SenderBotID ||
+		!sameUsername(client.SenderBotUsername, packet.SenderBotUsername) {
+		return protocol.Envelope{}, RegisteredClient{}, permanentPacketError("telegram-бот не принадлежит указанной точке")
+	}
+	if client.ChatID != packet.ChatID || client.ThreadID != packet.ThreadID {
+		return protocol.Envelope{}, RegisteredClient{}, permanentPacketError("пакет поступил не из темы зарегистрированной точки")
+	}
+	if client.KeyID != envelope.KeyID {
+		return protocol.Envelope{}, RegisteredClient{}, permanentPacketError("ключ пакета не зарегистрирован")
+	}
+	return envelope, client, nil
 }
 
 func eventContentKind(event domain.Event) string {

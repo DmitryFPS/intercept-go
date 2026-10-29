@@ -3,10 +3,13 @@ package application
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -87,6 +90,50 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 	}
 	if store.accepted != 1 {
 		t.Fatal("отклонённый пакет не должен попадать в хранилище")
+	}
+}
+
+func TestServerServiceKeepsAuthenticatedMalformedPacketForQuarantine(t *testing.T) {
+	t.Parallel()
+	key := bytes.Repeat([]byte{0x62}, 32)
+	nonce := make([]byte, 12)
+	envelope := protocol.Envelope{
+		Schema: protocol.SchemaV2, ClientID: "textile", EventID: "event-1", KeyID: "key-1",
+		Nonce: base64.RawStdEncoding.EncodeToString(nonce),
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aad := strings.Join([]string{envelope.Schema, envelope.ClientID, envelope.EventID, envelope.KeyID}, "\n")
+	envelope.Ciphertext = base64.RawStdEncoding.EncodeToString(gcm.Seal(nil, nonce, []byte("not-json"), []byte(aad)))
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &memoryServerStore{}
+	service := ServerService{
+		Clients: memoryRegistry{client: RegisteredClient{
+			ID: "textile", SenderBotID: 11, SenderBotUsername: "textile_bot",
+			ChatID: -1001, ThreadID: 42, KeyID: "key-1", Key: key, Active: true,
+		}},
+		Rules: memoryRules{rules: serverServiceRules()}, Store: store,
+	}
+	packet := IncomingPacket{
+		SenderBotID: 11, SenderBotUsername: "textile_bot", ChatID: -1001, ThreadID: 42, Payload: payload,
+	}
+	if err := service.AuthenticatePacket(context.Background(), packet); err != nil {
+		t.Fatalf("подлинный файл должен дойти до штатного карантина: %v", err)
+	}
+	if _, err := service.Receive(context.Background(), packet); !IsPermanentPacketError(err) {
+		t.Fatalf("повреждённое событие должно попасть в карантин: %v", err)
+	}
+	if store.accepted != 0 {
+		t.Fatal("повреждённое событие попало в рабочие перехваты")
 	}
 }
 

@@ -2,6 +2,9 @@ package protocol
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -43,5 +46,36 @@ func TestEnvelopeRoundTripAndTamperProtection(t *testing.T) {
 	envelope.ClientID = "another-client"
 	if _, err := Open(envelope, key); err == nil {
 		t.Fatal("изменённый конверт не должен проходить проверку")
+	}
+}
+
+func TestAuthenticateKeepsGenuineMalformedEventForQuarantine(t *testing.T) {
+	t.Parallel()
+	key := bytes.Repeat([]byte{0x42}, 32)
+	nonce := make([]byte, 12)
+	envelope := Envelope{
+		Schema: SchemaV2, ClientID: "textile", EventID: "event-1", KeyID: "key-1",
+		Nonce: base64.RawStdEncoding.EncodeToString(nonce),
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Ciphertext = base64.RawStdEncoding.EncodeToString(
+		gcm.Seal(nil, nonce, []byte("not-json"), envelope.additionalData()),
+	)
+	if err := Authenticate(envelope, key); err != nil {
+		t.Fatalf("подлинный пакет должен дойти до карантина: %v", err)
+	}
+	if _, err := Open(envelope, key); err == nil {
+		t.Fatal("повреждённое содержимое нельзя принимать как событие")
+	}
+	envelope.Ciphertext += "x"
+	if err := Authenticate(envelope, key); err == nil {
+		t.Fatal("неподписанный пакет не должен пройти ранний отбор")
 	}
 }

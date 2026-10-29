@@ -84,31 +84,9 @@ func Open(envelope Envelope, key []byte) (domain.Event, error) {
 			envelope.Schema, SchemaV2,
 		)
 	}
-	if len(key) != 32 {
-		return domain.Event{}, errors.New("ключ пакета должен содержать 32 байта")
-	}
-	nonce, err := base64.RawStdEncoding.DecodeString(envelope.Nonce)
+	plain, err := openPayload(envelope, key)
 	if err != nil {
-		return domain.Event{}, errors.New("некорректный nonce")
-	}
-	ciphertext, err := base64.RawStdEncoding.DecodeString(envelope.Ciphertext)
-	if err != nil {
-		return domain.Event{}, errors.New("некорректный шифротекст")
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return domain.Event{}, fmt.Errorf("создать AES: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return domain.Event{}, fmt.Errorf("создать GCM: %w", err)
-	}
-	if len(nonce) != gcm.NonceSize() {
-		return domain.Event{}, errors.New("некорректный размер nonce")
-	}
-	plain, err := gcm.Open(nil, nonce, ciphertext, envelope.additionalData())
-	if err != nil {
-		return domain.Event{}, errors.New("пакет не прошёл проверку подлинности")
+		return domain.Event{}, err
 	}
 	var event domain.Event
 	if err := json.Unmarshal(plain, &event); err != nil {
@@ -121,6 +99,44 @@ func Open(envelope Envelope, key []byte) (domain.Event, error) {
 		return domain.Event{}, fmt.Errorf("событие не прошло проверку: %w", err)
 	}
 	return event, nil
+}
+
+// Authenticate проверяет только владение транспортным ключом. Подлинный, но
+// несовместимый по структуре пакет должен попасть в штатный карантин Центра,
+// а не исчезнуть во время раннего отбора файлов Telegram.
+func Authenticate(envelope Envelope, key []byte) error {
+	_, err := openPayload(envelope, key)
+	return err
+}
+
+func openPayload(envelope Envelope, key []byte) ([]byte, error) {
+	if len(key) != 32 {
+		return nil, errors.New("ключ пакета должен содержать 32 байта")
+	}
+	nonce, err := base64.RawStdEncoding.DecodeString(envelope.Nonce)
+	if err != nil {
+		return nil, errors.New("некорректный nonce")
+	}
+	ciphertext, err := base64.RawStdEncoding.DecodeString(envelope.Ciphertext)
+	if err != nil {
+		return nil, errors.New("некорректный шифротекст")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("создать AES: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("создать GCM: %w", err)
+	}
+	if len(nonce) != gcm.NonceSize() {
+		return nil, errors.New("некорректный размер nonce")
+	}
+	plain, err := gcm.Open(nil, nonce, ciphertext, envelope.additionalData())
+	if err != nil {
+		return nil, errors.New("пакет не прошёл проверку подлинности")
+	}
+	return plain, nil
 }
 
 func (envelope Envelope) additionalData() []byte {
