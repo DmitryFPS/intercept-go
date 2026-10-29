@@ -728,6 +728,110 @@ func TestServerStorePreservesOrderInsideTopicWithoutBlockingOtherTopics(t *testi
 	}
 }
 
+// Реальный планировщик SQLite и прикладной сервис должны вместе выдерживать
+// Telegram 429: дождаться Retry-After, не обогнать голову темы и продолжить
+// независимую тему без повторной публикации.
+func TestDeliveryServiceSchedulesTelegramRetryAfterWithoutBlockingOtherTopic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	destination := domain.Destination{ID: "telegram", Name: "Группа", Kind: domain.DestinationTelegram, Enabled: true}
+	for index, item := range []struct {
+		id       string
+		threadID int64
+	}{
+		{"limited", 2}, {"behind", 2}, {"other", 3},
+	} {
+		event := serverTestEvent()
+		event.ID = item.id
+		event.Source.UUID = "source-" + item.id
+		event.ContentDigest = "digest-" + item.id
+		event.CreatedAt = base.Add(time.Duration(index) * time.Second)
+		event.SourceAt = event.CreatedAt
+		event.ExpiresAt = base.Add(5 * time.Minute)
+		plan := domain.DeliveryPlan{EventID: item.id, RuleSetVersion: 1, Deliveries: []domain.PlannedDelivery{{
+			Destination: destination, Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: item.threadID},
+		}}}
+		if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+			t.Fatalf("принять %s: %v, %v", item.id, accepted, acceptErr)
+		}
+	}
+
+	current := base
+	gateway := &retryAfterTestGateway{calls: make(map[string]int)}
+	service := application.DeliveryService{
+		Queue: store, Gateways: map[string]application.DeliveryGateway{"telegram": gateway},
+		Now: func() time.Time { return current }, MaxConcurrent: 1,
+	}
+	run := func(wantDelivered int) {
+		t.Helper()
+		count, runErr := service.RunOnce(ctx, 10)
+		if runErr != nil || count != wantDelivered {
+			t.Fatalf("доставлено %d, ожидалось %d: %v", count, wantDelivered, runErr)
+		}
+	}
+
+	run(1) // «limited» получает 429; независимая тема «other» доставляется.
+	if gateway.calls["limited"] != 1 || gateway.calls["behind"] != 0 || gateway.calls["other"] != 1 {
+		t.Fatalf("429 заблокировал независимую тему или пропустил голову очереди: %#v", gateway.calls)
+	}
+	var state, nextAttempt string
+	var attempts int
+	if err := db.QueryRowContext(ctx, `SELECT state,attempts,next_attempt_at FROM delivery_jobs WHERE event_id='limited'`).
+		Scan(&state, &attempts, &nextAttempt); err != nil {
+		t.Fatal(err)
+	}
+	if state != "pending" || attempts != 1 || nextAttempt != base.Add(42*time.Second).Format(time.RFC3339Nano) {
+		t.Fatalf("429 не сохранил очередь и Retry-After с секундой запаса: state=%s attempts=%d next=%s", state, attempts, nextAttempt)
+	}
+	current = base.Add(41 * time.Second)
+	run(0)
+	if gateway.calls["limited"] != 1 || gateway.calls["behind"] != 0 || gateway.calls["other"] != 1 {
+		t.Fatalf("ранний повтор или обгон во время Retry-After: %#v", gateway.calls)
+	}
+	current = base.Add(42 * time.Second)
+	run(1)
+	if gateway.calls["limited"] != 2 || gateway.calls["behind"] != 0 || gateway.calls["other"] != 1 {
+		t.Fatalf("голова темы не продолжена ровно после Retry-After: %#v", gateway.calls)
+	}
+	run(1)
+	run(0)
+	if gateway.calls["limited"] != 2 || gateway.calls["behind"] != 1 || gateway.calls["other"] != 1 {
+		t.Fatalf("очередь не опустела без дублей: %#v", gateway.calls)
+	}
+}
+
+type retryAfterTestGateway struct{ calls map[string]int }
+
+func (gateway *retryAfterTestGateway) Deliver(_ context.Context, event domain.Event, _ domain.PlannedDelivery) error {
+	gateway.calls[event.ID]++
+	if event.ID == "limited" && gateway.calls[event.ID] == 1 {
+		return fmt.Errorf("Telegram ответил 429: %w", retryAfterTestError{after: 41 * time.Second})
+	}
+	return nil
+}
+
+type retryAfterTestError struct{ after time.Duration }
+
+func (err retryAfterTestError) Error() string             { return "Too Many Requests" }
+func (err retryAfterTestError) RetryAfter() time.Duration { return err.after }
+
 // Окончательная ошибка головы освобождает тот же поток немедленно, сохраняя
 // причину и число реально выполненных попыток для оператора.
 func TestServerStorePermanentFailureReleasesStream(t *testing.T) {

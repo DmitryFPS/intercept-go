@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,6 +86,140 @@ func TestTransportIntakePersistsWithoutProcessor(t *testing.T) {
 	cancel()
 	<-done
 	t.Fatal("скачанный пакет не был зафиксирован независимо от обработчика")
+}
+
+// После фиксации пакета и offset в локальной БД исчезновение файла Telegram
+// больше не влияет на приём: обработчик использует сохранённый payload.
+func TestTransportInboxProcessesPacketAfterTelegramFileDisappears(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRunnerTransportStore(t)
+	key := bytes.Repeat([]byte{0x37}, 32)
+	client := application.RegisteredClient{
+		ID: "station", Number: "001", Name: "Точка", SenderBotID: 11,
+		SenderBotUsername: "station_bot", ChatID: -1001, ThreadID: 9,
+		KeyID: "key-1", Key: key, Active: true,
+	}
+	if err := store.SaveClient(ctx, client); err != nil {
+		t.Fatal(err)
+	}
+	rules := domain.RuleSet{
+		Version: 1,
+		Destinations: map[string]domain.Destination{
+			"telegram": {ID: "telegram", Name: "Получатель", Kind: domain.DestinationTelegram, Enabled: true},
+		},
+		Positions: map[string]map[string]domain.RouteDecision{
+			"name:" + domain.NormalizeUnitName("подразделение"): {
+				"telegram": {Action: domain.RouteDeliver, ThreadID: 7},
+			},
+		},
+		Unknown: map[string]domain.RouteDecision{"telegram": {Action: domain.RouteReview}},
+	}
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	event := domain.Event{
+		ID: "event-persisted", ClientID: client.ID, CreatedAt: now, ObservedAt: now,
+		SourceAt: now, ExpiresAt: now.Add(30 * time.Minute),
+		Source:   domain.SourceRecord{ID: 1, UUID: "source-persisted"},
+		Position: domain.Position{UnitName: "подразделение"}, Mode: domain.SourceModeNormal,
+		Content: "текст", ContentDigestVersion: domain.ContentDigestVersionCurrent,
+	}
+	event.ContentDigest = event.CanonicalContentDigest()
+	envelope, err := protocol.Seal(event, client.KeyID, key, now, bytes.NewReader(make([]byte, 12)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fileGone atomic.Bool
+	var fileLookups, acknowledgements atomic.Int32
+	apiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			var input struct {
+				Offset int64 `json:"offset"`
+			}
+			_ = json.NewDecoder(request.Body).Decode(&input)
+			result := []any{}
+			if input.Offset == 0 {
+				result = append(result, map[string]any{"update_id": 1, "message": map[string]any{
+					"message_id": 101, "message_thread_id": 9, "date": now.Unix(),
+					"from":     map[string]any{"id": 11, "is_bot": true, "username": "station_bot"},
+					"chat":     map[string]any{"id": -1001, "type": "supergroup"},
+					"document": map[string]any{"file_id": "event", "file_name": "event.icevent", "file_size": len(payload)},
+				}})
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": result})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			fileLookups.Add(1)
+			if fileGone.Load() {
+				writer.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(writer).Encode(map[string]any{"ok": false, "error_code": 404, "description": "Not Found"})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"file_path": "event.icevent"},
+			})
+		case strings.Contains(request.URL.Path, "/file/bot"):
+			if fileGone.Load() {
+				http.NotFound(writer, request)
+				return
+			}
+			_, _ = writer.Write(payload)
+		case strings.HasSuffix(request.URL.Path, "/sendMessage"):
+			acknowledgements.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": map[string]any{
+				"message_id": 999, "date": now.Unix(), "chat": map[string]any{"id": 1, "type": "private"},
+			}})
+		case strings.HasSuffix(request.URL.Path, "/deleteMessage"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+		default:
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer apiServer.Close()
+	telegramClient, err := telegram.NewWithBaseURL("123:token", apiServer.URL, apiServer.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reception := &application.ServerService{
+		Clients: store, Rules: store, Store: store, Now: func() time.Time { return now },
+		DeliveryWindow: 120 * time.Minute,
+	}
+	receiver := &telegram.ServerReceiver{
+		API: telegramClient, ChatID: -1001, MaxBytes: int64(len(payload) + 1),
+		Authorize:    func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+		Authenticate: reception.AuthenticatePacket,
+		Observe:      func(application.TransportObservation) {},
+	}
+	packets, next, err := receiver.Packets(ctx, 0)
+	if err != nil || len(packets) != 1 || next != 2 {
+		t.Fatalf("исходный пакет не скачан: count=%d next=%d err=%v", len(packets), next, err)
+	}
+	if err := store.PersistTransportBatch(ctx, serverOffsetName, next, packets); err != nil {
+		t.Fatal(err)
+	}
+	fileGone.Store(true)
+	if _, err := telegramClient.GetFile(ctx, "event"); err == nil {
+		t.Fatal("имитатор продолжает отдавать удалённый транспортный файл")
+	}
+	lookupsBeforeProcessing := fileLookups.Load()
+	server := &Server{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	server.processTransportInboxItem(ctx, receiver, reception, packets[0], 0, make(map[string]time.Time))
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset, exists, err := store.Value(ctx, serverOffsetName)
+	if err != nil || !exists || offset != "2" || stats.Events != 1 || stats.TransportInbox != 0 ||
+		stats.Rejected != 0 || acknowledgements.Load() != 1 || fileLookups.Load() != lookupsBeforeProcessing {
+		t.Fatalf("пакет потерян после удаления файла: stats=%+v offset=%q exists=%v ack=%d file_lookups=%d→%d err=%v",
+			stats, offset, exists, acknowledgements.Load(), lookupsBeforeProcessing, fileLookups.Load(), err)
+	}
 }
 
 // Окончательно повреждённый конверт уходит в карантин, но следующий корректный

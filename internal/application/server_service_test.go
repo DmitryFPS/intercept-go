@@ -223,6 +223,80 @@ func TestServerServiceStartsDeliveryWindowAfterAcceptance(t *testing.T) {
 	}
 }
 
+// Граница серверного окна считается от приёма пакета, а не от сохранения в
+// EAVC. Управляемое время позволяет проверить оба края без ожидания двух часов.
+func TestServerDeliveryWindowExactTwoHourBoundary(t *testing.T) {
+	t.Parallel()
+	acceptedAt := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	key := bytes.Repeat([]byte{0x58}, 32)
+	event := serverServiceEvent()
+	event.ExpiresAt = acceptedAt.Add(time.Second)
+	envelope, err := protocol.Seal(event, "key-1", key, acceptedAt, bytes.NewReader(make([]byte, 12)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &memoryServerStore{}
+	reception := ServerService{
+		Clients: memoryRegistry{client: RegisteredClient{
+			ID: "textile", SenderBotID: 11, SenderBotUsername: "textile_bot",
+			ChatID: -1001, ThreadID: 42, KeyID: "key-1", Key: key, Active: true,
+		}},
+		Rules: memoryRules{rules: serverServiceRules()}, Store: store,
+		Now: func() time.Time { return acceptedAt }, DeliveryWindow: 120 * time.Minute,
+	}
+	result, err := reception.Receive(context.Background(), IncomingPacket{
+		SenderBotID: 11, SenderBotUsername: "textile_bot", ChatID: -1001,
+		ThreadID: 42, Payload: payload,
+	})
+	if err != nil || !result.Accepted {
+		t.Fatalf("своевременный пакет не принят: result=%#v err=%v", result, err)
+	}
+	if want := acceptedAt.Add(120 * time.Minute); !store.event.ExpiresAt.Equal(want) {
+		t.Fatalf("срок доставки %s, ожидался %s", store.event.ExpiresAt, want)
+	}
+
+	tests := []struct {
+		name      string
+		elapsed   time.Duration
+		delivered bool
+	}{
+		{name: "119m59s", elapsed: 119*time.Minute + 59*time.Second, delivered: true},
+		{name: "120m00s", elapsed: 120 * time.Minute, delivered: true},
+		{name: "120m01s", elapsed: 120*time.Minute + time.Second, delivered: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			queue := &memoryDeliveryQueue{jobs: []DeliveryJob{{
+				Event:    store.event,
+				Delivery: domain.PlannedDelivery{Destination: domain.Destination{ID: "telegram"}},
+			}}}
+			delivery := DeliveryService{
+				Queue:    queue,
+				Gateways: map[string]DeliveryGateway{"telegram": memoryGateway{}},
+				Now:      func() time.Time { return acceptedAt.Add(test.elapsed) },
+			}
+			count, err := delivery.RunOnce(context.Background(), 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.delivered {
+				if count != 1 || len(queue.delivered) != 1 || len(queue.retried) != 0 {
+					t.Fatalf("в пределах окна доставка не состоялась: count=%d delivered=%v expired=%v",
+						count, queue.delivered, queue.retried)
+				}
+			} else if count != 0 || len(queue.delivered) != 0 ||
+				len(queue.retried) != 1 || queue.retried[0] != store.event.ID+":telegram:expired" {
+				t.Fatalf("после окна доставка не завершилась как просроченная: count=%d delivered=%v expired=%v",
+					count, queue.delivered, queue.retried)
+			}
+		})
+	}
+}
+
 // Задержка уже скачанного пакета в локальной очереди не превращает своевременный
 // перехват в просроченный: граница свежести фиксируется при скачивании.
 func TestServerServiceUsesDurableIngressTimeForFreshness(t *testing.T) {
