@@ -92,7 +92,7 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	if err != nil || !accepted {
 		t.Fatalf("accept: %v %v", accepted, err)
 	}
-	known, err := store.KnownEvent(ctx, event.ID, event.ContentDigest)
+	known, err := store.KnownEvent(ctx, event.ID, event.ClientID, event.ContentDigest)
 	if err != nil || !known {
 		t.Fatalf("known event: %v %v", known, err)
 	}
@@ -126,12 +126,23 @@ func TestServerStoreAcceptIsAtomicAndIdempotent(t *testing.T) {
 	if err != nil || history != 1 {
 		t.Fatalf("история адреса получателя потеряна после доставки: %d, %v", history, err)
 	}
+	originalDigest := event.ContentDigest
 	event.ContentDigest = "changed"
-	if _, err := store.KnownEvent(ctx, event.ID, event.ContentDigest); err == nil {
+	if _, err := store.KnownEvent(ctx, event.ID, event.ClientID, event.ContentDigest); !errors.Is(err, application.ErrEventIDConflict) {
 		t.Fatal("проверка известного UUID должна обнаруживать другое содержимое")
 	}
-	if _, err := store.Accept(ctx, event, plan); err == nil {
+	if _, err := store.Accept(ctx, event, plan); !errors.Is(err, application.ErrEventIDConflict) {
 		t.Fatal("один UUID с другим содержимым должен быть конфликтом")
+	}
+	// ClientID отсутствует в каноническом отпечатке содержимого: совпавший
+	// digest от другой точки всё равно не может стать повтором её события.
+	event.ClientID = "other-client"
+	event.ContentDigest = originalDigest
+	if _, err := store.KnownEvent(ctx, event.ID, event.ClientID, event.ContentDigest); !errors.Is(err, application.ErrEventIDConflict) {
+		t.Fatal("тот же UUID от другой точки ошибочно признан повтором")
+	}
+	if _, err := store.Accept(ctx, event, plan); !errors.Is(err, application.ErrEventIDConflict) {
+		t.Fatal("приём не распознал повтор UUID от другой точки")
 	}
 }
 

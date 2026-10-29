@@ -55,6 +55,11 @@ func TestServerServiceChecksTelegramIdentityBeforeAccept(t *testing.T) {
 		result.ContentBlocks != len(event.Blocks) || result.SourceMode != string(event.Mode) {
 		t.Fatalf("журналу возвращена неверная характеристика содержимого: %#v", result)
 	}
+	store.knownErr = errors.New("database busy")
+	if _, err := service.Receive(context.Background(), packet); err == nil || IsPermanentPacketError(err) {
+		t.Fatalf("временный сбой чтения БД ошибочно классифицирован как постоянный: %v", err)
+	}
+	store.knownErr = nil
 	packet.Payload = append(append([]byte(nil), payload...), []byte("{}")...)
 	if _, err := service.Receive(context.Background(), packet); err == nil {
 		t.Fatal("дополнительный JSON после конверта должен быть отклонён")
@@ -629,14 +634,18 @@ func (rules memoryRules) PublishRules(_ context.Context, _ domain.RuleSet, _ str
 type memoryServerStore struct {
 	accepted int
 	event    domain.Event
+	knownErr error
 }
 
-func (store *memoryServerStore) KnownEvent(_ context.Context, eventID, contentDigest string) (bool, error) {
+func (store *memoryServerStore) KnownEvent(_ context.Context, eventID, clientID, contentDigest string) (bool, error) {
+	if store.knownErr != nil {
+		return false, store.knownErr
+	}
 	if store.accepted == 0 || store.event.ID != eventID {
 		return false, nil
 	}
-	if store.event.ContentDigest != contentDigest {
-		return false, errors.New("конфликт содержимого")
+	if store.event.ClientID != clientID || store.event.ContentDigest != contentDigest {
+		return false, ErrEventIDConflict
 	}
 	return true, nil
 }

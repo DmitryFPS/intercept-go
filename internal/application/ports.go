@@ -100,7 +100,7 @@ type Acknowledgement struct {
 
 // ServerStore распознаёт ранее принятые события и атомарно сохраняет новые.
 type ServerStore interface {
-	KnownEvent(ctx context.Context, eventID, contentDigest string) (known bool, err error)
+	KnownEvent(ctx context.Context, eventID, clientID, contentDigest string) (known bool, err error)
 	Accept(ctx context.Context, event domain.Event, plan domain.DeliveryPlan) (accepted bool, err error)
 }
 

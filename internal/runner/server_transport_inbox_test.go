@@ -326,6 +326,120 @@ func TestTransportInboxQuarantinesPoisonAndProcessesFollowingPacket(t *testing.T
 	t.Fatalf("ядовитый пакет задержал следующий: %+v", stats)
 }
 
+// Повтор чужого содержимого под уже принятым event_id — окончательный
+// конфликт, а не временная ошибка БД. Он не должен бесконечно оставаться во
+// входной очереди или мешать следующему корректному перехвату.
+func TestTransportInboxQuarantinesEventIDConflictAndProcessesFollowingPacket(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRunnerTransportStore(t)
+	key := bytes.Repeat([]byte{0x6a}, 32)
+	client := application.RegisteredClient{
+		ID: "station", Number: "001", Name: "Точка", SenderBotID: 11,
+		SenderBotUsername: "station_bot", ChatID: -1001, ThreadID: 9,
+		KeyID: "key-1", Key: key, Active: true,
+	}
+	if err := store.SaveClient(ctx, client); err != nil {
+		t.Fatal(err)
+	}
+	rules := domain.RuleSet{
+		Version: 1,
+		Destinations: map[string]domain.Destination{
+			"telegram": {ID: "telegram", Name: "Получатель", Kind: domain.DestinationTelegram, Enabled: true},
+		},
+		Positions: map[string]map[string]domain.RouteDecision{
+			"name:" + domain.NormalizeUnitName("подразделение"): {
+				"telegram": {Action: domain.RouteDeliver, ThreadID: 7},
+			},
+		},
+		Unknown: map[string]domain.RouteDecision{"telegram": {Action: domain.RouteReview}},
+	}
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	makeEvent := func(id, sourceUUID, content string) domain.Event {
+		event := domain.Event{
+			ID: id, ClientID: client.ID, CreatedAt: now, ObservedAt: now,
+			SourceAt: now, ExpiresAt: now.Add(30 * time.Minute),
+			Source:   domain.SourceRecord{ID: 1, UUID: sourceUUID},
+			Position: domain.Position{UnitName: "подразделение"}, Mode: domain.SourceModeNormal,
+			Content: content, ContentDigestVersion: domain.ContentDigestVersionCurrent,
+		}
+		event.ContentDigest = event.CanonicalContentDigest()
+		return event
+	}
+	first := makeEvent("event-first", "source-first", "первое содержимое")
+	conflict := makeEvent("event-first", "source-first", "другое содержимое")
+	following := makeEvent("event-following", "source-following", "следующий перехват")
+	events := []domain.Event{first, conflict, following}
+	packets := make([]application.IncomingPacket, 0, len(events))
+	for index, event := range events {
+		envelope, err := protocol.Seal(event, client.KeyID, key, now,
+			bytes.NewReader(bytes.Repeat([]byte{byte(index + 1)}, 12)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		packets = append(packets, application.IncomingPacket{
+			UpdateID: int64(index + 1), SenderBotID: client.SenderBotID,
+			SenderBotUsername: client.SenderBotUsername, ChatID: client.ChatID,
+			ThreadID: client.ThreadID, MessageID: int64(index + 101),
+			SentAt: now, ReceivedAt: now, Payload: payload,
+		})
+	}
+	if err := store.PersistTransportBatch(ctx, serverOffsetName, 4, packets); err != nil {
+		t.Fatal(err)
+	}
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		result := any(true)
+		if strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			result = map[string]any{
+				"message_id": 999, "date": time.Now().Unix(),
+				"chat": map[string]any{"id": 1, "type": "private"},
+			}
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": result})
+	}))
+	defer apiServer.Close()
+	telegramClient, err := telegram.NewWithBaseURL("123:token", apiServer.URL, apiServer.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := &telegram.ServerReceiver{
+		API: telegramClient, ChatID: client.ChatID, MaxBytes: 1024,
+		Observe: func(application.TransportObservation) {},
+	}
+	server := &Server{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	reception := &application.ServerService{
+		Clients: store, Rules: store, Store: store, Now: time.Now, DeliveryWindow: time.Hour,
+	}
+	loopContext, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.transportInboxLoop(loopContext, receiver, reception)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		stats, statsErr := store.Stats(context.Background())
+		if statsErr == nil && stats.TransportInbox == 0 && stats.Events == 2 && stats.Rejected == 1 {
+			cancel()
+			<-done
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	stats, _ := store.Stats(context.Background())
+	t.Fatalf("конфликт event_id не изолирован или задержал следующий пакет: %+v", stats)
+}
+
 func newRunnerTransportStore(t *testing.T) *sqlite.ServerStore {
 	t.Helper()
 	db, err := sqlite.OpenState(filepath.Join(t.TempDir(), "server.db"))

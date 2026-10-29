@@ -20,19 +20,19 @@ const maxSourceLineagesPerClient = 200000
 
 // KnownEvent проверяет, был ли пакет уже надёжно принят. Совпавший UUID с
 // другим содержимым считается конфликтом, а не повторной доставкой.
-func (store *ServerStore) KnownEvent(ctx context.Context, eventID, contentDigest string) (bool, error) {
-	var existingDigest string
+func (store *ServerStore) KnownEvent(ctx context.Context, eventID, clientID, contentDigest string) (bool, error) {
+	var existingClientID, existingDigest string
 	err := store.db.QueryRowContext(ctx,
-		"SELECT content_digest FROM received_events WHERE event_id = ?", eventID,
-	).Scan(&existingDigest)
+		"SELECT client_id,content_digest FROM received_events WHERE event_id = ?", eventID,
+	).Scan(&existingClientID, &existingDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("проверить принятое событие: %w", err)
 	}
-	if existingDigest != contentDigest {
-		return false, errors.New("конфликт: UUID события уже принят с другим содержимым")
+	if existingClientID != clientID || existingDigest != contentDigest {
+		return false, application.ErrEventIDConflict
 	}
 	return true, nil
 }
@@ -111,13 +111,13 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 		return false, fmt.Errorf("начать приём события: %w", err)
 	}
 	defer tx.Rollback()
-	var existingDigest string
+	var existingClientID, existingDigest string
 	err = tx.QueryRowContext(ctx,
-		"SELECT content_digest FROM received_events WHERE event_id = ?", event.ID,
-	).Scan(&existingDigest)
+		"SELECT client_id,content_digest FROM received_events WHERE event_id = ?", event.ID,
+	).Scan(&existingClientID, &existingDigest)
 	if err == nil {
-		if existingDigest != event.ContentDigest {
-			return false, errors.New("конфликт: UUID события уже принят с другим содержимым")
+		if existingClientID != event.ClientID || existingDigest != event.ContentDigest {
+			return false, application.ErrEventIDConflict
 		}
 		return false, nil
 	}

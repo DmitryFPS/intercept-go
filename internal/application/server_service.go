@@ -130,8 +130,11 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	// Подтверждаем уже сохранённый пакет даже после истечения исходных 30 минут.
 	// Такое возможно, если первое подтверждение Telegram потерялось. Проверка
 	// дайджеста не позволяет подменить содержимое под известным UUID.
-	known, err := service.Store.KnownEvent(ctx, event.ID, event.ContentDigest)
+	known, err := service.Store.KnownEvent(ctx, event.ID, event.ClientID, event.ContentDigest)
 	if err != nil {
+		if errors.Is(err, ErrEventIDConflict) {
+			return PacketResult{}, &PermanentPacketError{Err: err}
+		}
 		return PacketResult{}, err
 	}
 	if known {
@@ -177,7 +180,7 @@ func (service *ServerService) Receive(ctx context.Context, packet IncomingPacket
 	event.FreshnessIssue = ""
 	accepted, err := service.Store.Accept(ctx, event, plan)
 	if err != nil {
-		if errors.Is(err, ErrSourceLineageLimit) || errors.Is(err, ErrSourceRevisionConflict) {
+		if errors.Is(err, ErrSourceLineageLimit) || errors.Is(err, ErrSourceRevisionConflict) || errors.Is(err, ErrEventIDConflict) {
 			return PacketResult{}, &PermanentPacketError{Err: err}
 		}
 		return PacketResult{}, err
