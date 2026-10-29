@@ -1018,6 +1018,11 @@ func (destination *Destination) deleteMessage(ctx context.Context, id int64) err
 	if err == nil || missingDeleteError(err) {
 		return nil
 	}
+	var telegramError *apiError
+	if errors.As(err, &telegramError) && telegramError.code == 400 &&
+		strings.Contains(strings.ToLower(telegramError.description), "message can't be deleted") {
+		return application.NewPermanentDeliveryError(err)
+	}
 	return err
 }
 

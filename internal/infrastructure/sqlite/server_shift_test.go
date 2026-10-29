@@ -144,6 +144,36 @@ func TestRecentShiftsAreSelectedPerClientBeyondGlobalHistoryLimit(t *testing.T) 
 	t.Fatal("вторая рабочая точка не найдена")
 }
 
+func TestRecentShiftsIncludeLastClosedWithMultipleOpenPositions(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	base := time.Date(2026, 10, 28, 6, 0, 0, 0, time.UTC)
+	closedAt := base.Add(2 * time.Minute)
+	_, err := store.RecordClientShiftSnapshot(ctx, "textile", base.Add(3*time.Minute), application.ShiftSnapshot{
+		ReadState: application.ShiftReadOK,
+		Active: []application.ShiftSession{
+			{SessionID: 1, SessionUUID: "open-a", PositionName: "Позиция А", OpenedAt: base},
+			{SessionID: 2, SessionUUID: "open-b", PositionName: "Позиция Б", OpenedAt: base.Add(time.Minute)},
+		},
+		LastClosed: []application.ShiftSession{{
+			SessionID: 3, SessionUUID: "closed-c", PositionName: "Позиция В",
+			OpenedAt: base.Add(-time.Hour), ClosedAt: &closedAt,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.HistoryPage(ctx, "clients", 30, 0, base.Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Clients) != 1 || len(page.Clients[0].RecentShifts) != 2 ||
+		page.Clients[0].RecentShifts[0].SessionUUID != "open-b" ||
+		page.Clients[0].RecentShifts[1].SessionUUID != "closed-c" {
+		t.Fatalf("карточка должна содержать последнюю открытую и последнюю закрытую смену: %+v", page.Clients)
+	}
+}
+
 func TestClosedShiftCannotBeReopenedByNewerConflictingSnapshot(t *testing.T) {
 	t.Parallel()
 	store, ctx := openObservabilityStore(t)

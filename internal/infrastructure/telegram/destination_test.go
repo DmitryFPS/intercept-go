@@ -1061,6 +1061,64 @@ func TestDestinationScopedEventNeverChangesSiblingBlock(t *testing.T) {
 	}
 }
 
+func TestDestinationUndeletableBlockIsPermanentFailure(t *testing.T) {
+	t.Parallel()
+	var deletes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasSuffix(request.URL.Path, "/deleteMessage") {
+			http.Error(writer, "неожиданный метод", http.StatusNotFound)
+			return
+		}
+		deletes.Add(1)
+		writer.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"ok": false, "error_code": 400, "description": "Bad Request: message can't be deleted",
+		})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveDestinationState(statePath, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {ThreadID: 42, Blocks: map[string]destinationBlock{
+			"block-a": {MessageIDs: []int64{101}, SourceVersion: "2026-10-27 18:00:00", ThreadID: 42},
+			"block-b": {MessageIDs: []int64{102}, SourceVersion: "2026-10-27 18:00:00", ThreadID: 42},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: statePath}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	event := domain.Event{
+		ID: "delete-a", ClientID: "point-01", Source: domain.SourceRecord{UUID: "source-1"},
+		CreatedAt: time.Date(2026, 10, 27, 19, 0, 0, 0, time.UTC),
+		Position:  domain.Position{UnitName: "позиция"}, SourceBlockUUID: "block-a",
+		SourceBlockDeleted: true, HasActiveBlocks: true,
+		Blocks: []domain.ContentBlock{{UUID: "block-a", DeletedAt: "2026-10-27 19:00:00"}},
+	}
+	err = destination.Deliver(context.Background(), event, delivery)
+	if err == nil || !application.IsPermanentDeliveryError(err) || !strings.Contains(err.Error(), "can't be deleted") {
+		t.Fatalf("невозможное удаление не классифицировано как окончательная ошибка: %v", err)
+	}
+	if deletes.Load() != 1 {
+		t.Fatalf("ожидалась одна попытка удаления, получено %d", deletes.Load())
+	}
+	current, err := loadDestinationState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := current.Items["point-01|source-1"]
+	if item.Blocks["block-a"].SourceDeleted ||
+		!reflect.DeepEqual(item.Blocks["block-a"].MessageIDs, []int64{101}) ||
+		!reflect.DeepEqual(item.Blocks["block-b"].MessageIDs, []int64{102}) {
+		t.Fatalf("отказ Telegram нельзя записывать как успешное удаление: %#v", item)
+	}
+}
+
 func TestDestinationSourceTombstoneRejectsLateEditAndAllowsNewerRestore(t *testing.T) {
 	t.Parallel()
 	var methods, texts []string

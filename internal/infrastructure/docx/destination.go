@@ -260,13 +260,17 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 		if migratedBlockKey != "" && migratedBlockKey != key {
 			delete(current.Blocks, migratedBlockKey)
 		}
+		if previousFilename != "" && previousFilename != filename {
+			obsolete, pathErr := safeDestinationPath(destination.Folder, previousFilename)
+			if pathErr != nil {
+				return pathErr
+			}
+			if removeErr := os.Remove(obsolete); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				return fmt.Errorf("удалить прежний Word-документ: %w", removeErr)
+			}
+		}
 		if err := saveState(destination.StatePath, current); err != nil {
 			return err
-		}
-		if previousFilename != "" && previousFilename != filename {
-			if obsolete, pathErr := safeDestinationPath(destination.Folder, previousFilename); pathErr == nil {
-				_ = os.Remove(obsolete)
-			}
 		}
 	}
 	if scopedBlockUUID == "" {
@@ -277,8 +281,12 @@ func (destination Destination) deliver(ctx context.Context, event domain.Event, 
 			// Объединённый rc81-документ уже перезаписан первым UUID-блоком и имеет
 			// то же имя. Его файл удалять нельзя; удаляется только старый ключ.
 			if key != combinedKey && key != legacyPrefix+"record" && record.Filename != "" {
-				if obsolete, pathErr := safeDestinationPath(destination.Folder, record.Filename); pathErr == nil {
-					_ = os.Remove(obsolete)
+				obsolete, pathErr := safeDestinationPath(destination.Folder, record.Filename)
+				if pathErr != nil {
+					return pathErr
+				}
+				if removeErr := os.Remove(obsolete); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return fmt.Errorf("удалить Word-документ устаревшего блока: %w", removeErr)
 				}
 			}
 			delete(current.Blocks, key)

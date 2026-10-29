@@ -192,25 +192,29 @@ func (store *ServerStore) currentClientShifts(ctx context.Context, clientID stri
 // hide another client's still-open shift in the dashboard.
 func (store *ServerStore) recentClientShifts(ctx context.Context) ([]ClientShiftSession, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		WITH ranked AS (
+		WITH categorized AS (
 			SELECT s.client_id,c.name AS client_name,s.position_name,s.session_uuid,
 				s.source_session_id,s.opened_at,s.closed_at,s.first_seen_at,
 				s.last_seen_at,s.is_current,
-				ROW_NUMBER() OVER (
-					PARTITION BY s.client_id
-					ORDER BY CASE
-						WHEN s.is_current=1 AND s.closed_at IS NULL THEN 0
-						WHEN s.closed_at IS NOT NULL THEN 1
-						ELSE 2 END,
-						s.opened_at DESC,s.session_uuid
-				) AS row_number
+				CASE
+					WHEN s.is_current=1 AND s.closed_at IS NULL THEN 0
+					WHEN s.closed_at IS NOT NULL THEN 1
+					ELSE 2 END AS shift_kind
 			FROM client_shift_sessions s
 			JOIN server_clients c ON c.client_id=s.client_id
+		), ranked AS (
+			SELECT *,
+				ROW_NUMBER() OVER (
+					PARTITION BY client_id,shift_kind
+					ORDER BY CASE WHEN shift_kind=0 THEN opened_at ELSE closed_at END DESC,
+						session_uuid
+				) AS row_number
+			FROM categorized
 		)
 		SELECT client_id,client_name,position_name,session_uuid,source_session_id,
 			opened_at,closed_at,first_seen_at,last_seen_at,is_current
-		FROM ranked WHERE row_number<=2
-		ORDER BY client_id,row_number`)
+		FROM ranked WHERE shift_kind IN (0,1) AND row_number=1
+		ORDER BY client_id,shift_kind`)
 	if err != nil {
 		return nil, err
 	}
