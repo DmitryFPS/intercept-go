@@ -831,6 +831,7 @@ func (store *ServerStore) historyCutoff(ctx context.Context, kind string) string
 const (
 	transportDeletionMaxAttempts = 120
 	transportDeletionMaxAge      = 24 * time.Hour
+	transportDeletionMaxPending  = 10000
 )
 
 // QueueTransportDeletion сохраняет неудавшееся удаление служебного сообщения.
@@ -897,6 +898,34 @@ func (store *ServerStore) DueTransportDeletions(ctx context.Context, now time.Ti
 func (store *ServerStore) CompleteTransportDeletion(ctx context.Context, messageID int64) error {
 	_, err := store.db.ExecContext(ctx, "DELETE FROM transport_cleanup WHERE message_id=?", messageID)
 	return err
+}
+
+// PruneTransportDeletions ограничивает техническую очередь, даже когда Telegram
+// долго отвергает удаление каждого файла. Приём и доставка событий от неё не зависят.
+func (store *ServerStore) PruneTransportDeletions(ctx context.Context, now time.Time) (int64, error) {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM transport_cleanup
+		WHERE created_at<? OR message_id IN (
+			SELECT message_id FROM transport_cleanup
+			ORDER BY created_at DESC, message_id DESC
+			LIMIT -1 OFFSET ?
+		)`, stamp(now.Add(-transportDeletionMaxAge)), transportDeletionMaxPending)
+	if err != nil {
+		return 0, err
+	}
+	dropped, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return dropped, nil
 }
 
 func parseNullableTime(value sql.NullString) *time.Time {

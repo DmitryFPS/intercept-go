@@ -556,6 +556,53 @@ func TestTransportDeletionQueueStopsAfterAttemptLimit(t *testing.T) {
 	}
 }
 
+func TestTransportDeletionQueuePrunesAgeAndOverflow(t *testing.T) {
+	store, ctx := openObservabilityStore(t)
+	now := time.Now().UTC()
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO transport_cleanup(message_id,created_at,next_attempt_at,attempts)
+		VALUES(?,?,?,0)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := int64(1); id <= transportDeletionMaxPending+2; id++ {
+		if _, err := stmt.ExecContext(ctx, id, stamp(now), stamp(now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := stmt.ExecContext(ctx, 20000, stamp(now.Add(-25*time.Hour)), stamp(now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := store.PruneTransportDeletions(ctx, now)
+	if err != nil || dropped != 3 {
+		t.Fatalf("ожидалось удаление двух лишних и одного старого запроса: dropped=%d err=%v", dropped, err)
+	}
+	var count int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != transportDeletionMaxPending {
+		t.Fatalf("техническая очередь превышает лимит: %d", count)
+	}
+	var oldestID int64
+	if err := store.db.QueryRowContext(ctx, "SELECT MIN(message_id) FROM transport_cleanup").Scan(&oldestID); err != nil {
+		t.Fatal(err)
+	}
+	if oldestID != 3 {
+		t.Fatalf("сохранены не самые новые запросы на удаление: min=%d", oldestID)
+	}
+}
+
 func TestIncidentRetentionUsesRecoveryTime(t *testing.T) {
 	t.Parallel()
 	store, ctx := openObservabilityStore(t)

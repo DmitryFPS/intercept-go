@@ -259,7 +259,20 @@ func (server *Server) transportInboxLoop(
 ) {
 	recentAcknowledgements := make(map[string]time.Time)
 	nextCleanupAt := time.Time{}
+	nextPruneAt := time.Time{}
 	for ctx.Err() == nil {
+		now := time.Now().UTC()
+		if !now.Before(nextPruneAt) {
+			if dropped, err := server.Store.PruneTransportDeletions(ctx, now); err != nil {
+				if ctx.Err() == nil {
+					server.Logger.Warn("не удалось ограничить очередь удаления транспортных файлов", "error", err)
+				}
+			} else if dropped > 0 {
+				server.Logger.Warn("устаревшие запросы на удаление транспортных файлов удалены из технической очереди",
+					"count", dropped)
+			}
+			nextPruneAt = now.Add(time.Minute)
+		}
 		items, err := server.Store.PendingTransportPackets(ctx, 25, time.Now().UTC())
 		if err != nil {
 			if ctx.Err() == nil {
