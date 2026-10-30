@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -582,19 +583,25 @@ func (source *Source) enrichCallsigns(ctx context.Context, item *application.Sou
 				return fmt.Errorf("прочитать позывные EAVC: %w", err)
 			}
 			for rows.Next() {
-				var number sql.NullInt64
+				var rawNumber sql.NullString
 				var code, label, tag, description sql.NullString
-				if err := rows.Scan(&number, &code, &label, &tag, &description); err != nil {
+				if err := rows.Scan(&rawNumber, &code, &label, &tag, &description); err != nil {
 					if closeErr := rows.Close(); closeErr != nil {
 						return fmt.Errorf("закрыть чтение позывных EAVC: %w", closeErr)
 					}
 					return newRecordContractError("декодировать позывной EAVC для записи %d: %v", item.Record.ID, err)
 				}
+				// ID карточки — необязательные метаданные. Повреждённое число
+				// не должно изолировать перехват, который уже прошёл проверку блоков.
+				var number int64
+				if parsed, parseErr := strconv.ParseInt(strings.TrimSpace(rawNumber.String), 10, 64); parseErr == nil && parsed > 0 {
+					number = parsed
+				}
 				key := domain.NormalizeCorrespondentCode(code.String)
 				if key != "" && strings.TrimSpace(label.String) != "" {
 					if _, exists := callsigns[key]; !exists {
 						callsigns[key] = domain.Callsign{
-							Number: number.Int64, Code: code.String, Label: label.String,
+							Number: number, Code: code.String, Label: label.String,
 							Tag: tag.String, Description: description.String,
 						}
 					}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -208,6 +209,23 @@ func TestMessageTemplateValidationRejectsUnsafeHTML(t *testing.T) {
 	}
 }
 
+func TestMessageTemplateRejectsHiddenMarkersAndXMLInstructions(t *testing.T) {
+	t.Parallel()
+	for _, invalid := range []string{
+		strings.Replace(DefaultMessageTemplate, "{{TRANSCRIPT}}", "<!--{{TRANSCRIPT}}-->", 1),
+		DefaultMessageTemplate + "\n<!-- комментарий -->",
+		strings.Replace(DefaultMessageTemplate, "{{TRANSCRIPT}}", "<![CDATA[{{TRANSCRIPT}}]]>", 1),
+		DefaultMessageTemplate + "\n<?test value?>",
+	} {
+		if err := ValidateMessageTemplate(invalid); err == nil {
+			t.Fatalf("неподдерживаемая разметка или скрытая метка принята: %q", invalid)
+		}
+	}
+	if err := ValidateMessageTemplate(DefaultMessageTemplate + "\n&lt;!-- это видимый текст --&gt;"); err != nil {
+		t.Fatalf("экранированный видимый текст ошибочно отклонён: %v", err)
+	}
+}
+
 func TestTelegramLengthBoundaryAndBalancedChunks(t *testing.T) {
 	t.Parallel()
 	for _, size := range []int{4095, 4096, 4097} {
@@ -235,6 +253,108 @@ func TestTelegramLengthBoundaryAndBalancedChunks(t *testing.T) {
 		var root struct{}
 		if err := xml.Unmarshal([]byte("<root>"+chunk+"</root>"), &root); err != nil {
 			t.Fatalf("часть %d содержит несбалансированный HTML: %v", index+1, err)
+		}
+	}
+}
+
+func TestLongPaddedTemplateTagsRemainBalancedAcrossChunks(t *testing.T) {
+	t.Parallel()
+	opening := "<b" + strings.Repeat(" ", 96) + "\n\t>"
+	closing := "</b" + strings.Repeat(" ", 96) + ">"
+	template := strings.Replace(DefaultMessageTemplate, "{{TRANSCRIPT}}", opening+"{{TRANSCRIPT}}"+closing, 1)
+	if err := ValidateMessageTemplate(template); err != nil {
+		t.Fatalf("шаблон с длинными пробелами в теге отклонён: %v", err)
+	}
+	event := domain.Event{
+		SourceAt: time.Date(2026, 10, 20, 17, 34, 0, 0, time.UTC),
+		Position: domain.Position{UnitName: "Точка", Frequency: "100.100", GroupCode: "A1"},
+		Blocks:   []domain.ContentBlock{{Text: strings.Repeat("Ж", 9000)}},
+	}
+	message := FormatEventWithTemplate(event, "313", template, false)
+	if !strings.Contains(message, opening) || !strings.Contains(message, closing) {
+		t.Fatal("длинный тег потерян при форматировании")
+	}
+	const limit = maxTelegramMessageRunes - 48
+	chunks := splitHTMLMessage(message, limit)
+	if len(chunks) < 2 {
+		t.Fatalf("длинное сообщение не разделено: частей %d", len(chunks))
+	}
+	visibleText := func(markup string) string {
+		decoder := xml.NewDecoder(strings.NewReader("<root>" + markup + "</root>"))
+		var text strings.Builder
+		for {
+			token, err := decoder.Token()
+			if err == io.EOF {
+				return text.String()
+			}
+			if err != nil {
+				t.Fatalf("часть содержит несбалансированный HTML: %v", err)
+			}
+			if data, ok := token.(xml.CharData); ok {
+				text.Write(data)
+			}
+		}
+	}
+	var reconstructed strings.Builder
+	for index, chunk := range chunks {
+		if runeLen(chunk) > limit {
+			t.Fatalf("часть %d длиннее лимита: %d", index+1, runeLen(chunk))
+		}
+		reconstructed.WriteString(visibleText(chunk))
+	}
+	if got, want := reconstructed.String(), visibleText(message); got != want {
+		t.Fatalf("после разбиения видимый текст изменился: длина %d вместо %d", runeLen(got), runeLen(want))
+	}
+}
+
+func TestSplitHTMLMessagePreservesWhitespaceAtChunkBoundaries(t *testing.T) {
+	t.Parallel()
+	readVisible := func(markup string) string {
+		decoder := xml.NewDecoder(strings.NewReader("<root>" + markup + "</root>"))
+		var visible strings.Builder
+		for {
+			token, err := decoder.Token()
+			if err == io.EOF {
+				return visible.String()
+			}
+			if err != nil {
+				t.Fatalf("повреждено HTML-оформление части: %v", err)
+			}
+			if data, ok := token.(xml.CharData); ok {
+				visible.Write(data)
+			}
+		}
+	}
+	text := strings.Repeat("a ", 2500) + "конец"
+	for _, message := range []string{text, "<b>" + text + "</b>"} {
+		const limit = 64
+		chunks := splitHTMLMessage(message, limit)
+		if len(chunks) < 2 {
+			t.Fatal("сообщение не было разделено")
+		}
+		var combined strings.Builder
+		for index, chunk := range chunks {
+			if runeLen(chunk) > limit {
+				t.Fatalf("часть %d превышает лимит", index+1)
+			}
+			combined.WriteString(readVisible(chunk))
+		}
+		if got, want := combined.String(), readVisible(message); got != want {
+			t.Fatalf("пробелы потеряны на границах частей: got=%q want=%q", got[:min(len(got), 80)], want[:min(len(want), 80)])
+		}
+	}
+}
+
+func TestNextHTMLMessageTokenRejectsMalformedLongTag(t *testing.T) {
+	t.Parallel()
+	for _, malformed := range []string{
+		"<b" + strings.Repeat(" ", maxMessageTemplateRunes) + ">",
+		"<b" + strings.Repeat(" ", 96) + "<b>",
+		strings.Repeat("<", 1024) + ">",
+	} {
+		token, tail := nextHTMLMessageToken(malformed)
+		if token.raw != "<" || token.name != "" || tail != malformed[1:] {
+			t.Fatalf("повреждённый тег принят как единый токен: %q", malformed[:min(len(malformed), 80)])
 		}
 	}
 }

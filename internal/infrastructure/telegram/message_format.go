@@ -36,6 +36,7 @@ var requiredMessageMarkers = []string{
 }
 
 const maxTelegramMessageRunes = 4096
+const maxMessageTemplateRunes = 3500
 
 var allowedTemplateTags = map[string]bool{
 	"b": true, "strong": true, "i": true, "em": true, "u": true, "ins": true,
@@ -54,6 +55,11 @@ func ValidateMessageTemplate(template string) error {
 	if template == "" {
 		return errors.New("шаблон сообщения Telegram пуст")
 	}
+	// Комментарии, CDATA и инструкции XML не поддерживаются Telegram.
+	// Кроме того, внутри комментария можно спрятать обязательную метку.
+	if strings.Contains(template, "<!") || strings.Contains(template, "<?") {
+		return errors.New("в шаблоне Telegram недопустимы комментарии и инструкции XML")
+	}
 	var missing []string
 	for _, marker := range requiredMessageMarkers {
 		if !strings.Contains(template, marker) {
@@ -64,10 +70,11 @@ func ValidateMessageTemplate(template string) error {
 		sort.Strings(missing)
 		return fmt.Errorf("в шаблоне Telegram отсутствуют обязательные метки: %s", strings.Join(missing, ", "))
 	}
-	if len([]rune(template)) > 3500 {
+	if len([]rune(template)) > maxMessageTemplateRunes {
 		return errors.New("шаблон Telegram слишком длинный")
 	}
 	decoder := xml.NewDecoder(strings.NewReader("<root>" + template + "</root>"))
+	var visibleText strings.Builder
 	for {
 		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
@@ -76,12 +83,20 @@ func ValidateMessageTemplate(template string) error {
 		if err != nil {
 			return fmt.Errorf("в шаблоне Telegram нарушено HTML-оформление: %w", err)
 		}
-		start, ok := token.(xml.StartElement)
-		if !ok || start.Name.Local == "root" {
-			continue
+		switch value := token.(type) {
+		case xml.CharData:
+			visibleText.Write(value)
+		case xml.StartElement:
+			if value.Name.Local != "root" && (!allowedTemplateTags[value.Name.Local] || len(value.Attr) > 0) {
+				return fmt.Errorf("в шаблоне Telegram недопустимый тег <%s> или его атрибуты", value.Name.Local)
+			}
+		case xml.Comment, xml.Directive, xml.ProcInst:
+			return errors.New("в шаблоне Telegram недопустимы комментарии и инструкции XML")
 		}
-		if !allowedTemplateTags[start.Name.Local] || len(start.Attr) > 0 {
-			return fmt.Errorf("в шаблоне Telegram недопустимый тег <%s> или его атрибуты", start.Name.Local)
+	}
+	for _, marker := range requiredMessageMarkers {
+		if !strings.Contains(visibleText.String(), marker) {
+			return fmt.Errorf("обязательная метка %s отсутствует в видимом тексте шаблона Telegram", marker)
 		}
 	}
 	return nil
@@ -278,8 +293,8 @@ type htmlMessageToken struct {
 
 func splitHTMLMessage(message string, limit int) []string {
 	remaining := strings.TrimSpace(message)
-	if utf8.RuneCountInString(message) <= limit {
-		return []string{strings.TrimSpace(message)}
+	if utf8.RuneCountInString(remaining) <= limit {
+		return []string{remaining}
 	}
 	var chunks []string
 	var current strings.Builder
@@ -301,7 +316,7 @@ func splitHTMLMessage(message string, limit int) []string {
 		}
 		tokenRunes := utf8.RuneCountInString(token.raw)
 		if current.Len() > 0 && currentRunes+tokenRunes+nextClosingRunes > limit {
-			chunks = append(chunks, strings.TrimSpace(current.String()+closingTags(stack)))
+			chunks = append(chunks, current.String()+closingTags(stack))
 			current.Reset()
 			reopening := openingTags(stack)
 			current.WriteString(reopening)
@@ -320,21 +335,41 @@ func splitHTMLMessage(message string, limit int) []string {
 		}
 		closingRunes = nextClosingRunes
 	}
-	if tail := strings.TrimSpace(current.String() + closingTags(stack)); tail != "" {
-		chunks = append(chunks, tail)
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String()+closingTags(stack))
 	}
 	return chunks
 }
 
 func nextHTMLMessageToken(message string) (htmlMessageToken, string) {
 	if message[0] == '<' {
-		// Допустимые теги шаблона короткие. Ограниченный поиск не даёт
-		// незакрытому '<' многократно просматривать остаток большого текста.
-		prefix := message[:min(len(message), 64)]
-		if end := strings.IndexByte(prefix, '>'); end >= 0 {
-			raw := message[:end+1]
-			name := strings.Trim(strings.TrimSuffix(strings.TrimPrefix(raw, "<"), ">"), " /")
-			return htmlMessageToken{raw: raw, name: name, close: strings.HasPrefix(raw, "</")}, message[end+1:]
+		// В проверенном шаблоне имя тега и пробелы внутри него состоят из
+		// ASCII-байтов, поэтому весь тег не длиннее шаблона. Останавливаемся
+		// на первом недопустимом байте: повторяющиеся незакрытые '<' не должны
+		// заставлять разбиение многократно искать далёкий '>'.
+		index := 1
+		close := false
+		if index < len(message) && message[index] == '/' {
+			close = true
+			index++
+		}
+		nameStart := index
+		for index < len(message) && index-nameStart < len("blockquote") && message[index] >= 'a' && message[index] <= 'z' {
+			index++
+		}
+		name := message[nameStart:index]
+		if allowedTemplateTags[name] {
+			for index < len(message) && index < maxMessageTemplateRunes && isXMLTagSpace(message[index]) {
+				index++
+			}
+			if index < len(message) && index < maxMessageTemplateRunes {
+				if message[index] == '>' {
+					return htmlMessageToken{raw: message[:index+1], name: name, close: close}, message[index+1:]
+				}
+				if !close && message[index] == '/' && index+1 < len(message) && index+1 < maxMessageTemplateRunes && message[index+1] == '>' {
+					return htmlMessageToken{raw: message[:index+2]}, message[index+2:]
+				}
+			}
 		}
 	}
 	if message[0] == '&' {
@@ -345,6 +380,10 @@ func nextHTMLMessageToken(message string) (htmlMessageToken, string) {
 	}
 	_, size := utf8.DecodeRuneInString(message)
 	return htmlMessageToken{raw: message[:size]}, message[size:]
+}
+
+func isXMLTagSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\n' || value == '\r'
 }
 
 func openingTags(stack []string) string {

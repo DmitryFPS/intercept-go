@@ -1,9 +1,12 @@
 package eavc
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"intercept/internal/application"
+	"intercept/internal/infrastructure/sqlite"
 
 	_ "modernc.org/sqlite"
 )
@@ -284,7 +288,7 @@ func TestSourceReadsMoreCallsignCodesThanSQLiteVariableLimit(t *testing.T) {
 	}
 }
 
-func TestSourceIsolatesInvalidCallsignAndContinuesFollowingRecord(t *testing.T) {
+func TestSourceKeepsInterceptWithInvalidOptionalCallsignNumber(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "main.sqlite")
 	db, err := sql.Open("sqlite", path)
@@ -299,11 +303,11 @@ func TestSourceIsolatesInvalidCallsignAndContinuesFollowingRecord(t *testing.T) 
 		);
 		CREATE TABLE intercept_callsigns (
 			id TEXT, frequency TEXT, group_code TEXT, unit_name TEXT,
-			code TEXT, label TEXT
+			code TEXT, label TEXT, tag TEXT, tag_desc TEXT
 		);
 		INSERT INTO intercept_callsigns VALUES
-			('invalid-number', '100.0', 'A', 'Позиция', '1', 'Повреждённый'),
-			('2', '100.0', 'A', 'Позиция', '2', 'Исправный');
+			('invalid-number', '100.0', 'A', 'Позиция', '1', 'Повреждённый', 'Старший', 'Описание'),
+			('2', '100.0', 'A', 'Позиция', '2', 'Исправный', '', '');
 		INSERT INTO intercept_items VALUES
 			(1, 1, 'session', 'Позиция', '100.0', 'A', 'source-1',
 			 '10.00' || char(10) || '-Текст (1)', 'Оператор', '2026-10-20 10:00:00'),
@@ -328,13 +332,139 @@ func TestSourceIsolatesInvalidCallsignAndContinuesFollowingRecord(t *testing.T) 
 	if err != nil || len(items) != 2 {
 		t.Fatalf("чтение записей: items=%d err=%v", len(items), err)
 	}
-	if !strings.Contains(items[0].ContractError, "декодировать позывной") {
-		t.Fatalf("повреждённый позывной не изолирован: %+v", items[0])
+	if items[0].ContractError != "" || len(items[0].Blocks) != 1 ||
+		len(items[0].Blocks[0].Callsigns) != 1 {
+		t.Fatalf("перехват с повреждённым номером карточки потерян: %+v", items[0])
+	}
+	callsign := items[0].Blocks[0].Callsigns[0]
+	if callsign.Number != 0 || callsign.Code != "1" || callsign.Label != "Повреждённый" ||
+		callsign.Tag != "Старший" || callsign.Description != "Описание" {
+		t.Fatalf("сохранные метаданные позывного потеряны: %+v", callsign)
 	}
 	if items[1].ContractError != "" || len(items[1].Blocks) != 1 ||
 		len(items[1].Blocks[0].Callsigns) != 1 ||
+		items[1].Blocks[0].Callsigns[0].Number != 2 ||
 		items[1].Blocks[0].Callsigns[0].Label != "Исправный" || cursor.ID != 2 {
 		t.Fatalf("исправная запись потеряна: item=%+v cursor=%+v", items[1], cursor)
+	}
+}
+
+func TestSourceInvalidOptionalCallsignNumberDoesNotLogContractFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE intercept_items (
+			id INTEGER PRIMARY KEY, session_id INTEGER, session_uuid TEXT,
+			unit_name TEXT, frequency TEXT, group_code TEXT, uuid TEXT,
+			content TEXT, updated_by TEXT, updated_at TEXT
+		);
+		CREATE TABLE intercept_callsigns (
+			id TEXT, frequency TEXT, group_code TEXT, unit_name TEXT,
+			code TEXT, label TEXT
+		);
+		INSERT INTO intercept_callsigns VALUES
+			('invalid-number', '100.0', 'A', 'Позиция', '1', 'Повреждённый'),
+			('2', '100.0', 'A', 'Позиция', '2', 'Исправный');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTestBlockSchema(t, db)
+	now := time.Now().UTC().Truncate(time.Second)
+	for id, code := range []string{"1", "2", "3"} {
+		if _, err := db.Exec(`INSERT INTO intercept_items VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			id+1, 1, "session", "Позиция", "100.0", "A", fmt.Sprintf("source-%d", id+1),
+			fmt.Sprintf("10.0%d\n-Текст (%s)", id, code), "Оператор",
+			now.Add(time.Duration(id-3)*time.Second).Format(time.RFC3339)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncTestBlocks(t, db)
+	if _, err := db.Exec(`UPDATE intercept_blocks SET body='-Несовпадающий текст' WHERE item_id=3`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	source, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	stateDB, err := sqlite.OpenState(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stateDB.Close()
+	queue, err := sqlite.NewClientQueue(ctx, stateDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logOutput bytes.Buffer
+	service := application.ClientService{
+		ClientID: "test", Source: source, Queue: queue, State: queue,
+		BatchSize: 10, CatchUpExisting: true, Now: func() time.Time { return now },
+		Logger: slog.New(slog.NewJSONHandler(&logOutput, nil)),
+	}
+	queued, err := service.CollectOnce(ctx)
+	if err != nil || queued != 2 {
+		t.Fatalf("перехваты не попали в очередь: queued=%d err=%v logs=%s", queued, err, logOutput.String())
+	}
+	pending, err := queue.Pending(ctx, 10, now)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("очередь повреждена: pending=%d err=%v", len(pending), err)
+	}
+	seen := make(map[int64]bool, len(pending))
+	for _, queuedEvent := range pending {
+		id := queuedEvent.Event.Source.ID
+		if seen[id] || (id != 1 && id != 2) || len(queuedEvent.Event.Blocks) != 1 ||
+			len(queuedEvent.Event.Blocks[0].Callsigns) != 1 {
+			t.Fatalf("неожиданный перехват в очереди: %+v", pending)
+		}
+		seen[id] = true
+		callsign := queuedEvent.Event.Blocks[0].Callsigns[0]
+		if id == 1 && (callsign.Number != 0 || callsign.Label != "Повреждённый") ||
+			id == 2 && (callsign.Number != 2 || callsign.Label != "Исправный") {
+			t.Fatalf("позывной перехвата %d потерян: %+v", id, callsign)
+		}
+	}
+	if !seen[1] || !seen[2] {
+		t.Fatalf("перехваты потеряны: %+v", pending)
+	}
+	cursor, err := queue.Cursor(ctx, "eavc")
+	if err != nil || cursor.ID != 3 {
+		t.Fatalf("курсор не продолжил чтение после повреждённого блока: %+v err=%v", cursor, err)
+	}
+	var queuedLogs, contractLogs int
+	for _, line := range bytes.Split(bytes.TrimSpace(logOutput.Bytes()), []byte("\n")) {
+		var entry struct {
+			Level    string `json:"level"`
+			Message  string `json:"msg"`
+			SourceID int64  `json:"source_id"`
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatalf("декодировать журнал: %v: %s", err, line)
+		}
+		switch entry.Message {
+		case "временной блок EAVC поставлен в очередь":
+			if entry.Level != "INFO" || entry.SourceID < 1 || entry.SourceID > 2 {
+				t.Fatalf("неверный журнал постановки в очередь: %s", line)
+			}
+			queuedLogs++
+		case "нарушена обратная совместимость записи EAVC; запись изолирована":
+			if entry.Level != "ERROR" || entry.SourceID != 3 {
+				t.Fatalf("номер карточки ошибочно записан как нарушение контракта: %s", line)
+			}
+			contractLogs++
+		}
+	}
+	if queuedLogs != 2 || contractLogs != 1 {
+		t.Fatalf("неверное журналирование: queued=%d contract=%d logs=%s", queuedLogs, contractLogs, logOutput.String())
 	}
 }
 
