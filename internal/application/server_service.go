@@ -386,6 +386,25 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 	err := gateway.Deliver(attemptContext, job.Event, job.Delivery)
 	cancel()
 	if err != nil {
+		// Ошибка всей доставки не означает, что Telegram не подтвердил ни
+		// одной части. Сохраняем известные ID и неопределённый исход до
+		// перевода задания в повтор или окончательную ошибку.
+		if provider, ok := gateway.(DeliveryReceiptProvider); ok {
+			if queue, ok := service.Queue.(PartialDeliveryReceiptQueue); ok {
+				receipt, receiptErr := provider.DeliveryReceipt(job.Event, job.Delivery)
+				if receiptErr != nil {
+					if service.Logger != nil {
+						service.Logger.Warn("частичная квитанция доставки недоступна",
+							"event_id", job.Event.ID, "trace_id", job.Event.ID,
+							"destination_id", job.Delivery.Destination.ID, "error", receiptErr)
+					}
+				} else if saveErr := queue.SavePartialDeliveryReceipt(
+					ctx, job.Event.ID, job.Delivery.Destination.ID, receipt,
+				); saveErr != nil {
+					return false, fmt.Errorf("доставка: %v; сохранить частичную квитанцию: %w", err, saveErr)
+				}
+			}
+		}
 		if IsPermanentDeliveryError(err) {
 			if markErr := service.Queue.MarkDeliveryFailed(ctx, job.Event.ID, job.Delivery.Destination.ID,
 				now, err.Error()); markErr != nil {

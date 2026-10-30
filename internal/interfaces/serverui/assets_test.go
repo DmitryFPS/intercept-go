@@ -126,6 +126,41 @@ func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	}
 }
 
+func TestUnknownTelegramOutcomeHasManualVerificationWithoutInventedMessageID(t *testing.T) {
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assets.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	javascript := string(application)
+	for _, fragment := range []string{
+		"item.telegram_outcome_unknown === true",
+		"!unknownOutcome",
+		"item.telegram_blocks || []",
+		"data-republish-unknown",
+		"Сверьте последнюю принятую Центром редакцию с EAVC",
+		"Если спорная часть уже есть, не публикуйте её снова",
+		"Проверил, части нет",
+		"последней принятой им редакции EAVC",
+		"подтверждённые ID",
+		"block.unconfirmed_part",
+		"block.expected_message_count",
+		"confirmed.length === index - 1",
+		"Сведения о частях недоступны. Ручная публикация отключена",
+		"Результат ищите в «Доставлено»",
+	} {
+		if !strings.Contains(javascript, fragment) {
+			t.Errorf("неопределённая отправка Telegram не объяснена или небезопасно управляется: нет %q", fragment)
+		}
+	}
+	if !strings.Contains(string(styles), ".telegram-uncertain") {
+		t.Error("предупреждение об исходе Telegram не имеет заметного оформления")
+	}
+}
+
 func TestClientShiftHistoryUsesAlignedOperatorLayout(t *testing.T) {
 	application, err := assets.ReadFile("assets/app.js")
 	if err != nil {

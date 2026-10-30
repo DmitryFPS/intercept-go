@@ -108,6 +108,29 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		telegramRecordMutationIsStale(item, event) {
 		return nil
 	}
+	// Неизвестный исход публикации нельзя забывать даже при удалении блока,
+	// смене маршрута или следующей редакции: Telegram мог создать сообщение.
+	for blockKey, stored := range item.Blocks {
+		if scopedBlockUUID != "" && blockKey != scopedBlockUUID {
+			continue
+		}
+		if stored.SendPending {
+			stored.SendPending = false
+			stored.UnknownOutcome = true
+			stored.Suppressed = true
+			stored.SuppressedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			stored.SuppressedReason = "исход отправки Telegram неизвестен; автоматический дубль запрещён"
+			item.Blocks[blockKey] = stored
+			if err := destination.saveItem(itemKey, item, false); err != nil {
+				return err
+			}
+		}
+		if stored.UnknownOutcome {
+			return application.NewPermanentDeliveryError(errors.New(
+				"исход предыдущей отправки Telegram неизвестен; проверьте тему и разрешайте повторную публикацию только если сообщения нет",
+			))
+		}
+	}
 	if delivery.Decision.Action == domain.RouteSkip {
 		if scopedBlockUUID != "" {
 			return destination.deleteScopedBlock(ctx, itemKey, legacyItemKey, item, event, scopedBlockUUID, migratedLegacy, !event.HasActiveBlocks)
@@ -198,6 +221,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		}
 		if exists && stored.SendPending {
 			stored.SendPending = false
+			stored.UnknownOutcome = true
 			stored.Suppressed = true
 			stored.SuppressedAt = time.Now().UTC().Format(time.RFC3339Nano)
 			stored.SuppressedReason = "исход отправки Telegram неизвестен после прерывания; автоматический дубль запрещён"
@@ -431,11 +455,17 @@ func (destination *Destination) DeliveryReceipt(
 		if !block.Suppressed {
 			messageIDs = append(messageIDs, block.MessageIDs...)
 		}
+		unknownOutcome := block.UnknownOutcome || block.SendPending
+		unconfirmedPart := 0
+		if unknownOutcome {
+			unconfirmedPart = block.SendPendingIndex + 1
+		}
 		blockReceipts = append(blockReceipts, application.DeliveryBlockReceipt{
 			BlockUUID: entry.key, MessageIDs: append([]int64(nil), block.MessageIDs...),
 			DeletedMessageIDs:    append([]int64(nil), block.DeletedMessageIDs...),
 			ExpectedMessageCount: expectedMessageCount, Complete: complete,
 			Suppressed: block.Suppressed, SuppressedReason: block.SuppressedReason,
+			UnknownOutcome: unknownOutcome, UnconfirmedPart: unconfirmedPart,
 		})
 	}
 	if scoped := strings.TrimSpace(event.SourceBlockUUID); scoped != "" && len(blockReceipts) == 0 {
@@ -674,6 +704,7 @@ func (destination *Destination) AllowRepublish(event domain.Event, blockUUID str
 		return false, nil
 	}
 	block.Suppressed = false
+	block.UnknownOutcome = false
 	block.SuppressedAt = ""
 	block.SuppressedReason = ""
 	block.Hash = ""
@@ -961,8 +992,9 @@ func (destination *Destination) upsertBlock(
 				if clearErr := sendIntent(false, index); clearErr != nil {
 					return nil, false, fmt.Errorf("отправка Telegram отклонена: %v; снять маркер попытки: %w", err, clearErr)
 				}
+				return nil, false, err
 			}
-			return nil, false, err
+			return nil, false, fmt.Errorf("исход отправки Telegram неизвестен: %w", err)
 		}
 		ids = append(ids, message.MessageID)
 		if destination.Logger != nil {
@@ -989,10 +1021,12 @@ func telegramSendDefinitelyNotCreated(err error) bool {
 	}
 	var telegramError *apiError
 	if errors.As(err, &telegramError) {
-		return true
+		return telegramError.httpStatus >= 200 && telegramError.httpStatus < 500 &&
+			telegramError.code >= 400 && telegramError.code < 500
 	}
 	var limited *rateLimitError
-	return errors.As(err, &limited)
+	return errors.As(err, &limited) && limited.httpStatus >= 200 &&
+		limited.httpStatus < 500 && limited.apiCode == 429
 }
 
 func (destination *Destination) deleteAll(ctx context.Context, blocks map[string]destinationBlock) error {
@@ -1018,23 +1052,24 @@ func (destination *Destination) deleteMessage(ctx context.Context, id int64) err
 	if err == nil || missingDeleteError(err) {
 		return nil
 	}
-	var telegramError *apiError
-	if errors.As(err, &telegramError) && telegramError.code == 400 &&
-		strings.Contains(strings.ToLower(telegramError.description), "message can't be deleted") {
+	if definitiveTelegramBadRequest(err) &&
+		strings.Contains(strings.ToLower(err.Error()), "message can't be deleted") {
 		return application.NewPermanentDeliveryError(err)
 	}
 	return err
 }
 
 func missingDeleteError(err error) bool {
+	if !definitiveTelegramBadRequest(err) {
+		return false
+	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "message to delete not found") ||
 		strings.Contains(message, "message_id_invalid")
 }
 
 func terminalEditError(err error) bool {
-	var telegramError *apiError
-	if errors.As(err, &telegramError) && telegramError.code != 400 {
+	if !definitiveTelegramBadRequest(err) {
 		return false
 	}
 	message := strings.ToLower(err.Error())
@@ -1044,8 +1079,7 @@ func terminalEditError(err error) bool {
 }
 
 func missingEditError(err error) bool {
-	var telegramError *apiError
-	if errors.As(err, &telegramError) && telegramError.code != 400 {
+	if !definitiveTelegramBadRequest(err) {
 		return false
 	}
 	message := strings.ToLower(err.Error())
@@ -1054,5 +1088,12 @@ func missingEditError(err error) bool {
 }
 
 func unchangedEditError(err error) bool {
-	return strings.Contains(strings.ToLower(err.Error()), "message is not modified")
+	return definitiveTelegramBadRequest(err) &&
+		strings.Contains(strings.ToLower(err.Error()), "message is not modified")
+}
+
+func definitiveTelegramBadRequest(err error) bool {
+	var telegramError *apiError
+	return errors.As(err, &telegramError) && telegramError.code == 400 &&
+		(telegramError.httpStatus == 200 || telegramError.httpStatus == 400)
 }

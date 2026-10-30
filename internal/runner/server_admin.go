@@ -401,8 +401,8 @@ func (server *Server) ClearHistory(ctx context.Context, kind string) error {
 }
 
 // RepublishTelegramBlock повторно создаёт только явно выбранный удалённый
-// временной блок. ID берётся исключительно из ответа бота: сообщения других
-// участников группы никогда не используются как привязка.
+// временной блок его актуальной редакции. ID берётся исключительно из ответа
+// бота: сообщения других участников группы не используются как привязка.
 func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, destinationID, blockUUID string) (resultErr error) {
 	server.adminMu.Lock()
 	defer server.adminMu.Unlock()
@@ -418,19 +418,21 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 			}
 		}()
 	}
-	job, err := server.Store.DeliveryJobByID(ctx, strings.TrimSpace(eventID), strings.TrimSpace(destinationID))
+	selectedEventID := strings.TrimSpace(eventID)
+	destinationID = strings.TrimSpace(destinationID)
+	blockUUID = strings.TrimSpace(blockUUID)
+	job, err := server.Store.CurrentDeliveryJobForRepublish(ctx, selectedEventID, destinationID)
 	if err != nil {
 		return err
 	}
-	found := false
-	for _, block := range job.Event.Blocks {
-		if block.Identity() == strings.TrimSpace(blockUUID) {
-			found = true
-			break
-		}
+	if err := validateTelegramRepublishBlock(job, blockUUID); err != nil {
+		return err
 	}
-	if !found {
-		return errors.New("выбранный временной блок не найден в перехвате")
+	if job.Event.ID != selectedEventID && server.Logger != nil {
+		server.Logger.Info("ручная публикация использует актуальную редакцию вместо исторической карточки",
+			"selected_event_id", selectedEventID, "current_event_id", job.Event.ID,
+			"destination_id", destinationID, "block_uuid", blockUUID,
+		)
 	}
 	server.mu.RLock()
 	cfg := cloneServerConfig(server.config)
@@ -500,6 +502,28 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 	}
 	server.Logger.Info("временной блок повторно опубликован оператором", "event_id", job.Event.ID, "destination_id", destinationID, "block_uuid", blockUUID)
 	return nil
+}
+
+func validateTelegramRepublishBlock(job application.DeliveryJob, blockUUID string) error {
+	if job.Delivery.Destination.Kind != domain.DestinationTelegram ||
+		job.Delivery.RuleLevel == "cleanup" || job.Delivery.Decision.Action == domain.RouteSkip {
+		return errors.New("актуальная редакция больше не публикуется в выбранной теме Telegram")
+	}
+	if job.Event.SourceBlockDeleted {
+		return errors.New("временной блок удалён в актуальной редакции EAVC")
+	}
+	if sourceBlock := strings.TrimSpace(job.Event.SourceBlockUUID); sourceBlock != blockUUID {
+		return errors.New("для повторной публикации нужна актуальная редакция с точным UUID временного блока")
+	}
+	for _, block := range job.Event.Blocks {
+		if block.Identity() == blockUUID {
+			if strings.TrimSpace(block.DeletedAt) != "" || strings.TrimSpace(block.Text) == "" {
+				return errors.New("временной блок удалён или пуст в актуальной редакции EAVC")
+			}
+			return nil
+		}
+	}
+	return errors.New("выбранный временной блок не найден в актуальной редакции EAVC")
 }
 
 func receiptHasPublishedBlock(receipt application.DeliveryReceipt, blockUUID string) bool {

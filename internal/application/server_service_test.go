@@ -605,6 +605,71 @@ func TestDeliveryServiceFinalizesPermanentFailure(t *testing.T) {
 	}
 }
 
+func TestDeliveryServiceSavesPartialReceiptWithoutFalseSuccess(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name      string
+		failure   error
+		permanent bool
+	}{
+		{name: "temporary", failure: errors.New("Telegram временно недоступен")},
+		{name: "permanent", failure: NewPermanentDeliveryError(errors.New("исход отправки Telegram неизвестен")), permanent: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			event := serverServiceEvent()
+			delivery := domain.PlannedDelivery{Destination: domain.Destination{ID: "telegram", Kind: domain.DestinationTelegram}}
+			queue := &memoryDeliveryQueue{jobs: []DeliveryJob{{Event: event, Delivery: delivery}}}
+			partial := DeliveryReceipt{
+				Kind: "telegram", ChatID: -1001, ThreadID: 17, MessageIDs: []int64{701},
+				Blocks: []DeliveryBlockReceipt{{
+					BlockUUID: "block-1", MessageIDs: []int64{701}, ExpectedMessageCount: 2,
+					UnknownOutcome: true, UnconfirmedPart: 2,
+				}},
+			}
+			service := DeliveryService{
+				Queue: queue, Gateways: map[string]DeliveryGateway{
+					"telegram": errorReceiptGateway{err: test.failure, receipt: partial},
+				}, Now: time.Now,
+			}
+			delivered, err := service.RunOnce(context.Background(), 10)
+			if err != nil || delivered != 0 || len(queue.delivered) != 0 || len(queue.receipts) != 0 {
+				t.Fatalf("частичная публикация ошибочно завершена: delivered=%d final=%v err=%v", delivered, queue.delivered, err)
+			}
+			if len(queue.partialReceipts) != 1 || !reflect.DeepEqual(queue.partialReceipts[0], partial) {
+				t.Fatalf("подтверждённая часть и неопределённый исход потеряны: %+v", queue.partialReceipts)
+			}
+			if test.permanent {
+				if len(queue.failed) != 1 || len(queue.retried) != 0 {
+					t.Fatalf("неверное завершение неисправимой доставки: failed=%v retried=%v", queue.failed, queue.retried)
+				}
+			} else if len(queue.retried) != 1 || len(queue.failed) != 0 {
+				t.Fatalf("временная ошибка не оставлена на повтор: failed=%v retried=%v", queue.failed, queue.retried)
+			}
+		})
+	}
+}
+
+func TestDeliveryServiceReceiptReadFailureDoesNotBlockIndependentDestination(t *testing.T) {
+	t.Parallel()
+	event := serverServiceEvent()
+	queue := &memoryDeliveryQueue{jobs: []DeliveryJob{
+		{Event: event, Delivery: domain.PlannedDelivery{Destination: domain.Destination{ID: "telegram", Kind: domain.DestinationTelegram}}},
+		{Event: event, Delivery: domain.PlannedDelivery{Destination: domain.Destination{ID: "word", Kind: domain.DestinationWord}}},
+	}}
+	service := DeliveryService{
+		Queue: queue, Now: time.Now, MaxConcurrent: 1,
+		Gateways: map[string]DeliveryGateway{
+			"telegram": errorReceiptGateway{err: errors.New("нет сети"), receiptErr: errors.New("состояние временно недоступно")},
+			"word":     memoryGateway{},
+		},
+	}
+	delivered, err := service.RunOnce(context.Background(), 10)
+	if err != nil || delivered != 1 || len(queue.retried) != 1 || len(queue.delivered) != 1 || len(queue.partialReceipts) != 0 {
+		t.Fatalf("ошибка чтения Telegram-квитанции затормозила независимый Word: delivered=%d retried=%v err=%v", delivered, queue.retried, err)
+	}
+}
+
 // Зависшая отправка в один топик не должна останавливать сообщения для другого топика.
 func TestDeliveryServiceDoesNotLetSlowStreamBlockAnother(t *testing.T) {
 	t.Parallel()
@@ -705,6 +770,20 @@ func (receiptGateway) DeliveryReceipt(_ domain.Event, _ domain.PlannedDelivery) 
 	return DeliveryReceipt{Kind: "telegram", ChatID: -1001, ThreadID: 17, MessageIDs: []int64{701}}, nil
 }
 
+type errorReceiptGateway struct {
+	err        error
+	receipt    DeliveryReceipt
+	receiptErr error
+}
+
+func (gateway errorReceiptGateway) Deliver(_ context.Context, _ domain.Event, _ domain.PlannedDelivery) error {
+	return gateway.err
+}
+
+func (gateway errorReceiptGateway) DeliveryReceipt(_ domain.Event, _ domain.PlannedDelivery) (DeliveryReceipt, error) {
+	return gateway.receipt, gateway.receiptErr
+}
+
 type flakyReceiptGateway struct{ reads atomic.Int32 }
 
 func (*flakyReceiptGateway) Deliver(_ context.Context, _ domain.Event, _ domain.PlannedDelivery) error {
@@ -737,12 +816,13 @@ func (gateway channelGateway) Deliver(ctx context.Context, _ domain.Event, _ dom
 }
 
 type memoryDeliveryQueue struct {
-	mu        sync.Mutex
-	jobs      []DeliveryJob
-	delivered []string
-	retried   []string
-	failed    []string
-	receipts  []DeliveryReceipt
+	mu              sync.Mutex
+	jobs            []DeliveryJob
+	delivered       []string
+	retried         []string
+	failed          []string
+	receipts        []DeliveryReceipt
+	partialReceipts []DeliveryReceipt
 }
 
 func (queue *memoryDeliveryQueue) PendingDeliveries(_ context.Context, _ int, _ time.Time) ([]DeliveryJob, error) {
@@ -795,6 +875,15 @@ func (queue *memoryDeliveryQueue) MarkDeliveredWithReceipt(
 	defer queue.mu.Unlock()
 	queue.delivered = append(queue.delivered, eventID+":"+destinationID)
 	queue.receipts = append(queue.receipts, receipt)
+	return nil
+}
+
+func (queue *memoryDeliveryQueue) SavePartialDeliveryReceipt(
+	_ context.Context, _, _ string, receipt DeliveryReceipt,
+) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.partialReceipts = append(queue.partialReceipts, receipt)
 	return nil
 }
 

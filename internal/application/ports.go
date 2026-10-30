@@ -155,9 +155,10 @@ type DeliveryGateway interface {
 	Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error
 }
 
-// DeliveryReceipt — подтверждённый внешний результат уже выполненной доставки.
-// Telegram может разбить длинный перехват на несколько сообщений, поэтому ID
-// хранится списком. Для Word и других направлений результат может быть пустым.
+// DeliveryReceipt — подтверждённые внешние ID и состояние публикации.
+// Telegram может разбить длинный перехват на несколько сообщений: часть ID уже
+// подтверждена, а исход следующей части ещё неизвестен. Для Word и других
+// направлений квитанция может быть пустой.
 type DeliveryReceipt struct {
 	Kind       string                 `json:"kind"`
 	ChatID     int64                  `json:"chat_id,omitempty"`
@@ -176,11 +177,14 @@ type DeliveryBlockReceipt struct {
 	Complete             bool    `json:"complete,omitempty"`
 	Suppressed           bool    `json:"suppressed,omitempty"`
 	SuppressedReason     string  `json:"suppressed_reason,omitempty"`
+	UnknownOutcome       bool    `json:"unknown_outcome,omitempty"`
+	UnconfirmedPart      int     `json:"unconfirmed_part,omitempty"`
 }
 
-// DeliveryReceiptProvider сообщает фактические ID только после успешной
-// внешней операции. Ошибка чтения результата не должна повторять уже
-// выполненную доставку и создавать дубль.
+// DeliveryReceiptProvider сообщает подтверждённые внешние ID после успешной
+// операции и частичное состояние после ошибки (включая неопределённый исход
+// одной из частей). Ошибка чтения результата не должна превращать ранее
+// выполненную доставку в ошибочно подтверждённую или создавать дубль.
 type DeliveryReceiptProvider interface {
 	DeliveryReceipt(event domain.Event, delivery domain.PlannedDelivery) (DeliveryReceipt, error)
 }
@@ -188,4 +192,11 @@ type DeliveryReceiptProvider interface {
 // DeliveryReceiptQueue расширяет очередь без нарушения старых адаптеров.
 type DeliveryReceiptQueue interface {
 	MarkDeliveredWithReceipt(ctx context.Context, eventID, destinationID string, at time.Time, receipt DeliveryReceipt) error
+}
+
+// PartialDeliveryReceiptQueue сохраняет подтверждённые части и сведения о
+// неопределённом исходе отправки, не переводя задание в состояние «доставлено».
+// Это необязательное расширение: старые адаптеры очереди продолжают работать.
+type PartialDeliveryReceiptQueue interface {
+	SavePartialDeliveryReceipt(ctx context.Context, eventID, destinationID string, receipt DeliveryReceipt) error
 }

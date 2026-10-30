@@ -867,8 +867,10 @@ func TestDestinationResumesMissingChunksWithoutCompletingPartialPublication(t *t
 		case "sendMessage":
 			call := sendCalls.Add(1)
 			if call == 2 {
+				writer.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(writer).Encode(map[string]any{
-					"ok": false, "error_code": 500, "description": "временная ошибка тестового Telegram",
+					"ok": false, "error_code": 429, "description": "временное ограничение частоты Telegram",
+					"parameters": map[string]any{"retry_after": 1},
 				})
 				return
 			}
@@ -1517,14 +1519,17 @@ func TestTerminalEditErrorClassification(t *testing.T) {
 		"Bad Request: message can't be edited",
 		"Bad Request: MESSAGE_ID_INVALID",
 	} {
-		if !terminalEditError(&apiError{code: 400, description: description}) {
+		if !terminalEditError(&apiError{code: 400, httpStatus: 400, description: description}) {
 			t.Errorf("окончательная ошибка не распознана: %s", description)
 		}
 	}
-	if terminalEditError(&apiError{code: 500, description: "message to edit not found"}) {
+	if terminalEditError(&apiError{code: 500, httpStatus: 500, description: "message to edit not found"}) {
 		t.Fatal("временная серверная ошибка Telegram ошибочно завершит доставку")
 	}
-	if terminalEditError(&apiError{code: 400, description: "Bad Request: chat not found"}) {
+	if terminalEditError(&apiError{code: 400, httpStatus: 500, description: "message to edit not found"}) {
+		t.Fatal("противоречивый ответ HTTP 500 ошибочно завершит доставку")
+	}
+	if terminalEditError(&apiError{code: 400, httpStatus: 400, description: "Bad Request: chat not found"}) {
 		t.Fatal("исправимая настройкой ошибка чата ошибочно завершит доставку")
 	}
 }
@@ -1535,15 +1540,20 @@ func TestMissingEditErrorClassification(t *testing.T) {
 		"Bad Request: message to edit not found",
 		"Bad Request: MESSAGE_ID_INVALID",
 	} {
-		if !missingEditError(&apiError{code: 400, description: description}) {
+		if !missingEditError(&apiError{code: 400, httpStatus: 400, description: description}) {
 			t.Errorf("отсутствующее сообщение не распознано: %s", description)
 		}
 	}
-	if missingEditError(&apiError{code: 400, description: "Bad Request: message can't be edited"}) {
+	if missingEditError(&apiError{code: 400, httpStatus: 400, description: "Bad Request: message can't be edited"}) {
 		t.Fatal("существующее нередактируемое сообщение ошибочно будет заменено")
 	}
-	if missingEditError(&apiError{code: 500, description: "message to edit not found"}) {
+	if missingEditError(&apiError{code: 500, httpStatus: 500, description: "message to edit not found"}) {
 		t.Fatal("временная серверная ошибка Telegram ошибочно запустит восстановление")
+	}
+	if missingEditError(&apiError{code: 400, httpStatus: 500, description: "message to edit not found"}) ||
+		unchangedEditError(&apiError{code: 400, httpStatus: 500, description: "message is not modified"}) ||
+		missingDeleteError(&apiError{code: 400, httpStatus: 500, description: "message to delete not found"}) {
+		t.Fatal("ответ HTTP 500 нельзя считать подтверждением исправления или удаления")
 	}
 }
 

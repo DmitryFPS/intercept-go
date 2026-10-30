@@ -71,42 +71,43 @@ type ConnectionIncident struct {
 // карантина содержимое намеренно недоступно: отклонённый пакет мог не пройти
 // проверку подписи и его нельзя выдавать за достоверный перехват.
 type ServerHistoryItem struct {
-	ID                 string                             `json:"id"`
-	ClientID           string                             `json:"client_id,omitempty"`
-	ClientName         string                             `json:"client_name,omitempty"`
-	UnitName           string                             `json:"unit_name,omitempty"`
-	Frequency          string                             `json:"frequency,omitempty"`
-	GroupCode          string                             `json:"group_code,omitempty"`
-	DestinationID      string                             `json:"destination_id,omitempty"`
-	Destination        string                             `json:"destination,omitempty"`
-	State              string                             `json:"state"`
-	OccurredAt         time.Time                          `json:"occurred_at"`
-	SourceAt           *time.Time                         `json:"source_at,omitempty"`
-	SourceRecord       int64                              `json:"source_record,omitempty"`
-	SourceUUID         string                             `json:"source_uuid,omitempty"`
-	SourceVersion      string                             `json:"source_version,omitempty"`
-	ContentDigest      string                             `json:"content_digest,omitempty"`
-	SourceMode         string                             `json:"source_mode,omitempty"`
-	NextAttemptAt      *time.Time                         `json:"next_attempt_at,omitempty"`
-	Attempts           int                                `json:"attempts,omitempty"`
-	Reason             string                             `json:"reason,omitempty"`
-	UpdatedBy          string                             `json:"updated_by,omitempty"`
-	Content            string                             `json:"content,omitempty"`
-	ContentReady       bool                               `json:"content_ready"`
-	ContentKind        string                             `json:"content_kind"`
-	ContentNote        string                             `json:"content_note,omitempty"`
-	TelegramChat       string                             `json:"telegram_chat_id,omitempty"`
-	TelegramTopic      int64                              `json:"telegram_thread_id,omitempty"`
-	TelegramIDs        []int64                            `json:"telegram_message_ids,omitempty"`
-	TelegramURLs       []string                           `json:"telegram_message_urls,omitempty"`
-	BlockUUIDs         []string                           `json:"block_uuids,omitempty"`
-	TelegramBlocks     []application.DeliveryBlockReceipt `json:"telegram_blocks,omitempty"`
-	TransportUpdateID  int64                              `json:"transport_update_id,omitempty"`
-	TransportMessageID int64                              `json:"transport_message_id,omitempty"`
-	TransportKind      string                             `json:"transport_kind,omitempty"`
-	TransportOutcome   string                             `json:"transport_outcome,omitempty"`
-	TransportSeen      int                                `json:"transport_seen,omitempty"`
-	Counted            bool                               `json:"counted"`
+	ID                     string                             `json:"id"`
+	ClientID               string                             `json:"client_id,omitempty"`
+	ClientName             string                             `json:"client_name,omitempty"`
+	UnitName               string                             `json:"unit_name,omitempty"`
+	Frequency              string                             `json:"frequency,omitempty"`
+	GroupCode              string                             `json:"group_code,omitempty"`
+	DestinationID          string                             `json:"destination_id,omitempty"`
+	Destination            string                             `json:"destination,omitempty"`
+	State                  string                             `json:"state"`
+	OccurredAt             time.Time                          `json:"occurred_at"`
+	SourceAt               *time.Time                         `json:"source_at,omitempty"`
+	SourceRecord           int64                              `json:"source_record,omitempty"`
+	SourceUUID             string                             `json:"source_uuid,omitempty"`
+	SourceVersion          string                             `json:"source_version,omitempty"`
+	ContentDigest          string                             `json:"content_digest,omitempty"`
+	SourceMode             string                             `json:"source_mode,omitempty"`
+	NextAttemptAt          *time.Time                         `json:"next_attempt_at,omitempty"`
+	Attempts               int                                `json:"attempts,omitempty"`
+	Reason                 string                             `json:"reason,omitempty"`
+	UpdatedBy              string                             `json:"updated_by,omitempty"`
+	Content                string                             `json:"content,omitempty"`
+	ContentReady           bool                               `json:"content_ready"`
+	ContentKind            string                             `json:"content_kind"`
+	ContentNote            string                             `json:"content_note,omitempty"`
+	TelegramChat           string                             `json:"telegram_chat_id,omitempty"`
+	TelegramTopic          int64                              `json:"telegram_thread_id,omitempty"`
+	TelegramIDs            []int64                            `json:"telegram_message_ids,omitempty"`
+	TelegramURLs           []string                           `json:"telegram_message_urls,omitempty"`
+	BlockUUIDs             []string                           `json:"block_uuids,omitempty"`
+	TelegramBlocks         []application.DeliveryBlockReceipt `json:"telegram_blocks,omitempty"`
+	TelegramOutcomeUnknown bool                               `json:"telegram_outcome_unknown,omitempty"`
+	TransportUpdateID      int64                              `json:"transport_update_id,omitempty"`
+	TransportMessageID     int64                              `json:"transport_message_id,omitempty"`
+	TransportKind          string                             `json:"transport_kind,omitempty"`
+	TransportOutcome       string                             `json:"transport_outcome,omitempty"`
+	TransportSeen          int                                `json:"transport_seen,omitempty"`
+	Counted                bool                               `json:"counted"`
 }
 
 // ServerHistoryPage объединяет текущую связь и постраничную историю.
@@ -684,6 +685,13 @@ func scanServerHistoryItem(rows *sql.Rows) (ServerHistoryItem, error) {
 		item.Destination = delivery.Destination.Name
 		if delivery.Destination.Kind == domain.DestinationTelegram {
 			item.TelegramTopic = delivery.Decision.ThreadID
+			// При неопределённом ответе Telegram успешной квитанции нет.
+			// Показываем оператору сохранённую ошибку как отдельное состояние,
+			// не выдавая несуществующий message_id за подтверждённый результат.
+			reason := strings.ToLower(item.Reason)
+			item.TelegramOutcomeUnknown =
+				strings.Contains(reason, "исход") && strings.Contains(reason, "telegram") &&
+					strings.Contains(reason, "неизвестен")
 		}
 	}
 	if len(resultPayload) > 0 {

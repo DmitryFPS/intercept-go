@@ -497,6 +497,7 @@ function historyReasonLabel(reason) {
 
 function historyDetails(item) {
   const details = [];
+  if (item.telegram_outcome_unknown) details.push(item.state === 'pending' ? 'исход отправки в Telegram уточняется' : 'исход отправки в Telegram неизвестен — нужна ручная проверка');
   if (item.state === 'transport') {
     details.push(transportOutcomeLabel(item.transport_outcome));
     details.push(item.counted ? 'увеличил «Получено»' : 'рабочие счётчики не изменил');
@@ -544,7 +545,7 @@ function openHistoryItem(index) {
   const item = (historyData?.items || [])[index];
   if (!item) return;
   $('historyItemTitle').textContent = item.unit_name || item.client_name || 'Отклонённый пакет';
-  $('historyItemState').textContent = `${historyStateLabel(item.state)} · ${formatDate(item.occurred_at)}`;
+  $('historyItemState').textContent = `${item.telegram_outcome_unknown ? (item.state === 'pending' ? 'Исход публикации в Telegram уточняется' : 'Публикация в Telegram требует проверки') : historyStateLabel(item.state)} · ${formatDate(item.occurred_at)}`;
   const route = [item.client_name, item.destination].filter(Boolean).join(' → ');
   $('historyItemMeta').innerHTML = [
     historyMetaEntry('Рабочая точка', item.client_name),
@@ -580,13 +581,34 @@ function openHistoryItem(index) {
   $('historyItemContent').textContent = historyContent(item);
   const telegramURLs = item.telegram_message_urls || [];
   const telegramIDs = item.telegram_message_ids || [];
-  const suppressedBlocks = (item.telegram_blocks || []).filter(block => block.suppressed);
-  $('historyTelegramResult').classList.toggle('hidden', telegramIDs.length === 0 && suppressedBlocks.length === 0);
+  const receiptBlocks = item.telegram_blocks || [];
+  const isUnknownBlock = block => block.unknown_outcome === true || String(block.suppressed_reason || '').includes('неизвестен');
+  const unknownBlocks = receiptBlocks.filter(isUnknownBlock);
+  const suppressedBlocks = item.state === 'pending' ? [] : receiptBlocks.filter(block => block.suppressed && !isUnknownBlock(block));
+  const unknownOutcome = item.telegram_outcome_unknown === true || unknownBlocks.length > 0;
+  $('historyTelegramResult').classList.toggle('hidden', telegramIDs.length === 0 && suppressedBlocks.length === 0 && !unknownOutcome);
   $('historyTelegramLinks').innerHTML = telegramIDs.map((messageID, messageIndex) => {
     const url = telegramURLs[messageIndex];
     return url
       ? `<a class="button secondary" href="${escapeHTML(url)}" target="_blank" rel="noreferrer">Открыть сообщение ${escapeHTML(messageID)}</a>`
       : `<span class="badge">message_id ${escapeHTML(messageID)}</span>`;
+  }).join('') + (unknownOutcome ? `
+    <div class="telegram-uncertain">
+      <strong>${item.state === 'pending' ? 'Исход отправки уточняется' : 'Исход публикации неизвестен'}</strong>
+      <span>${item.state === 'pending'
+        ? 'Telegram мог создать сообщение, но Центр пока не получил подтверждённый message_id. Дождитесь завершения проверки Центром; ручная повторная публикация сейчас недоступна.'
+        : 'Telegram мог создать спорную часть сообщения, но Центр не получил её подтверждённый message_id. Сверьте последнюю принятую Центром редакцию с EAVC и проверьте нужную тему. Если новая редакция ещё в пути, дождитесь её. Автоматический повтор остановлен. Если спорная часть уже есть, не публикуйте её снова; автоматической привязки ID нет.'}</span>
+      ${unknownBlocks.length === 0 ? '<span>Сведения о частях недоступны. Ручная публикация отключена до разбора состояния.</span>' : ''}
+    </div>` : '') + unknownBlocks.map(block => {
+    const confirmed = (block.message_ids || []).filter(id => Number.isSafeInteger(id) && id > 0);
+    const index = Number(block.unconfirmed_part || 0);
+    const total = Number(block.expected_message_count || 0);
+    const canRepublish = item.state === 'expired' && index > 0 && total >= index && confirmed.length === index - 1;
+    return `
+    <div class="telegram-suppressed">
+      <span>Неизвестен исход части ${escapeHTML(index || '?')} из ${escapeHTML(total || '?')} · UUID ${escapeHTML(block.block_uuid)}${confirmed.length ? ` · подтверждённые ID: ${confirmed.map(escapeHTML).join(', ')}` : ''}</span>
+      ${canRepublish ? `<button class="button danger" data-republish-block="${escapeHTML(block.block_uuid)}" data-republish-unknown="true" data-unconfirmed-part="${escapeHTML(index)}" data-event-id="${escapeHTML(item.id)}" data-destination-id="${escapeHTML(item.destination_id)}">После проверки опубликовать</button>` : ''}
+    </div>`;
   }).join('') + suppressedBlocks.map(block => `
     <div class="telegram-suppressed">
       <span>Сообщение удалено в Telegram · UUID ${escapeHTML(block.block_uuid)}</span>
@@ -598,16 +620,21 @@ function openHistoryItem(index) {
 $('historyTelegramLinks').addEventListener('click', async event => {
   const button = event.target.closest('[data-republish-block]');
   if (!button) return;
-  if (!await appConfirm({ title: 'Опубликовать снова?', message: 'Центр создаст новое Telegram-сообщение только для этого удалённого перехвата. Сообщения других участников затронуты не будут.', confirmLabel: 'Опубликовать' })) return;
+  const unknownOutcome = button.dataset.republishUnknown === 'true';
+  if (unknownOutcome) {
+    const part = Number(button.dataset.unconfirmedPart);
+    if (!await appConfirm({ title: 'Сначала проверьте тему Telegram', message: `Проверьте отсутствие именно спорной части ${part} перехвата. Ранее подтверждённые части могут оставаться в теме. Сверьте последнюю принятую Центром редакцию с EAVC. Если спорная часть уже есть или новая редакция ещё в пути, отмените действие.`, confirmLabel: 'Проверил, части нет', danger: true })) return;
+    if (!await appConfirm({ title: 'Подтвердите повторную публикацию', message: `Вы подтверждаете, что части ${part} в нужной теме Telegram нет. Центр продолжит публикацию последней принятой им редакции EAVC.`, confirmLabel: 'Опубликовать', danger: true })) return;
+  } else if (!await appConfirm({ title: 'Опубликовать снова?', message: 'Центр создаст новое Telegram-сообщение только для этого удалённого перехвата. Сообщения других участников затронуты не будут.', confirmLabel: 'Опубликовать' })) return;
   setButtonBusy(button, true, 'Отправляем…');
   try {
     const url = `/api/deliveries/${encodeURIComponent(button.dataset.eventId)}/destinations/${encodeURIComponent(button.dataset.destinationId)}/blocks/${encodeURIComponent(button.dataset.republishBlock)}/republish`;
     await post(url, {});
     closeDialog('historyItemDialog');
     await openHistory(historyKind, historyOffset, true);
-    notify('Перехват опубликован заново и привязан к новому message_id.', true);
+    notify(unknownOutcome ? 'Центр обработал ручную публикацию. Результат ищите в «Доставлено» по последней принятой редакции; прежняя запись остаётся для разбора.' : 'Перехват опубликован заново и привязан к новому message_id.', true);
   } catch (error) {
-    notify(error.message);
+    notify(unknownOutcome ? `${error.message} Проверьте, что блок существует в последней принятой Центром редакции и маршрут по-прежнему ведёт в эту тему.` : error.message);
     setButtonBusy(button, false);
   }
 });

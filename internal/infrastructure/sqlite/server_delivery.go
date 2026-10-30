@@ -411,6 +411,38 @@ func (store *ServerStore) DeliveryJobByID(ctx context.Context, eventID, destinat
 	return job, nil
 }
 
+// CurrentDeliveryJobForRepublish связывает историческую карточку с последней
+// принятой редакцией того же блока через устойчивый барьер ревизий. Старый
+// текст карточки никогда не становится новой публикацией Telegram.
+func (store *ServerStore) CurrentDeliveryJobForRepublish(
+	ctx context.Context, eventID, destinationID string,
+) (application.DeliveryJob, error) {
+	var currentEventID string
+	err := store.db.QueryRowContext(ctx, `
+		SELECT current.event_id
+		FROM delivery_jobs selected_job
+		JOIN received_events selected ON selected.event_id=selected_job.event_id
+		JOIN source_revision_barriers current
+			ON current.client_id=selected.client_id AND current.source_uuid=selected.source_uuid
+		WHERE selected_job.event_id=? AND selected_job.destination_id=?`,
+		eventID, destinationID,
+	).Scan(&currentEventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return application.DeliveryJob{}, errors.New("выбранная доставка или актуальная редакция перехвата не найдена")
+	}
+	if err != nil {
+		return application.DeliveryJob{}, fmt.Errorf("найти актуальную редакцию перехвата: %w", err)
+	}
+	job, err := store.DeliveryJobByID(ctx, currentEventID, destinationID)
+	if err != nil {
+		return application.DeliveryJob{}, fmt.Errorf("актуальная редакция больше не направляется выбранному получателю: %w", err)
+	}
+	if job.Event.ID != currentEventID || job.Delivery.Destination.ID != destinationID {
+		return application.DeliveryJob{}, errors.New("актуальное задание доставки повреждено")
+	}
+	return job, nil
+}
+
 // ReplaceDeliveryReceipt сохраняет результат явной повторной публикации, не
 // возвращая историческое задание в общую очередь.
 func (store *ServerStore) ReplaceDeliveryReceipt(ctx context.Context, eventID, destinationID string, at time.Time, receipt application.DeliveryReceipt) error {
@@ -455,6 +487,27 @@ func (store *ServerStore) MarkDeliveredWithReceipt(
 		return fmt.Errorf("защитить результат доставки: %w", err)
 	}
 	return store.markDelivered(ctx, eventID, destinationID, at, protected)
+}
+
+// SavePartialDeliveryReceipt сохраняет уже известные внешние ID и признаки
+// неопределённого исхода, но оставляет задание незавершённым. Последующее
+// MarkDeliveryRetry или MarkDeliveryFailed не очищает эту квитанцию.
+func (store *ServerStore) SavePartialDeliveryReceipt(
+	ctx context.Context, eventID, destinationID string, receipt application.DeliveryReceipt,
+) error {
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		return fmt.Errorf("кодировать частичный результат доставки: %w", err)
+	}
+	protected, err := protectDatabaseValue(payload)
+	if err != nil {
+		return fmt.Errorf("защитить частичный результат доставки: %w", err)
+	}
+	result, err := store.db.ExecContext(ctx, `
+		UPDATE delivery_jobs SET result_json=?
+		WHERE event_id=? AND destination_id=? AND state='pending'`,
+		protected, eventID, destinationID)
+	return changedExactlyOnce(result, err, "сохранить частичный результат доставки")
 }
 
 func (store *ServerStore) markDelivered(

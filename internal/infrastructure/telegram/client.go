@@ -117,6 +117,8 @@ func (limiter *sendLimiter) blockFor(delay time.Duration) {
 type rateLimitError struct {
 	after       time.Duration
 	description string
+	httpStatus  int
+	apiCode     int
 }
 
 func (err *rateLimitError) Error() string {
@@ -131,6 +133,7 @@ func (err *rateLimitError) RetryAfter() time.Duration { return err.after }
 type apiError struct {
 	code        int
 	description string
+	httpStatus  int
 }
 
 // sendAttemptError отличает отмену до HTTP-запроса от неопределённого исхода
@@ -357,6 +360,11 @@ func (client *Client) SendHTML(ctx context.Context, chatID, threadID int64, text
 		beforeSend := errors.As(err, &failure) && failure.definitelyNotSent
 		return Message{}, &sendAttemptError{attempted: !beforeSend, err: err}
 	}
+	if message.MessageID <= 0 || (message.Chat.ID != 0 && message.Chat.ID != chatID) {
+		return Message{}, &sendAttemptError{attempted: true, err: errors.New(
+			"Telegram подтвердил отправку без корректного message_id или чата; исход публикации неизвестен",
+		)}
+	}
 	return message, err
 }
 
@@ -493,19 +501,21 @@ func (client *Client) do(request *http.Request, output any) error {
 		if description == "" {
 			description = "неизвестная ошибка"
 		}
-		if response.StatusCode == http.StatusTooManyRequests || result.ErrorCode == http.StatusTooManyRequests {
+		if response.StatusCode == http.StatusTooManyRequests ||
+			(response.StatusCode < http.StatusInternalServerError && result.ErrorCode == http.StatusTooManyRequests) {
 			after := time.Duration(result.Parameters.RetryAfter) * time.Second
 			if after <= 0 {
 				after = 5 * time.Second
 			}
 			client.sends.blockFor(after + time.Second)
-			return &rateLimitError{after: after, description: description}
+			return &rateLimitError{after: after, description: description,
+				httpStatus: response.StatusCode, apiCode: result.ErrorCode}
 		}
 		code := result.ErrorCode
 		if code == 0 {
 			code = response.StatusCode
 		}
-		return &apiError{code: code, description: description}
+		return &apiError{code: code, description: description, httpStatus: response.StatusCode}
 	}
 	if output != nil && len(result.Result) != 0 {
 		if err := json.Unmarshal(result.Result, output); err != nil {

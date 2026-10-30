@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"intercept/internal/application"
+	"intercept/internal/domain"
 )
 
 func openObservabilityStore(t *testing.T) (*ServerStore, context.Context) {
@@ -240,6 +241,71 @@ func TestServerHistoryClearDoesNotDeletePendingQueue(t *testing.T) {
 	pending, err = store.HistoryPage(ctx, "pending", 30, 0, time.Now().UTC().Add(2*time.Second))
 	if err != nil || pending.Total != 1 {
 		t.Fatalf("очистка истории затронула очередь: %+v err=%v", pending, err)
+	}
+}
+
+func TestExpiredHistoryShowsUnknownTelegramOutcomeWithoutInventingMessageID(t *testing.T) {
+	t.Parallel()
+	store, ctx := openObservabilityStore(t)
+	rules := serverTestRules()
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	event := serverTestEvent()
+	event.SourceBlockUUID = "block-1"
+	event.Blocks = []domain.ContentBlock{{UUID: "block-1", Key: "10:15", Text: "10:15\n/1/ Тест"}}
+	event.Content = event.Blocks[0].Text
+	event.ContentDigestVersion = domain.ContentDigestVersionCurrent
+	event.ContentDigest = event.CanonicalContentDigest()
+	plan, err := rules.Resolve(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted, err := store.Accept(ctx, event, plan); err != nil || !accepted {
+		t.Fatalf("accept=%v err=%v", accepted, err)
+	}
+	now := time.Now().UTC()
+	unknown := "исход предыдущей отправки Telegram неизвестен; проверьте тему и разрешайте повторную публикацию только если сообщения нет"
+	if err := store.MarkDeliveryRetry(ctx, event.ID, "a", now.Add(time.Second), unknown); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.HistoryPage(ctx, "pending", 30, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundPendingTelegram := false
+	for _, item := range pending.Items {
+		if item.DestinationID == "a" {
+			foundPendingTelegram = true
+			if !item.TelegramOutcomeUnknown || len(item.TelegramIDs) != 0 {
+				t.Fatalf("ожидающая проверка исхода Telegram не отмечена или получила вымышленный ID: %+v", item)
+			}
+		}
+	}
+	if !foundPendingTelegram {
+		t.Fatal("ожидающая Telegram-доставка исчезла из истории")
+	}
+	if err := store.MarkDeliveryFailed(ctx, event.ID, "a", now, unknown); err != nil {
+		t.Fatal(err)
+	}
+	// Даже совпадающий текст ошибки у Word-маршрута не должен открывать
+	// Telegram-действие или создавать ложную ссылку на message_id.
+	if err := store.MarkDeliveryFailed(ctx, event.ID, "w", now, unknown); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.HistoryPage(ctx, "expired", 30, 0, now.Add(time.Second))
+	if err != nil || page.Total != 2 {
+		t.Fatalf("история неудачных доставок: %+v err=%v", page, err)
+	}
+	for _, item := range page.Items {
+		if item.DestinationID == "a" {
+			if !item.TelegramOutcomeUnknown || len(item.TelegramIDs) != 0 || len(item.TelegramURLs) != 0 ||
+				len(item.BlockUUIDs) != 1 || item.BlockUUIDs[0] != "block-1" || item.TelegramTopic != 2 {
+				t.Fatalf("неопределённая Telegram-публикация скрыта или снабжена вымышленным ID: %+v", item)
+			}
+		} else if item.DestinationID == "w" && item.TelegramOutcomeUnknown {
+			t.Fatalf("Word-доставка ошибочно помечена как Telegram: %+v", item)
+		}
 	}
 }
 

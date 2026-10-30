@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"intercept/internal/application"
@@ -54,6 +55,7 @@ type destinationBlock struct {
 	Suppressed           bool      `json:"suppressed,omitempty"`
 	SuppressedAt         string    `json:"suppressed_at,omitempty"`
 	SuppressedReason     string    `json:"suppressed_reason,omitempty"`
+	UnknownOutcome       bool      `json:"unknown_outcome,omitempty"`
 	SourceDeleted        bool      `json:"source_deleted,omitempty"`
 	SendPending          bool      `json:"send_pending,omitempty"`
 	SendPendingIndex     int       `json:"send_pending_index,omitempty"`
@@ -89,6 +91,12 @@ func loadDestinationState(path string) (destinationState, error) {
 	}
 	for key, item := range current.Items {
 		migrateTelegramRecordTombstone(&current, key, &item, legacyTime)
+		for blockKey, block := range item.Blocks {
+			if block.SendPending || telegramLegacyUnknownOutcome(block.SuppressedReason) {
+				block.UnknownOutcome = true
+				item.Blocks[blockKey] = block
+			}
+		}
 		if item.UpdatedAt.IsZero() {
 			item.UpdatedAt = legacyTime
 		}
@@ -165,11 +173,15 @@ func telegramItemInactive(item destinationItem) bool {
 		return true
 	}
 	for _, block := range item.Blocks {
-		if len(block.MessageIDs) > 0 || block.Recovering || (!block.SourceDeleted && !block.Suppressed) {
+		if len(block.MessageIDs) > 0 || block.Recovering || block.UnknownOutcome || block.SendPending || (!block.SourceDeleted && !block.Suppressed) {
 			return false
 		}
 	}
 	return true
+}
+
+func telegramLegacyUnknownOutcome(reason string) bool {
+	return strings.Contains(reason, "исход") && strings.Contains(reason, "неизвестен")
 }
 
 func enforceTelegramActiveItemLimit(current destinationState, limit int) error {
