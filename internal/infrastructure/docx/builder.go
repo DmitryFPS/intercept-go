@@ -81,6 +81,25 @@ func ValidateTemplate(templatePath string) error {
 	if err != nil {
 		return err
 	}
+	return validateTemplateParts(parts)
+}
+
+// ValidateTemplateBytes checks the exact bytes that will be downloaded. Reading
+// and validating the path separately would allow the file to change between
+// the check and the response.
+func ValidateTemplateBytes(payload []byte) error {
+	archive, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
+	if err != nil {
+		return fmt.Errorf("открыть шаблон Word: %w", err)
+	}
+	parts, _, err := readTemplateFiles(archive.File)
+	if err != nil {
+		return err
+	}
+	return validateTemplateParts(parts)
+}
+
+func validateTemplateParts(parts map[string][]byte) error {
 	if err := validateSafeTemplateParts(parts); err != nil {
 		return err
 	}
@@ -97,15 +116,12 @@ func Build(templatePath string, document Document) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateSafeTemplateParts(parts); err != nil {
+	if err := validateTemplateParts(parts); err != nil {
 		return nil, err
 	}
 	original, exists := parts["word/document.xml"]
 	if !exists {
 		return nil, errors.New("шаблон Word не содержит word/document.xml")
-	}
-	if err := validateTemplateXML(string(original)); err != nil {
-		return nil, err
 	}
 	rendered, err := renderTemplateXML(string(original), document)
 	if err != nil {
@@ -138,13 +154,17 @@ func readTemplate(templatePath string) (map[string][]byte, []string, error) {
 		return nil, nil, fmt.Errorf("открыть шаблон Word: %w", err)
 	}
 	defer archive.Close()
-	if len(archive.File) > maxTemplateParts {
-		return nil, nil, fmt.Errorf("шаблон Word содержит слишком много частей: %d", len(archive.File))
+	return readTemplateFiles(archive.File)
+}
+
+func readTemplateFiles(files []*zip.File) (map[string][]byte, []string, error) {
+	if len(files) > maxTemplateParts {
+		return nil, nil, fmt.Errorf("шаблон Word содержит слишком много частей: %d", len(files))
 	}
-	parts := make(map[string][]byte, len(archive.File))
-	order := make([]string, 0, len(archive.File))
+	parts := make(map[string][]byte, len(files))
+	order := make([]string, 0, len(files))
 	var totalSize uint64
-	for _, file := range archive.File {
+	for _, file := range files {
 		name, err := safeDOCXPartName(file.Name)
 		if err != nil {
 			return nil, nil, err

@@ -130,6 +130,37 @@ func TestValidateTemplateRejectsMacroAndEmbeddedParts(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateBytesUsesSameSafetyChecksAsFile(t *testing.T) {
+	valid, err := os.ReadFile(filepath.Join("..", "..", "..", "assets", "word_template.docx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateTemplateBytes(valid); err != nil {
+		t.Fatalf("шаблон поставки отклонён при проверке байтов: %v", err)
+	}
+	for name, replacements := range map[string]map[string][]byte{
+		"macro": {"word/vbaProject.bin": []byte("active")},
+		"external relationship": {
+			"word/_rels/document.xml.rels": []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="https://example.invalid/template.dotm" TargetMode="External"/></Relationships>`),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "modified.docx")
+			createModifiedTemplate(t, path, replacements)
+			payload, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateTemplateBytes(payload); err == nil {
+				t.Fatal("небезопасный шаблон принят при проверке байтов")
+			}
+		})
+	}
+	if err := ValidateTemplateBytes([]byte("not a DOCX")); err == nil {
+		t.Fatal("повреждённый DOCX принят при проверке байтов")
+	}
+}
+
 func TestValidateTemplateRejectsActiveWordFields(t *testing.T) {
 	for name, fragment := range map[string]string{
 		"simple":    `<w:p><w:fldSimple w:instr="INCLUDEPICTURE http://example.invalid/x"/></w:p>`,

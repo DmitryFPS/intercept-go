@@ -37,6 +37,112 @@ func TestRuleDestinationKindMustMatchConfiguredTransport(t *testing.T) {
 	}
 }
 
+func TestDestinationWordTemplateRejectsChangedUnsafeFile(t *testing.T) {
+	original, err := os.ReadFile(filepath.Join("..", "..", "assets", "word_template.docx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "selected.docx")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{config: config.Server{Destinations: map[string]config.DestinationConfig{
+		"word": {Kind: domain.DestinationWord, Template: path},
+	}}}
+	got, filename, err := server.DestinationWordTemplate("word")
+	if err != nil || filename != "selected.docx" || !bytes.Equal(got, original) {
+		t.Fatalf("первоначальный безопасный шаблон не скачан: filename=%q err=%v", filename, err)
+	}
+
+	for name, replacements := range map[string]map[string][]byte{
+		"macro": {"word/vbaProject.bin": []byte("active")},
+		"external relationship": {
+			"word/_rels/document.xml.rels": []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="https://example.invalid/template.dotm" TargetMode="External"/></Relationships>`),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := modifiedWordTemplateForDownloadTest(t, original, replacements)
+			if err := os.WriteFile(path, changed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			payload, _, err := server.DestinationWordTemplate("word")
+			if err == nil || len(payload) != 0 {
+				t.Fatalf("заменённый небезопасный шаблон выдан: bytes=%d err=%v", len(payload), err)
+			}
+		})
+	}
+}
+
+func TestDestinationWordTemplateRetains64MiBDownloadLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.docx")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(64*1024*1024 + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{config: config.Server{Destinations: map[string]config.DestinationConfig{
+		"word": {Kind: domain.DestinationWord, Template: path},
+	}}}
+	if payload, _, err := server.DestinationWordTemplate("word"); err == nil || len(payload) != 0 || !strings.Contains(err.Error(), "слишком велик") {
+		t.Fatalf("ограничение 64 МиБ не соблюдено: bytes=%d err=%v", len(payload), err)
+	}
+}
+
+func modifiedWordTemplateForDownloadTest(t *testing.T, original []byte, replacements map[string][]byte) []byte {
+	t.Helper()
+	archive, err := zip.NewReader(bytes.NewReader(original), int64(len(original)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	written := make(map[string]bool, len(archive.File))
+	for _, item := range archive.File {
+		payload, replaced := replacements[item.Name]
+		if !replaced {
+			reader, err := item.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err = io.ReadAll(reader)
+			reader.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		part, err := writer.Create(item.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+		written[item.Name] = true
+	}
+	for name, payload := range replacements {
+		if written[name] {
+			continue
+		}
+		part, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
+}
+
 func TestServerUpdateValidationDoesNotStartProcessing(t *testing.T) {
 	server, err := NewServer(context.Background(), t.TempDir(), "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {

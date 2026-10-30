@@ -1169,6 +1169,9 @@ func (server *Server) DestinationWordTemplate(id string) ([]byte, string, error)
 	if len(payload) > 64*1024*1024 {
 		return nil, "", errors.New("шаблон Word слишком велик для скачивания")
 	}
+	if err := docx.ValidateTemplateBytes(payload); err != nil {
+		return nil, "", fmt.Errorf("проверить скачиваемый шаблон Word: %w", err)
+	}
 	return payload, filepath.Base(destination.Template), nil
 }
 
