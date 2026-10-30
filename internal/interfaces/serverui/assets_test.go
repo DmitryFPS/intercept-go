@@ -30,6 +30,47 @@ func TestRouteRecipientFilterAssetsStayConnected(t *testing.T) {
 	}
 }
 
+func TestWordTemplateDownloadUsesAuthenticatedAPI(t *testing.T) {
+	index, err := assets.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(index)
+	javascript := string(application)
+	if !strings.Contains(html, `<button id="downloadWordTemplate" type="button"`) || strings.Contains(html, `<a id="downloadWordTemplate"`) {
+		t.Error("шаблон Word должен скачиваться кнопкой через авторизованный запрос, а не прямой ссылкой")
+	}
+	if strings.Contains(javascript, "download.href =") {
+		t.Error("прямая ссылка на шаблон Word обходит заголовок доступа")
+	}
+	start := strings.Index(javascript, "$('downloadWordTemplate').addEventListener('click', async event => {")
+	if start < 0 {
+		t.Fatal("обработчик скачивания шаблона Word не найден")
+	}
+	end := strings.Index(javascript[start:], "\n});")
+	if end < 0 {
+		t.Fatal("не найден конец обработчика скачивания шаблона Word")
+	}
+	handler := javascript[start : start+end]
+	for _, fragment := range []string{
+		"if (!id) return;",
+		"downloadAPI(`/api/destinations/${encodeURIComponent(id)}/word-template`",
+		"notify(error.message)",
+		"setButtonBusy(button, false)",
+	} {
+		if !strings.Contains(handler, fragment) {
+			t.Errorf("авторизованное скачивание шаблона Word неполно: нет %q", fragment)
+		}
+	}
+	if !strings.Contains(javascript, "headers: {'X-EAVC-Access': accessToken}") {
+		t.Error("общая функция скачивания не передаёт заголовок доступа")
+	}
+}
+
 func TestDashboardHistoryCardsStayConnected(t *testing.T) {
 	index, err := assets.ReadFile("assets/index.html")
 	if err != nil {

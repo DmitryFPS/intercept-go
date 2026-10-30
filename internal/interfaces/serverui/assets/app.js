@@ -967,13 +967,28 @@ function showDestinationDialog(id = '') {
   $('wordTemplateMarkers').textContent = templateDefaults.word_markers.join(', ');
   const download = $('downloadWordTemplate');
   download.classList.toggle('hidden', !item || item.kind !== 'word');
-  download.href = item && item.kind === 'word' ? `/api/destinations/${encodeURIComponent(id)}/word-template` : '#';
+  download.dataset.destinationId = item?.kind === 'word' ? id : '';
+  download.dataset.filename = item?.kind === 'word' ? String(item.template || '').split(/[\\/]/).pop() || 'word_template.docx' : '';
   $('destinationDialogTitle').textContent = item ? 'Изменить получателя' : 'Новый получатель';
   updateDestinationKind();
   openDialog('destinationDialog');
 }
 
 $('addDestination').addEventListener('click', () => showDestinationDialog());
+
+$('downloadWordTemplate').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  const id = button.dataset.destinationId;
+  if (!id) return;
+  setButtonBusy(button, true, 'Скачиваем…');
+  try {
+    await downloadAPI(`/api/destinations/${encodeURIComponent(id)}/word-template`, button.dataset.filename || 'word_template.docx');
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
 
 $('restoreTelegramTemplate').addEventListener('click', () => {
   $('destinationForm').elements.message_template.value = templateDefaults.telegram;
