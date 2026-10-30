@@ -9,12 +9,15 @@ import (
 	"hash/fnv"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -140,6 +143,16 @@ type sendAttemptError struct {
 
 func (err *sendAttemptError) Error() string { return err.err.Error() }
 func (err *sendAttemptError) Unwrap() error { return err.err }
+
+// requestFailure хранит только очищенный текст ошибки: исходная ошибка http.Client
+// может содержать URL с токеном бота. Флаг выставляется лишь когда соединение
+// не удалось установить и заголовки запроса ни разу не были отправлены.
+type requestFailure struct {
+	message           string
+	definitelyNotSent bool
+}
+
+func (err *requestFailure) Error() string { return err.message }
 
 func (err *apiError) Error() string {
 	return fmt.Sprintf("telegram: %s (код %d)", err.description, err.code)
@@ -340,7 +353,9 @@ func (client *Client) SendHTML(ctx context.Context, chatID, threadID int64, text
 	var message Message
 	err := client.callJSON(ctx, "sendMessage", request, &message)
 	if err != nil {
-		return Message{}, &sendAttemptError{attempted: true, err: err}
+		var failure *requestFailure
+		beforeSend := errors.As(err, &failure) && failure.definitelyNotSent
+		return Message{}, &sendAttemptError{attempted: !beforeSend, err: err}
 	}
 	return message, err
 }
@@ -449,9 +464,20 @@ func (client *Client) callJSON(ctx context.Context, method string, input any, ou
 }
 
 func (client *Client) do(request *http.Request, output any) error {
+	var headersWritten atomic.Bool
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+		WroteHeaders: func() { headersWritten.Store(true) },
+	}))
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("telegram %s: %s", methodName(request.URL.Path), client.safeError(err))
+		var dnsError *net.DNSError
+		var networkError *net.OpError
+		connectionFailed := errors.As(err, &dnsError) ||
+			(errors.As(err, &networkError) && networkError.Op == "dial")
+		return &requestFailure{
+			message:           fmt.Sprintf("telegram %s: %s", methodName(request.URL.Path), client.safeError(err)),
+			definitelyNotSent: connectionFailed && !headersWritten.Load(),
+		}
 	}
 	defer response.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, 4*1024*1024))
