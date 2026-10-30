@@ -458,6 +458,52 @@ func TestClientServiceSkipsInvalidRowAndQueuesFollowingRecord(t *testing.T) {
 	}
 }
 
+func TestClientServiceIsolatesContractErrorAndContinuesCollection(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	queue := newMemoryClientState()
+	source := &memorySource{items: []SourceItem{
+		{
+			Record:   domain.SourceRecord{ID: 1, UUID: "incompatible", UpdatedAt: "2026-10-30 12:00:00"},
+			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+			Content: "12.00\n-Текст", ObservedAt: now, ContractError: "несовместимый контракт блока",
+		},
+		{
+			Record:   domain.SourceRecord{ID: 2, UUID: "valid-2", UpdatedAt: "2026-10-30 12:00:01"},
+			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+			Content: "12.01\n-Следующий перехват", ObservedAt: now,
+		},
+		{
+			Record:   domain.SourceRecord{ID: 3, UUID: "valid-3", UpdatedAt: "2026-10-30 12:00:02"},
+			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+			Content: "12.02\n-Ещё один перехват", ObservedAt: now,
+		},
+	}}
+	service := ClientService{
+		ClientID: "textile", Source: source, Queue: queue, State: queue, Sender: &memorySender{},
+		KeyID: "key", Key: make([]byte, 32), BatchSize: 2, CatchUpExisting: true,
+		Now: func() time.Time { return now },
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("contract error blocked following record: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 1 || queue.events[0].Source.ID != 2 {
+		t.Fatalf("contract error was queued or following record was lost: %#v", queue.events)
+	}
+	if cursor := queue.cursors[eavcCursorName]; cursor.ID != 2 {
+		t.Fatalf("cursor did not advance past contract error: %+v", cursor)
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("collection stalled after contract error: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 2 || queue.events[1].Source.ID != 3 {
+		t.Fatalf("next batch was not queued: %#v", queue.events)
+	}
+	if cursor := queue.cursors[eavcCursorName]; cursor.ID != 3 {
+		t.Fatalf("cursor did not advance to next batch: %+v", cursor)
+	}
+}
+
 // Ответ на проверку связи сохраняется отдельно и не пытается подтвердить
 // отсутствующее рабочее событие в очереди.
 func TestClientServiceStoresTransportProbeSeparately(t *testing.T) {
