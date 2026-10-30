@@ -42,3 +42,65 @@ func TestValidateTelegramRepublishBlockRequiresActiveCurrentBlock(t *testing.T) 
 		})
 	}
 }
+
+func TestValidateTelegramUnknownRepublishConfirmation(t *testing.T) {
+	t.Parallel()
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{ThreadID: 42}}
+	receipt := application.DeliveryReceipt{
+		ThreadID: 42,
+		Blocks: []application.DeliveryBlockReceipt{{
+			BlockUUID: "block-a", UnknownOutcome: true, UnconfirmedPart: 2,
+			ExpectedMessageCount: 3, MessageIDs: []int64{801}, SendAttemptToken: "attempt-a",
+		}},
+	}
+	confirmed := TelegramRepublishConfirmation{
+		CheckedCurrentRevision: true, ConfirmedPartAbsent: true, UnconfirmedPart: 2,
+		SendAttemptToken: "attempt-a",
+	}
+	part, err := validateTelegramUnknownRepublishConfirmation(receipt, delivery, "block-a", confirmed)
+	if err != nil || part != 2 {
+		t.Fatalf("сверенная спорная часть отклонена: part=%d err=%v", part, err)
+	}
+	for name, change := range map[string]func(*application.DeliveryReceipt, *domain.PlannedDelivery, *TelegramRepublishConfirmation){
+		"редакция не сверена": func(_ *application.DeliveryReceipt, _ *domain.PlannedDelivery, c *TelegramRepublishConfirmation) {
+			c.CheckedCurrentRevision = false
+		},
+		"отсутствие не подтверждено": func(_ *application.DeliveryReceipt, _ *domain.PlannedDelivery, c *TelegramRepublishConfirmation) {
+			c.ConfirmedPartAbsent = false
+		},
+		"другая часть": func(_ *application.DeliveryReceipt, _ *domain.PlannedDelivery, c *TelegramRepublishConfirmation) {
+			c.UnconfirmedPart = 1
+		},
+		"другая попытка": func(_ *application.DeliveryReceipt, _ *domain.PlannedDelivery, c *TelegramRepublishConfirmation) {
+			c.SendAttemptToken = "attempt-before"
+		},
+		"нет ожидаемого количества": func(r *application.DeliveryReceipt, _ *domain.PlannedDelivery, _ *TelegramRepublishConfirmation) {
+			r.Blocks[0].ExpectedMessageCount = 0
+		},
+		"потерян подтверждённый ID": func(r *application.DeliveryReceipt, _ *domain.PlannedDelivery, _ *TelegramRepublishConfirmation) {
+			r.Blocks[0].MessageIDs = nil
+		},
+		"маршрут изменён": func(_ *application.DeliveryReceipt, d *domain.PlannedDelivery, _ *TelegramRepublishConfirmation) {
+			d.Decision.ThreadID = 43
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			currentReceipt, currentDelivery, currentConfirmation := receipt, delivery, confirmed
+			currentReceipt.Blocks = append([]application.DeliveryBlockReceipt(nil), receipt.Blocks...)
+			change(&currentReceipt, &currentDelivery, &currentConfirmation)
+			if _, err := validateTelegramUnknownRepublishConfirmation(
+				currentReceipt, currentDelivery, "block-a", currentConfirmation,
+			); err == nil {
+				t.Fatal("непроверенная или изменившаяся публикация не должна разрешаться")
+			}
+		})
+	}
+	receipt.Blocks[0].UnknownOutcome = false
+	if _, err := validateTelegramUnknownRepublishConfirmation(receipt, delivery, "block-a", confirmed); err == nil {
+		t.Fatal("подтверждение старой неопределённой попытки принято после смены состояния")
+	}
+	part, err = validateTelegramUnknownRepublishConfirmation(receipt, delivery, "block-a", TelegramRepublishConfirmation{})
+	if err != nil || part != 0 {
+		t.Fatalf("известное ручное удаление не требует подтверждений спорной части: part=%d err=%v", part, err)
+	}
+}

@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -316,6 +318,7 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 			stored.SendPending = false
 			stored.SendPendingIndex = 0
 			stored.SendPendingAt = ""
+			stored.SendAttemptID = ""
 			stored.Sequence = block.Sequence
 			stored.ThreadID = threadID
 			storeTelegramRevision(&stored, event)
@@ -327,11 +330,17 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 			stored.SendPending = pending
 			stored.SendPendingIndex = index
 			if pending {
+				var attemptID [16]byte
+				if _, err := rand.Read(attemptID[:]); err != nil {
+					return fmt.Errorf("создать ID попытки отправки Telegram: %w", err)
+				}
+				stored.SendAttemptID = hex.EncodeToString(attemptID[:])
 				stored.SendPendingAt = time.Now().UTC().Format(time.RFC3339Nano)
 				stored.Hash = renderHash
 				stored.SourceHash = baseHash
 			} else {
 				stored.SendPendingAt = ""
+				stored.SendAttemptID = ""
 			}
 			stored.Sequence = block.Sequence
 			stored.ThreadID = threadID
@@ -466,6 +475,7 @@ func (destination *Destination) DeliveryReceipt(
 			ExpectedMessageCount: expectedMessageCount, Complete: complete,
 			Suppressed: block.Suppressed, SuppressedReason: block.SuppressedReason,
 			UnknownOutcome: unknownOutcome, UnconfirmedPart: unconfirmedPart,
+			SendAttemptToken: telegramUnknownSendToken(block),
 		})
 	}
 	if scoped := strings.TrimSpace(event.SourceBlockUUID); scoped != "" && len(blockReceipts) == 0 {
@@ -680,6 +690,15 @@ func compactTelegramTombstones(blocks map[string]destinationBlock) map[string]de
 // message_id из ответа Telegram; соседние и пользовательские сообщения не
 // участвуют в выборе.
 func (destination *Destination) AllowRepublish(event domain.Event, blockUUID string) (bool, error) {
+	return destination.AllowRepublishWithConfirmation(event, blockUUID, 0, "")
+}
+
+// AllowRepublishWithConfirmation разрешает ещё не изолированную отправку только
+// после сверки оператором конкретной спорной части. Нулевой номер сохраняет
+// прежний запрет на снятие SendPending без подтверждения.
+func (destination *Destination) AllowRepublishWithConfirmation(
+	event domain.Event, blockUUID string, confirmedAbsentPart int, confirmedAttemptToken string,
+) (bool, error) {
 	blockUUID = strings.TrimSpace(blockUUID)
 	if blockUUID == "" {
 		return false, errors.New("не задан UUID блока для повторной публикации")
@@ -700,7 +719,21 @@ func (destination *Destination) AllowRepublish(event domain.Event, blockUUID str
 		return false, err
 	}
 	block, exists := item.Blocks[blockUUID]
-	if !exists || block.SendPending || (!block.Suppressed && (len(block.MessageIDs) > 0 || len(block.DeletedMessageIDs) == 0)) {
+	if !exists {
+		return false, nil
+	}
+	if confirmedAbsentPart > 0 && (!block.UnknownOutcome ||
+		confirmedAbsentPart != block.SendPendingIndex+1 ||
+		block.ExpectedMessageCount < confirmedAbsentPart ||
+		len(block.MessageIDs) != block.SendPendingIndex ||
+		confirmedAttemptToken == "" || confirmedAttemptToken != telegramUnknownSendToken(block)) {
+		return false, nil
+	}
+	if confirmedAbsentPart < 0 || (block.SendPending && confirmedAbsentPart == 0) {
+		return false, nil
+	}
+	if !block.SendPending && !block.Suppressed &&
+		(len(block.MessageIDs) > 0 || len(block.DeletedMessageIDs) == 0) {
 		return false, nil
 	}
 	block.Suppressed = false
@@ -719,6 +752,7 @@ func (destination *Destination) AllowRepublish(event domain.Event, blockUUID str
 	block.SendPending = false
 	block.SendPendingIndex = 0
 	block.SendPendingAt = ""
+	block.SendAttemptID = ""
 	item.Blocks[blockUUID] = block
 	if err := destination.saveItem(itemKey, item, false); err != nil {
 		return false, err
@@ -730,6 +764,17 @@ func (destination *Destination) AllowRepublish(event domain.Event, blockUUID str
 		)
 	}
 	return true, nil
+}
+
+func telegramUnknownSendToken(block destinationBlock) string {
+	if !block.UnknownOutcome && !block.SendPending {
+		return ""
+	}
+	if block.SendAttemptID != "" {
+		return block.SendAttemptID
+	}
+	// До появления случайного ID маркер времени уже фиксировал попытку до POST.
+	return block.SendPendingAt
 }
 
 func eventBlocks(event domain.Event) []domain.ContentBlock {

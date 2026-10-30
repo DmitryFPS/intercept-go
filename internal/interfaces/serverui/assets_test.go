@@ -141,6 +141,7 @@ func TestUnknownTelegramOutcomeHasManualVerificationWithoutInventedMessageID(t *
 		"!unknownOutcome",
 		"item.telegram_blocks || []",
 		"data-republish-unknown",
+		"data-send-attempt-token",
 		"Сверьте последнюю принятую Центром редакцию с EAVC",
 		"Если спорная часть уже есть, не публикуйте её снова",
 		"Проверил, части нет",
@@ -149,6 +150,10 @@ func TestUnknownTelegramOutcomeHasManualVerificationWithoutInventedMessageID(t *
 		"block.unconfirmed_part",
 		"block.expected_message_count",
 		"confirmed.length === index - 1",
+		"checked_current_revision: true",
+		"confirmed_part_absent: true",
+		"unconfirmed_part: unconfirmedPart",
+		"send_attempt_token: button.dataset.sendAttemptToken",
 		"Сведения о частях недоступны. Ручная публикация отключена",
 		"Результат ищите в «Доставлено»",
 	} {

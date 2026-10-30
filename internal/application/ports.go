@@ -179,6 +179,7 @@ type DeliveryBlockReceipt struct {
 	SuppressedReason     string  `json:"suppressed_reason,omitempty"`
 	UnknownOutcome       bool    `json:"unknown_outcome,omitempty"`
 	UnconfirmedPart      int     `json:"unconfirmed_part,omitempty"`
+	SendAttemptToken     string  `json:"send_attempt_token,omitempty"`
 }
 
 // DeliveryReceiptProvider сообщает подтверждённые внешние ID после успешной

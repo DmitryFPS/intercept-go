@@ -208,6 +208,130 @@ func ambiguousTelegramEvent(id, version, text string, createdAt time.Time) domai
 	}
 }
 
+// Истёкшая задача может показать кнопку до следующего прохода worker: в JSON
+// ещё лежит SendPending. Подтверждённое отсутствие именно этой части должно
+// сработать с первого нажатия, не создавая автоматического дубля до сверки.
+func TestDestinationConfirmedPendingSendRepublishesOnFirstAttempt(t *testing.T) {
+	t.Parallel()
+	destination, accepted := newAmbiguousTelegramDestination(t)
+	t0 := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	event := ambiguousTelegramEvent("event-pending", "2026-10-28 12:00:00", "12.00\n-Проверяемая публикация", t0)
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	if err := destination.Deliver(context.Background(), event, delivery); err == nil {
+		t.Fatal("неоднозначная отправка должна вернуть ошибку")
+	}
+	state, err := loadDestinationState(destination.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block := state.Items["point-01|source-1"].Blocks["block-1"]; !block.SendPending ||
+		!block.UnknownOutcome || block.Suppressed || block.ExpectedMessageCount != 1 || block.SendAttemptID == "" {
+		t.Fatalf("до следующего прохода ожидается только SendPending: %#v", block)
+	}
+	receiptBefore, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(receiptBefore.Blocks) != 1 || receiptBefore.Blocks[0].SendAttemptToken == "" {
+		t.Fatalf("квитанция не связана с попыткой отправки: receipt=%+v err=%v", receiptBefore, err)
+	}
+	attemptToken := receiptBefore.Blocks[0].SendAttemptToken
+	for _, part := range []int{0, 2} {
+		allowed, err := destination.AllowRepublishWithConfirmation(event, "block-1", part, attemptToken)
+		if err != nil || allowed {
+			t.Fatalf("без сверки нужной части барьер снят: part=%d allowed=%v err=%v", part, allowed, err)
+		}
+	}
+	state, err = loadDestinationState(destination.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Items["point-01|source-1"].Blocks["block-1"].SendPending || accepted.Load() != 1 {
+		t.Fatal("отказ без подтверждения изменил SendPending или отправил дубль")
+	}
+	allowed, err := destination.AllowRepublishWithConfirmation(event, "block-1", 1, attemptToken)
+	if err != nil || !allowed {
+		t.Fatalf("подтверждённая часть не разрешена с первого действия: allowed=%v err=%v", allowed, err)
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatalf("повторный проход после ручной публикации: %v", err)
+	}
+	receipt, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(receipt.Blocks) != 1 || !receipt.Blocks[0].Complete ||
+		len(receipt.Blocks[0].MessageIDs) != 1 || receipt.Blocks[0].MessageIDs[0] != 902 || accepted.Load() != 2 {
+		t.Fatalf("ручная публикация должна создать ровно одно новое сообщение: receipt=%+v sends=%d err=%v", receipt, accepted.Load(), err)
+	}
+}
+
+func TestDestinationRejectsReplayedConfirmationAfterAnotherAmbiguousSend(t *testing.T) {
+	t.Parallel()
+	var accepted atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			http.Error(writer, "неожиданный метод", http.StatusNotFound)
+			return
+		}
+		call := accepted.Add(1)
+		if call <= 2 {
+			writer.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(writer, `{"ok":false,"error_code":500,"description":"internal"}`)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"ok": true, "result": map[string]any{"message_id": 903},
+		})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	destination := Destination{API: api, ChatID: -1001, StatePath: filepath.Join(t.TempDir(), "state.json")}
+	t0 := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	event := ambiguousTelegramEvent("event-replay", "2026-10-28 12:00:00", "12.00\n-Проверяемая публикация", t0)
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+	if err := destination.Deliver(context.Background(), event, delivery); err == nil {
+		t.Fatal("первый неоднозначный исход не обнаружен")
+	}
+	first, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(first.Blocks) != 1 || first.Blocks[0].SendAttemptToken == "" {
+		t.Fatalf("нет ID первой попытки: receipt=%+v err=%v", first, err)
+	}
+	firstToken := first.Blocks[0].SendAttemptToken
+	allowed, err := destination.AllowRepublishWithConfirmation(event, "block-1", 1, firstToken)
+	if err != nil || !allowed {
+		t.Fatalf("первая сверка не принята: allowed=%v err=%v", allowed, err)
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err == nil {
+		t.Fatal("второй неоднозначный исход не обнаружен")
+	}
+	second, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(second.Blocks) != 1 || second.Blocks[0].SendAttemptToken == "" ||
+		second.Blocks[0].SendAttemptToken == firstToken {
+		t.Fatalf("повторная попытка не сменила ID: receipt=%+v err=%v", second, err)
+	}
+	allowed, err = destination.AllowRepublishWithConfirmation(event, "block-1", 1, firstToken)
+	if err != nil || allowed || accepted.Load() != 2 {
+		t.Fatalf("повтор старого подтверждения снял новый барьер: allowed=%v sends=%d err=%v", allowed, accepted.Load(), err)
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err == nil || !application.IsPermanentDeliveryError(err) {
+		t.Fatalf("новая попытка не изолирована: %v", err)
+	}
+	allowed, err = destination.AllowRepublishWithConfirmation(event, "block-1", 1, firstToken)
+	if err != nil || allowed || accepted.Load() != 2 {
+		t.Fatalf("старое подтверждение прошло после изоляции: allowed=%v sends=%d err=%v", allowed, accepted.Load(), err)
+	}
+	allowed, err = destination.AllowRepublishWithConfirmation(event, "block-1", 1, second.Blocks[0].SendAttemptToken)
+	if err != nil || !allowed {
+		t.Fatalf("новая сверка отклонена: allowed=%v err=%v", allowed, err)
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil || accepted.Load() != 3 {
+		t.Fatalf("после новой сверки нужна одна отправка: sends=%d err=%v", accepted.Load(), err)
+	}
+}
+
 // После принятого POST даже корректный ответ Bot API 500 не доказывает
 // отсутствие публикации. Перезапуск и новая редакция не вправе создать дубль;
 // оператор может разрешить одну новую отправку после проверки темы Telegram.

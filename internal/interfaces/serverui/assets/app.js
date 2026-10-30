@@ -603,11 +603,13 @@ function openHistoryItem(index) {
     const confirmed = (block.message_ids || []).filter(id => Number.isSafeInteger(id) && id > 0);
     const index = Number(block.unconfirmed_part || 0);
     const total = Number(block.expected_message_count || 0);
-    const canRepublish = item.state === 'expired' && index > 0 && total >= index && confirmed.length === index - 1;
+    const sendAttemptToken = String(block.send_attempt_token || '');
+    const canRepublish = item.state === 'expired' && index > 0 && total >= index && confirmed.length === index - 1 && sendAttemptToken !== '';
     return `
     <div class="telegram-suppressed">
       <span>Неизвестен исход части ${escapeHTML(index || '?')} из ${escapeHTML(total || '?')} · UUID ${escapeHTML(block.block_uuid)}${confirmed.length ? ` · подтверждённые ID: ${confirmed.map(escapeHTML).join(', ')}` : ''}</span>
-      ${canRepublish ? `<button class="button danger" data-republish-block="${escapeHTML(block.block_uuid)}" data-republish-unknown="true" data-unconfirmed-part="${escapeHTML(index)}" data-event-id="${escapeHTML(item.id)}" data-destination-id="${escapeHTML(item.destination_id)}">После проверки опубликовать</button>` : ''}
+      ${sendAttemptToken === '' ? '<span>Маркер попытки недоступен. Ручная публикация отключена до разбора состояния.</span>' : ''}
+      ${canRepublish ? `<button class="button danger" data-republish-block="${escapeHTML(block.block_uuid)}" data-republish-unknown="true" data-unconfirmed-part="${escapeHTML(index)}" data-send-attempt-token="${escapeHTML(sendAttemptToken)}" data-event-id="${escapeHTML(item.id)}" data-destination-id="${escapeHTML(item.destination_id)}">После проверки опубликовать</button>` : ''}
     </div>`;
   }).join('') + suppressedBlocks.map(block => `
     <div class="telegram-suppressed">
@@ -621,20 +623,27 @@ $('historyTelegramLinks').addEventListener('click', async event => {
   const button = event.target.closest('[data-republish-block]');
   if (!button) return;
   const unknownOutcome = button.dataset.republishUnknown === 'true';
+  let unconfirmedPart = 0;
   if (unknownOutcome) {
     const part = Number(button.dataset.unconfirmedPart);
     if (!await appConfirm({ title: 'Сначала проверьте тему Telegram', message: `Проверьте отсутствие именно спорной части ${part} перехвата. Ранее подтверждённые части могут оставаться в теме. Сверьте последнюю принятую Центром редакцию с EAVC. Если спорная часть уже есть или новая редакция ещё в пути, отмените действие.`, confirmLabel: 'Проверил, части нет', danger: true })) return;
     if (!await appConfirm({ title: 'Подтвердите повторную публикацию', message: `Вы подтверждаете, что части ${part} в нужной теме Telegram нет. Центр продолжит публикацию последней принятой им редакции EAVC.`, confirmLabel: 'Опубликовать', danger: true })) return;
+    unconfirmedPart = part;
   } else if (!await appConfirm({ title: 'Опубликовать снова?', message: 'Центр создаст новое Telegram-сообщение только для этого удалённого перехвата. Сообщения других участников затронуты не будут.', confirmLabel: 'Опубликовать' })) return;
   setButtonBusy(button, true, 'Отправляем…');
   try {
     const url = `/api/deliveries/${encodeURIComponent(button.dataset.eventId)}/destinations/${encodeURIComponent(button.dataset.destinationId)}/blocks/${encodeURIComponent(button.dataset.republishBlock)}/republish`;
-    await post(url, {});
+    await post(url, unknownOutcome ? {
+      checked_current_revision: true,
+      confirmed_part_absent: true,
+      unconfirmed_part: unconfirmedPart,
+      send_attempt_token: button.dataset.sendAttemptToken
+    } : {});
     closeDialog('historyItemDialog');
     await openHistory(historyKind, historyOffset, true);
     notify(unknownOutcome ? 'Центр обработал ручную публикацию. Результат ищите в «Доставлено» по последней принятой редакции; прежняя запись остаётся для разбора.' : 'Перехват опубликован заново и привязан к новому message_id.', true);
   } catch (error) {
-    notify(unknownOutcome ? `${error.message} Проверьте, что блок существует в последней принятой Центром редакции и маршрут по-прежнему ведёт в эту тему.` : error.message);
+    notify(unknownOutcome ? `${error.message} Обновите историю, затем повторно сверьте редакцию и отсутствие спорной части в нужной теме.` : error.message);
     setButtonBusy(button, false);
   }
 });

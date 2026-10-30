@@ -400,10 +400,19 @@ func (server *Server) ClearHistory(ctx context.Context, kind string) error {
 	return nil
 }
 
+type TelegramRepublishConfirmation struct {
+	CheckedCurrentRevision bool   `json:"checked_current_revision"`
+	ConfirmedPartAbsent    bool   `json:"confirmed_part_absent"`
+	UnconfirmedPart        int    `json:"unconfirmed_part"`
+	SendAttemptToken       string `json:"send_attempt_token"`
+}
+
 // RepublishTelegramBlock повторно создаёт только явно выбранный удалённый
 // временной блок его актуальной редакции. ID берётся исключительно из ответа
 // бота: сообщения других участников группы не используются как привязка.
-func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, destinationID, blockUUID string) (resultErr error) {
+func (server *Server) RepublishTelegramBlock(
+	ctx context.Context, eventID, destinationID, blockUUID string, confirmation TelegramRepublishConfirmation,
+) (resultErr error) {
 	server.adminMu.Lock()
 	defer server.adminMu.Unlock()
 	// Фоновая доставка и ручная команда используют один файл состояния.
@@ -441,7 +450,15 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 	if !ok {
 		return errors.New("для этой доставки не настроен Telegram")
 	}
-	allowed, err := gateway.AllowRepublish(job.Event, blockUUID)
+	before, err := gateway.DeliveryReceipt(job.Event, job.Delivery)
+	if err != nil {
+		return fmt.Errorf("проверить состояние публикации Telegram: %w", err)
+	}
+	confirmedAbsentPart, err := validateTelegramUnknownRepublishConfirmation(before, job.Delivery, blockUUID, confirmation)
+	if err != nil {
+		return err
+	}
+	allowed, err := gateway.AllowRepublishWithConfirmation(job.Event, blockUUID, confirmedAbsentPart, confirmation.SendAttemptToken)
 	if err != nil {
 		return err
 	}
@@ -457,6 +474,11 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 		found, complete := receiptBlockPublicationState(receipt, blockUUID)
 		if !found {
 			return errors.New("блок не отмечен как удалённый в Telegram")
+		}
+		for _, block := range receipt.Blocks {
+			if strings.EqualFold(block.BlockUUID, blockUUID) && block.UnknownOutcome {
+				return errors.New("исход отправки Telegram по-прежнему неизвестен; проверьте спорную часть и повторите подтверждение")
+			}
 		}
 		if complete {
 			if persistErr := persistReceiptIndependently(func(saveContext context.Context) error {
@@ -502,6 +524,41 @@ func (server *Server) RepublishTelegramBlock(ctx context.Context, eventID, desti
 	}
 	server.Logger.Info("временной блок повторно опубликован оператором", "event_id", job.Event.ID, "destination_id", destinationID, "block_uuid", blockUUID)
 	return nil
+}
+
+func validateTelegramUnknownRepublishConfirmation(
+	receipt application.DeliveryReceipt, delivery domain.PlannedDelivery, blockUUID string,
+	confirmation TelegramRepublishConfirmation,
+) (int, error) {
+	for _, block := range receipt.Blocks {
+		if !strings.EqualFold(strings.TrimSpace(block.BlockUUID), blockUUID) || !block.UnknownOutcome {
+			continue
+		}
+		part := block.UnconfirmedPart
+		if !confirmation.CheckedCurrentRevision || !confirmation.ConfirmedPartAbsent ||
+			confirmation.UnconfirmedPart != part || part <= 0 ||
+			block.ExpectedMessageCount < part || len(block.MessageIDs) != part-1 ||
+			block.SendAttemptToken == "" || confirmation.SendAttemptToken != block.SendAttemptToken ||
+			receipt.ThreadID != delivery.Decision.ThreadID {
+			return 0, errors.New("для ручной публикации нужна повторная сверка актуальной редакции и отсутствия спорной части в теме Telegram")
+		}
+		seen := make(map[int64]struct{}, len(block.MessageIDs))
+		for _, messageID := range block.MessageIDs {
+			if messageID <= 0 {
+				return 0, errors.New("сохранённые ID частей Telegram некорректны")
+			}
+			if _, exists := seen[messageID]; exists {
+				return 0, errors.New("сохранённые ID частей Telegram повторяются")
+			}
+			seen[messageID] = struct{}{}
+		}
+		return part, nil
+	}
+	if confirmation.CheckedCurrentRevision || confirmation.ConfirmedPartAbsent ||
+		confirmation.UnconfirmedPart != 0 || confirmation.SendAttemptToken != "" {
+		return 0, errors.New("состояние публикации Telegram изменилось; обновите историю перед повторной публикацией")
+	}
+	return 0, nil
 }
 
 func validateTelegramRepublishBlock(job application.DeliveryJob, blockUUID string) error {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -83,7 +85,23 @@ func (handler Handler) Routes() http.Handler {
 }
 
 func (handler Handler) republishTelegramBlock(writer http.ResponseWriter, request *http.Request) {
-	err := handler.Server.RepublishTelegramBlock(request.Context(), request.PathValue("event"), request.PathValue("destination"), request.PathValue("block"))
+	var confirmation runner.TelegramRepublishConfirmation
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&confirmation); err != nil {
+		handler.publicError(writer, http.StatusBadRequest, "Не удалось прочитать подтверждение повторной публикации.", err)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			err = errors.New("лишние данные в подтверждении")
+		}
+		handler.publicError(writer, http.StatusBadRequest, "Подтверждение повторной публикации повреждено.", err)
+		return
+	}
+	err := handler.Server.RepublishTelegramBlock(
+		request.Context(), request.PathValue("event"), request.PathValue("destination"), request.PathValue("block"), confirmation,
+	)
 	if err != nil {
 		handler.publicError(writer, http.StatusBadRequest, "Не удалось повторно опубликовать выбранный перехват.", err)
 		return

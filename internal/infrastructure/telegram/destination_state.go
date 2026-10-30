@@ -60,6 +60,7 @@ type destinationBlock struct {
 	SendPending          bool      `json:"send_pending,omitempty"`
 	SendPendingIndex     int       `json:"send_pending_index,omitempty"`
 	SendPendingAt        string    `json:"send_pending_at,omitempty"`
+	SendAttemptID        string    `json:"send_attempt_id,omitempty"`
 }
 
 func loadDestinationState(path string) (destinationState, error) {
