@@ -40,6 +40,13 @@ type itemLockEntry struct {
 
 var errTelegramPublicationMissing = errors.New("публикация Telegram удалена вручную")
 
+type manualRepublishContextKey struct{}
+
+// DeliverManually is the only path that may consume a durable operator permit.
+func (destination *Destination) DeliverManually(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
+	return destination.Deliver(context.WithValue(ctx, manualRepublishContextKey{}, true), event, delivery)
+}
+
 // Deliver создаёт, редактирует и удаляет сообщения так, чтобы Telegram отражал
 // текущее состояние записи EAVC без дубликатов.
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
@@ -74,6 +81,8 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 		item.Blocks = make(map[string]destinationBlock)
 	}
 	scopedBlockUUID := strings.TrimSpace(event.SourceBlockUUID)
+	cleanupRequested := delivery.Decision.Action == domain.RouteSkip ||
+		(scopedBlockUUID != "" && event.SourceBlockDeleted) || len(eventBlocks(event)) == 0
 	willStoreRecordCleanup := scopedBlockUUID == "" &&
 		(delivery.Decision.Action == domain.RouteSkip || len(eventBlocks(event)) == 0) &&
 		(event.SourceVersion() != "" || !event.CreatedAt.IsZero())
@@ -82,14 +91,30 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	}
 	migrateTelegramItemMetadata(&item)
 	if telegramRecordCleanupRejects(item, event) {
-		if destination.Logger != nil {
-			destination.Logger.Warn("событие Telegram старее удаления всей записи и пропущено",
-				"event_id", event.ID, "trace_id", event.ID, "block_uuid", scopedBlockUUID,
-				"source_version", event.SourceVersion(),
-				"cleanup_source_version", item.RecordCleanupSourceVersion,
-			)
+		// A record barrier is persisted before deleting known Telegram IDs. The
+		// same cleanup revision may finish a partially completed deletion and
+		// must keep reporting an unresolved send, even after all known IDs are
+		// gone. Older revisions and ordinary deliveries remain fenced out.
+		resumeCleanup := false
+		if cleanupRequested && scopedBlockUUID == "" &&
+			domain.CompareSourceRevision(event.SourceVersion(), event.CreatedAt,
+				item.RecordCleanupSourceVersion, item.RecordCleanupSourceEventAt) == 0 {
+			hasUnknown := false
+			for _, block := range item.Blocks {
+				hasUnknown = hasUnknown || block.UnknownOutcome || block.SendPending
+			}
+			resumeCleanup = hasUnknown
 		}
-		return nil
+		if !resumeCleanup {
+			if destination.Logger != nil {
+				destination.Logger.Warn("событие Telegram старее удаления всей записи и пропущено",
+					"event_id", event.ID, "trace_id", event.ID, "block_uuid", scopedBlockUUID,
+					"source_version", event.SourceVersion(),
+					"cleanup_source_version", item.RecordCleanupSourceVersion,
+				)
+			}
+			return nil
+		}
 	}
 	if scopedBlockUUID != "" {
 		if stored, exists := item.Blocks[scopedBlockUUID]; exists {
@@ -112,8 +137,10 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 	}
 	// Неизвестный исход публикации нельзя забывать даже при удалении блока,
 	// смене маршрута или следующей редакции: Telegram мог создать сообщение.
+	unknownOutcome := false
 	for blockKey, stored := range item.Blocks {
-		if scopedBlockUUID != "" && blockKey != scopedBlockUUID {
+		if scopedBlockUUID != "" && blockKey != scopedBlockUUID &&
+			!(cleanupRequested && blockKey == "__record__" && !event.HasActiveBlocks) {
 			continue
 		}
 		if stored.SendPending {
@@ -128,10 +155,73 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 			}
 		}
 		if stored.UnknownOutcome {
-			return application.NewPermanentDeliveryError(errors.New(
-				"исход предыдущей отправки Telegram неизвестен; проверьте тему и разрешайте повторную публикацию только если сообщения нет",
-			))
+			unknownOutcome = true
 		}
+	}
+	if unknownOutcome {
+		if cleanupRequested {
+			// Persist the cleanup revision before the first external delete. A
+			// transient delete failure must not let an older event revive text.
+			if scopedBlockUUID == "" {
+				storeTelegramRecordCleanup(&item, event)
+			}
+			for blockKey, stored := range item.Blocks {
+				if scopedBlockUUID != "" && blockKey != scopedBlockUUID &&
+					(blockKey != "__record__" || event.HasActiveBlocks) {
+					continue
+				}
+				storeTelegramRevision(&stored, event)
+				if stored.UnknownOutcome {
+					stored.Suppressed = true
+				}
+				item.Blocks[blockKey] = stored
+			}
+			if err := destination.saveItem(itemKey, item, false); err != nil {
+				return err
+			}
+			// Неизвестную часть нельзя удалить без message_id, но уже подтверждённые
+			// части нужно убрать при удалении EAVC или снятии маршрута. Сохраняем
+			// каждый удалённый ID, чтобы прерывание не потеряло прогресс очистки.
+			for blockKey, stored := range item.Blocks {
+				if scopedBlockUUID != "" && blockKey != scopedBlockUUID &&
+					(blockKey != "__record__" || event.HasActiveBlocks) {
+					continue
+				}
+				for len(stored.MessageIDs) > 0 {
+					messageID := stored.MessageIDs[0]
+					if err := destination.deleteMessage(ctx, messageID); err != nil {
+						return err
+					}
+					stored.DeletedMessageIDs = appendUniqueIDs(stored.DeletedMessageIDs, messageID)
+					stored.MessageIDs = stored.MessageIDs[1:]
+					item.Blocks[blockKey] = stored
+					if err := destination.saveItem(itemKey, item, false); err != nil {
+						return err
+					}
+				}
+				if stored.UnknownOutcome {
+					stored.Suppressed = true
+					storeTelegramRevision(&stored, event)
+					item.Blocks[blockKey] = stored
+				} else {
+					delete(item.Blocks, blockKey)
+				}
+			}
+			if scopedBlockUUID == "" {
+				storeTelegramRecordCleanup(&item, event)
+			}
+			if err := destination.saveItem(itemKey, item, false); err != nil {
+				return err
+			}
+			if migratedLegacy {
+				if err := destination.saveItem(legacyItemKey, destinationItem{}, true); err != nil {
+					return err
+				}
+			}
+		}
+		return application.NewPermanentDeliveryError(errors.New(
+			"исход предыдущей отправки Telegram неизвестен; проверьте тему и разрешайте повторную публикацию только если сообщения нет",
+		))
 	}
 	if delivery.Decision.Action == domain.RouteSkip {
 		if scopedBlockUUID != "" {
@@ -242,6 +332,13 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 				"исход предыдущей отправки Telegram неизвестен; проверьте тему и используйте ручную повторную публикацию только если сообщения нет",
 			))
 		}
+		manualPermit := stored.ManualRepublishPending
+		manualToken := stored.ManualRepublishToken
+		if manualPermit && ctx.Value(manualRepublishContextKey{}) != true {
+			return application.NewPermanentDeliveryError(errors.New(
+				"ручная публикация ожидает подтверждённого продолжения; автоматическая отправка запрещена",
+			))
+		}
 		storedBaseHash := stored.SourceHash
 		if storedBaseHash == "" {
 			storedBaseHash = stored.Hash
@@ -319,17 +416,33 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 			stored.SendPendingIndex = 0
 			stored.SendPendingAt = ""
 			stored.SendAttemptID = ""
+			// A confirmed part is not the end of a manual publication. Keep
+			// the same permit until every part is durable, so a restart between
+			// parts cannot strand an expired job without a resume action.
+			stored.ManualRepublishPending = manualPermit && len(messageIDs) < len(chunks)
+			if stored.ManualRepublishPending {
+				stored.ManualRepublishToken = manualToken
+			} else {
+				stored.ManualRepublishToken = ""
+			}
 			stored.Sequence = block.Sequence
 			stored.ThreadID = threadID
 			storeTelegramRevision(&stored, event)
 			item.Blocks[blockKey] = stored
-			return destination.saveItem(itemKey, item, false)
+			if err := destination.saveItem(itemKey, item, false); err != nil {
+				return err
+			}
+			return ctx.Err()
 		}
 		sendIntent := func(pending bool, index int) error {
 			stored.ExpectedMessageCount = len(chunks)
 			stored.SendPending = pending
 			stored.SendPendingIndex = index
 			if pending {
+				// The manual permit is consumed only together with a durable send
+				// intent. A crash before this save cannot expose an auto retry.
+				stored.ManualRepublishPending = false
+				stored.ManualRepublishToken = ""
 				var attemptID [16]byte
 				if _, err := rand.Read(attemptID[:]); err != nil {
 					return fmt.Errorf("создать ID попытки отправки Telegram: %w", err)
@@ -341,6 +454,12 @@ func (destination *Destination) Deliver(ctx context.Context, event domain.Event,
 			} else {
 				stored.SendPendingAt = ""
 				stored.SendAttemptID = ""
+				if manualPermit {
+					// A definitive rejection created no message. Keep the operation
+					// manual-only until the operator chooses to continue it.
+					stored.ManualRepublishPending = true
+					stored.ManualRepublishToken = manualToken
+				}
 			}
 			stored.Sequence = block.Sequence
 			stored.ThreadID = threadID
@@ -465,8 +584,19 @@ func (destination *Destination) DeliveryReceipt(
 			messageIDs = append(messageIDs, block.MessageIDs...)
 		}
 		unknownOutcome := block.UnknownOutcome || block.SendPending
+		if block.ManualRepublishPending {
+			if expectedMessageCount == 0 {
+				for _, currentBlock := range eventBlocks(event) {
+					if strings.EqualFold(currentBlock.Identity(), entry.key) {
+						expectedMessageCount = len(formatBlockChunks(event, currentBlock, delivery,
+							destination.Network, destination.Protection, destination.MessageTemplate))
+						break
+					}
+				}
+			}
+		}
 		unconfirmedPart := 0
-		if unknownOutcome {
+		if unknownOutcome || block.ManualRepublishPending {
 			unconfirmedPart = block.SendPendingIndex + 1
 		}
 		blockReceipts = append(blockReceipts, application.DeliveryBlockReceipt{
@@ -474,7 +604,8 @@ func (destination *Destination) DeliveryReceipt(
 			DeletedMessageIDs:    append([]int64(nil), block.DeletedMessageIDs...),
 			ExpectedMessageCount: expectedMessageCount, Complete: complete,
 			Suppressed: block.Suppressed, SuppressedReason: block.SuppressedReason,
-			UnknownOutcome: unknownOutcome, UnconfirmedPart: unconfirmedPart,
+			UnknownOutcome: unknownOutcome, ManualRepublishPending: block.ManualRepublishPending,
+			UnconfirmedPart:  unconfirmedPart,
 			SendAttemptToken: telegramUnknownSendToken(block),
 		})
 	}
@@ -514,6 +645,9 @@ func (destination *Destination) expectedMessageCountForBlock(
 	}
 	baseHash := hashChunks(baseChunks)
 	if stored.SourceHash != "" && stored.SourceHash != baseHash {
+		if stored.UnknownOutcome || stored.SendPending || stored.ManualRepublishPending {
+			return stored.ExpectedMessageCount
+		}
 		return 0
 	}
 	if stored.ExpectedMessageCount > 0 {
@@ -541,7 +675,7 @@ func (destination *Destination) expectedMessageCountForBlock(
 
 func telegramBlockPublicationComplete(block destinationBlock, expectedMessageCount int) bool {
 	if expectedMessageCount <= 0 || len(block.MessageIDs) != expectedMessageCount ||
-		block.Recovering || block.Suppressed || block.SourceDeleted || block.SendPending {
+		block.Recovering || block.Suppressed || block.SourceDeleted || block.SendPending || block.ManualRepublishPending {
 		return false
 	}
 	seen := make(map[int64]struct{}, len(block.MessageIDs))
@@ -584,6 +718,10 @@ func (destination *Destination) deleteScopedBlock(
 	stored.Suppressed = false
 	stored.SuppressedAt = ""
 	stored.SuppressedReason = ""
+	// A permit not yet consumed by a send intent must not survive deletion of
+	// the source block or removal of its route.
+	stored.ManualRepublishPending = false
+	stored.ManualRepublishToken = ""
 	stored.SourceDeleted = true
 	if stored.ThreadID == 0 {
 		stored.ThreadID = item.ThreadID
@@ -722,6 +860,9 @@ func (destination *Destination) AllowRepublishWithConfirmation(
 	if !exists {
 		return false, nil
 	}
+	if block.ManualRepublishPending {
+		return false, nil
+	}
 	if confirmedAbsentPart > 0 && (!block.UnknownOutcome ||
 		confirmedAbsentPart != block.SendPendingIndex+1 ||
 		block.ExpectedMessageCount < confirmedAbsentPart ||
@@ -736,8 +877,18 @@ func (destination *Destination) AllowRepublishWithConfirmation(
 		(len(block.MessageIDs) > 0 || len(block.DeletedMessageIDs) == 0) {
 		return false, nil
 	}
+	manualToken := telegramUnknownSendToken(block)
+	if manualToken == "" {
+		var randomToken [16]byte
+		if _, err := rand.Read(randomToken[:]); err != nil {
+			return false, fmt.Errorf("создать маркер ручной публикации Telegram: %w", err)
+		}
+		manualToken = hex.EncodeToString(randomToken[:])
+	}
 	block.Suppressed = false
 	block.UnknownOutcome = false
+	block.ManualRepublishPending = true
+	block.ManualRepublishToken = manualToken
 	block.SuppressedAt = ""
 	block.SuppressedReason = ""
 	block.Hash = ""
@@ -745,12 +896,14 @@ func (destination *Destination) AllowRepublishWithConfirmation(
 	// Уже подтверждённые части длинного сообщения сохраняются. При
 	// неопределённом исходе следующей части оператор проверяет только её;
 	// повторная отправка всех известных частей создала бы дубль.
-	if len(block.MessageIDs) == 0 {
+	if len(block.MessageIDs) == 0 && confirmedAbsentPart == 0 {
 		block.ExpectedMessageCount = 0
 	}
 	block.Recovering = false
 	block.SendPending = false
-	block.SendPendingIndex = 0
+	if confirmedAbsentPart == 0 {
+		block.SendPendingIndex = 0
+	}
 	block.SendPendingAt = ""
 	block.SendAttemptID = ""
 	item.Blocks[blockUUID] = block
@@ -766,7 +919,33 @@ func (destination *Destination) AllowRepublishWithConfirmation(
 	return true, nil
 }
 
+// ResumeManualRepublish consumes the same operator permit after a process
+// interruption before the next send intent. It never creates a permit or
+// accepts a token from an older attempt.
+func (destination *Destination) ResumeManualRepublish(event domain.Event, blockUUID, token string) (bool, error) {
+	blockUUID = strings.TrimSpace(blockUUID)
+	if blockUUID == "" || strings.TrimSpace(event.ClientID) == "" || token == "" {
+		return false, nil
+	}
+	legacyItemKey := strings.TrimSpace(event.Source.UUID)
+	if legacyItemKey == "" {
+		legacyItemKey = fmt.Sprintf("id:%d", event.Source.ID)
+	}
+	itemKey := strings.TrimSpace(event.ClientID) + "|" + legacyItemKey
+	unlock := destination.lockItem(itemKey)
+	defer unlock()
+	item, err := destination.loadItem(itemKey)
+	if err != nil {
+		return false, err
+	}
+	block, exists := item.Blocks[blockUUID]
+	return exists && block.ManualRepublishPending && block.ManualRepublishToken == token, nil
+}
+
 func telegramUnknownSendToken(block destinationBlock) string {
+	if block.ManualRepublishPending {
+		return block.ManualRepublishToken
+	}
 	if !block.UnknownOutcome && !block.SendPending {
 		return ""
 	}

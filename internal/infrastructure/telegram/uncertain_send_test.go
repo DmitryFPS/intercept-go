@@ -184,7 +184,7 @@ func TestUnknownSecondChunkKeepsConfirmedFirstChunk(t *testing.T) {
 	if err != nil || !allowed {
 		t.Fatalf("ручное разрешение после сверки не сработало: allowed=%v err=%v", allowed, err)
 	}
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+	if err := destination.DeliverManually(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
 	state, err = loadDestinationState(path)
@@ -195,6 +195,290 @@ func TestUnknownSecondChunkKeepsConfirmedFirstChunk(t *testing.T) {
 	if len(block.MessageIDs) != expected || block.MessageIDs[0] != 801 ||
 		calls.Load() != int32(expected+1) || block.UnknownOutcome {
 		t.Fatalf("ручное продолжение должно сохранить первую часть: block=%#v calls=%d", block, calls.Load())
+	}
+}
+
+func TestUnknownSecondChunkCleanupDeletesConfirmedPart(t *testing.T) {
+	for _, scenario := range []struct {
+		name           string
+		deleteSource   bool
+		decisionAction domain.RouteAction
+	}{
+		{name: "EAVC deletion", deleteSource: true, decisionAction: domain.RouteDeliver},
+		{name: "route skip", decisionAction: domain.RouteSkip},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
+			var sends, deletes atomic.Int32
+			var deletedID atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch {
+				case strings.HasSuffix(request.URL.Path, "/sendMessage"):
+					call := sends.Add(1)
+					if call == 2 {
+						writer.WriteHeader(http.StatusInternalServerError)
+						_, _ = io.WriteString(writer, `{"ok":false,"error_code":500,"description":"internal"}`)
+						return
+					}
+					_ = json.NewEncoder(writer).Encode(map[string]any{
+						"ok": true, "result": map[string]any{"message_id": 800 + call},
+					})
+				case strings.HasSuffix(request.URL.Path, "/deleteMessage"):
+					var input struct {
+						MessageID int64 `json:"message_id"`
+					}
+					if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+						t.Errorf("decode delete: %v", err)
+					}
+					deletedID.Store(input.MessageID)
+					deletes.Add(1)
+					_, _ = io.WriteString(writer, `{"ok":true,"result":true}`)
+				default:
+					http.Error(writer, "unexpected method", http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+			api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			api.sends.globalInterval = 0
+			api.sends.groupInterval = 0
+			destination := Destination{API: api, ChatID: -1001, StatePath: filepath.Join(t.TempDir(), "state.json")}
+			t0 := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+			event := ambiguousTelegramEvent("long-event", "2026-10-28 12:00:00",
+				"12.00\n"+strings.Repeat("-Длинная контрольная строка. (10001)\n", 420), t0)
+			delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+			if chunks := formatBlockChunks(event, event.Blocks[0], delivery, "", "", ""); len(chunks) < 2 {
+				t.Fatalf("нужны минимум две части, получено %d", len(chunks))
+			}
+			if err := destination.Deliver(context.Background(), event, delivery); err == nil || sends.Load() != 2 {
+				t.Fatalf("ожидался неизвестный исход второй части: err=%v sends=%d", err, sends.Load())
+			}
+			sibling := ambiguousTelegramEvent("sibling", "2026-10-28 12:00:30", "12.01\n-Соседний блок", t0.Add(30*time.Second))
+			sibling.SourceBlockUUID = "block-2"
+			sibling.Blocks[0].UUID = "block-2"
+			sibling.Blocks[0].Key = "12.01"
+			if err := destination.Deliver(context.Background(), sibling, delivery); err != nil {
+				t.Fatal(err)
+			}
+			cleanup := ambiguousTelegramEvent("cleanup", "2026-10-28 12:01:00", event.Blocks[0].Text, t0.Add(time.Minute))
+			cleanup.SourceBlockDeleted = scenario.deleteSource
+			if scenario.deleteSource {
+				cleanup.Blocks[0].DeletedAt = "2026-10-28 12:01:00"
+			}
+			cleanupDelivery := delivery
+			cleanupDelivery.Decision.Action = scenario.decisionAction
+			if err := destination.Deliver(context.Background(), cleanup, cleanupDelivery); err == nil || !application.IsPermanentDeliveryError(err) {
+				t.Fatalf("спорная часть должна оставаться изолированной: %v", err)
+			}
+			state, err := loadDestinationState(destination.StatePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			block := state.Items["point-01|source-1"].Blocks["block-1"]
+			if deletes.Load() != 1 || deletedID.Load() != 801 || sends.Load() != 3 ||
+				len(block.MessageIDs) != 0 || len(block.DeletedMessageIDs) != 1 || block.DeletedMessageIDs[0] != 801 ||
+				!block.UnknownOutcome || !block.Suppressed || block.SendPending || block.SendPendingIndex != 1 || block.SendAttemptID == "" ||
+				block.SourceVersion != "2026-10-28 12:01:00" {
+				t.Fatalf("известная часть не удалена или неизвестный исход потерян: block=%#v deletes=%d deletedID=%d sends=%d",
+					block, deletes.Load(), deletedID.Load(), sends.Load())
+			}
+			siblingBlock := state.Items["point-01|source-1"].Blocks["block-2"]
+			if len(siblingBlock.MessageIDs) != 1 || siblingBlock.MessageIDs[0] != 803 {
+				t.Fatalf("соседний блок изменился: %#v", siblingBlock)
+			}
+			if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+				t.Fatalf("устаревшая редакция должна быть остановлена барьером очистки: %v", err)
+			}
+			if err := destination.Deliver(context.Background(), cleanup, cleanupDelivery); err != nil && !application.IsPermanentDeliveryError(err) {
+				t.Fatalf("повтор очистки завершился неожиданной ошибкой: %v", err)
+			}
+			if deletes.Load() != 1 || sends.Load() != 3 {
+				t.Fatalf("повтор очистки затронул Telegram: deletes=%d sends=%d", deletes.Load(), sends.Load())
+			}
+		})
+	}
+}
+
+func TestUnscopedCleanupKeepsUnknownBlockAndDeletesKnownMessages(t *testing.T) {
+	t.Parallel()
+	var deleted [2]atomic.Int64
+	var deleteCount, sends atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			sends.Add(1)
+			http.Error(writer, "unexpected send", http.StatusBadRequest)
+			return
+		}
+		if !strings.HasSuffix(request.URL.Path, "/deleteMessage") {
+			http.Error(writer, "unexpected method", http.StatusNotFound)
+			return
+		}
+		var input struct {
+			MessageID int64 `json:"message_id"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Errorf("decode delete: %v", err)
+		}
+		index := deleteCount.Add(1) - 1
+		if index < 2 {
+			deleted[index].Store(input.MessageID)
+		}
+		_, _ = io.WriteString(writer, `{"ok":true,"result":true}`)
+	}))
+	t.Cleanup(server.Close)
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	path := filepath.Join(t.TempDir(), "state.json")
+	previousAt := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	if err := saveDestinationState(path, destinationState{Items: map[string]destinationItem{
+		"point-01|source-1": {ThreadID: 42, Blocks: map[string]destinationBlock{
+			"known": {MessageIDs: []int64{801}, SourceVersion: "2026-10-28 12:00:00", SourceEventAt: previousAt},
+			"unknown": {MessageIDs: []int64{802}, ExpectedMessageCount: 3, SendPending: true,
+				SendPendingIndex: 1, SendAttemptID: "attempt-id", SendPendingAt: previousAt.Format(time.RFC3339Nano),
+				SourceVersion: "2026-10-28 12:00:00", SourceEventAt: previousAt},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := Destination{API: api, ChatID: -1001, StatePath: path}
+	cleanupAt := previousAt.Add(time.Minute)
+	cleanup := domain.Event{ID: "cleanup", ClientID: "point-01", CreatedAt: cleanupAt,
+		Source: domain.SourceRecord{UUID: "source-1", UpdatedAt: "2026-10-28 12:01:00"}}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteSkip}}
+	if err := destination.Deliver(context.Background(), cleanup, delivery); err == nil || !application.IsPermanentDeliveryError(err) {
+		t.Fatalf("неизвестная часть должна остаться изолированной: %v", err)
+	}
+	state, err := loadDestinationState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := state.Items["point-01|source-1"]
+	block := item.Blocks["unknown"]
+	if _, exists := item.Blocks["known"]; exists || len(block.MessageIDs) != 0 ||
+		len(block.DeletedMessageIDs) != 1 || block.DeletedMessageIDs[0] != 802 ||
+		!block.UnknownOutcome || !block.Suppressed || block.SendPending || block.SendAttemptID != "attempt-id" ||
+		state.RecordTombstones["point-01|source-1"].SourceVersion != "2026-10-28 12:01:00" {
+		t.Fatalf("очистка всей записи потеряла барьер или не удалила известные ID: item=%#v barrier=%#v",
+			item, state.RecordTombstones["point-01|source-1"])
+	}
+	if deleteCount.Load() != 2 || sends.Load() != 0 ||
+		!((deleted[0].Load() == 801 && deleted[1].Load() == 802) || (deleted[0].Load() == 802 && deleted[1].Load() == 801)) {
+		t.Fatalf("очистка удалила неверные сообщения: deletes=%d ids=%d,%d sends=%d",
+			deleteCount.Load(), deleted[0].Load(), deleted[1].Load(), sends.Load())
+	}
+	if err := destination.Deliver(context.Background(), cleanup, delivery); err == nil ||
+		!application.IsPermanentDeliveryError(err) {
+		t.Fatalf("после удаления известных ID спорная часть должна остаться изолированной: %v", err)
+	}
+	if deleteCount.Load() != 2 || sends.Load() != 0 {
+		t.Fatalf("повтор очистки повторил внешний вызов: deletes=%d sends=%d", deleteCount.Load(), sends.Load())
+	}
+	state, err = loadDestinationState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Items["point-01|source-1"].Blocks["unknown"].UnknownOutcome {
+		t.Fatal("повтор очистки потерял неопределённый исход")
+	}
+}
+
+func TestUnscopedUnknownCleanupFencesStaleEventAfterDeleteFailure(t *testing.T) {
+	for _, failAt := range []int32{1, 2} {
+		t.Run(fmt.Sprintf("delete attempt %d", failAt), func(t *testing.T) {
+			t.Parallel()
+			var deleteAttempts, deleted801, deleted802, sends atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if strings.HasSuffix(request.URL.Path, "/sendMessage") {
+					sends.Add(1)
+					http.Error(writer, "unexpected send", http.StatusBadRequest)
+					return
+				}
+				if !strings.HasSuffix(request.URL.Path, "/deleteMessage") {
+					http.Error(writer, "unexpected method", http.StatusNotFound)
+					return
+				}
+				var input struct {
+					MessageID int64 `json:"message_id"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+					t.Errorf("decode delete: %v", err)
+				}
+				if deleteAttempts.Add(1) == failAt {
+					writer.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(writer, `{"ok":false,"error_code":500,"description":"temporary"}`)
+					return
+				}
+				switch input.MessageID {
+				case 801:
+					deleted801.Add(1)
+				case 802:
+					deleted802.Add(1)
+				default:
+					t.Errorf("unexpected message id %d", input.MessageID)
+				}
+				_, _ = io.WriteString(writer, `{"ok":true,"result":true}`)
+			}))
+			t.Cleanup(server.Close)
+			api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			api.sends.globalInterval = 0
+			api.sends.groupInterval = 0
+			path := filepath.Join(t.TempDir(), "state.json")
+			previousAt := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+			if err := saveDestinationState(path, destinationState{Items: map[string]destinationItem{
+				"point-01|source-1": {ThreadID: 42, Blocks: map[string]destinationBlock{
+					"known": {MessageIDs: []int64{801}, SourceVersion: "2026-10-28 12:00:00", SourceEventAt: previousAt},
+					"unknown": {MessageIDs: []int64{802}, ExpectedMessageCount: 3, UnknownOutcome: true,
+						SendPendingIndex: 1, SendAttemptID: "attempt-id", Suppressed: true,
+						SourceVersion: "2026-10-28 12:00:00", SourceEventAt: previousAt},
+				}},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			destination := Destination{API: api, ChatID: -1001, StatePath: path}
+			cleanup := domain.Event{ID: "cleanup", ClientID: "point-01", CreatedAt: previousAt.Add(time.Minute),
+				Source: domain.SourceRecord{UUID: "source-1", UpdatedAt: "2026-10-28 12:01:00"}}
+			cleanupDelivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteSkip}}
+			if err := destination.Deliver(context.Background(), cleanup, cleanupDelivery); err == nil {
+				t.Fatal("first cleanup should fail on DeleteMessage")
+			}
+			state, err := loadDestinationState(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if barrier := state.RecordTombstones["point-01|source-1"]; barrier.SourceVersion != "2026-10-28 12:01:00" {
+				t.Fatalf("cleanup barrier was not durable before delete: %#v", barrier)
+			}
+			stale := ambiguousTelegramEvent("stale", "2026-10-28 12:00:00", "12.00\n-Старый текст", previousAt)
+			stale.SourceBlockUUID = "known"
+			stale.Blocks[0].UUID = "known"
+			activeDelivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42}}
+			if err := destination.Deliver(context.Background(), stale, activeDelivery); err != nil || sends.Load() != 0 {
+				t.Fatalf("старое scoped-событие оживило публикацию: err=%v sends=%d", err, sends.Load())
+			}
+			if err := destination.Deliver(context.Background(), cleanup, cleanupDelivery); err == nil ||
+				!application.IsPermanentDeliveryError(err) {
+				t.Fatalf("повтор должен завершить очистку и сохранить unknown: %v", err)
+			}
+			state, err = loadDestinationState(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Items["point-01|source-1"].Blocks["unknown"].MessageIDs) != 0 ||
+				!state.Items["point-01|source-1"].Blocks["unknown"].UnknownOutcome ||
+				deleted801.Load() != 1 || deleted802.Load() != 1 || sends.Load() != 0 {
+				t.Fatalf("повтор не завершил удаление: state=%#v deletes=%d,%d sends=%d",
+					state.Items["point-01|source-1"], deleted801.Load(), deleted802.Load(), sends.Load())
+			}
+		})
 	}
 }
 
@@ -250,7 +534,7 @@ func TestDestinationConfirmedPendingSendRepublishesOnFirstAttempt(t *testing.T) 
 	if err != nil || !allowed {
 		t.Fatalf("подтверждённая часть не разрешена с первого действия: allowed=%v err=%v", allowed, err)
 	}
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+	if err := destination.DeliverManually(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
 	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
@@ -304,7 +588,7 @@ func TestDestinationRejectsReplayedConfirmationAfterAnotherAmbiguousSend(t *test
 	if err != nil || !allowed {
 		t.Fatalf("первая сверка не принята: allowed=%v err=%v", allowed, err)
 	}
-	if err := destination.Deliver(context.Background(), event, delivery); err == nil {
+	if err := destination.DeliverManually(context.Background(), event, delivery); err == nil {
 		t.Fatal("второй неоднозначный исход не обнаружен")
 	}
 	second, err := destination.DeliveryReceipt(event, delivery)
@@ -327,7 +611,7 @@ func TestDestinationRejectsReplayedConfirmationAfterAnotherAmbiguousSend(t *test
 	if err != nil || !allowed {
 		t.Fatalf("новая сверка отклонена: allowed=%v err=%v", allowed, err)
 	}
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil || accepted.Load() != 3 {
+	if err := destination.DeliverManually(context.Background(), event, delivery); err != nil || accepted.Load() != 3 {
 		t.Fatalf("после новой сверки нужна одна отправка: sends=%d err=%v", accepted.Load(), err)
 	}
 }
@@ -384,7 +668,7 @@ func TestDestinationHTTP500UnknownOutcomeSurvivesRestartAndRevision(t *testing.T
 	if err != nil || !allowed {
 		t.Fatalf("после проверки Telegram ручная публикация не разрешена: allowed=%v err=%v", allowed, err)
 	}
-	if err := destination.Deliver(context.Background(), revision, delivery); err != nil {
+	if err := destination.DeliverManually(context.Background(), revision, delivery); err != nil {
 		t.Fatalf("ручная публикация не выполнена: %v", err)
 	}
 	if err := destination.Deliver(context.Background(), revision, delivery); err != nil {
@@ -453,7 +737,7 @@ func TestDestinationLegacyUnknownOutcomeRemainsSuppressedOnRevision(t *testing.T
 	if err != nil || !allowed {
 		t.Fatalf("ручное разрешение старой записи не работает: allowed=%v err=%v", allowed, err)
 	}
-	if err := destination.Deliver(context.Background(), revision, delivery); err != nil {
+	if err := destination.DeliverManually(context.Background(), revision, delivery); err != nil {
 		t.Fatalf("ручная публикация старой записи не выполнена: %v", err)
 	}
 	if sends.Load() != 1 {

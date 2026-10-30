@@ -584,9 +584,10 @@ function openHistoryItem(index) {
   const receiptBlocks = item.telegram_blocks || [];
   const isUnknownBlock = block => block.unknown_outcome === true || String(block.suppressed_reason || '').includes('неизвестен');
   const unknownBlocks = receiptBlocks.filter(isUnknownBlock);
-  const suppressedBlocks = item.state === 'pending' ? [] : receiptBlocks.filter(block => block.suppressed && !isUnknownBlock(block));
+  const manualBlocks = receiptBlocks.filter(block => block.manual_republish_pending === true);
+  const suppressedBlocks = item.state === 'pending' ? [] : receiptBlocks.filter(block => block.suppressed && !isUnknownBlock(block) && !block.manual_republish_pending);
   const unknownOutcome = item.telegram_outcome_unknown === true || unknownBlocks.length > 0;
-  $('historyTelegramResult').classList.toggle('hidden', telegramIDs.length === 0 && suppressedBlocks.length === 0 && !unknownOutcome);
+  $('historyTelegramResult').classList.toggle('hidden', telegramIDs.length === 0 && suppressedBlocks.length === 0 && manualBlocks.length === 0 && !unknownOutcome);
   $('historyTelegramLinks').innerHTML = telegramIDs.map((messageID, messageIndex) => {
     const url = telegramURLs[messageIndex];
     return url
@@ -611,7 +612,11 @@ function openHistoryItem(index) {
       ${sendAttemptToken === '' ? '<span>Маркер попытки недоступен. Ручная публикация отключена до разбора состояния.</span>' : ''}
       ${canRepublish ? `<button class="button danger" data-republish-block="${escapeHTML(block.block_uuid)}" data-republish-unknown="true" data-unconfirmed-part="${escapeHTML(index)}" data-send-attempt-token="${escapeHTML(sendAttemptToken)}" data-event-id="${escapeHTML(item.id)}" data-destination-id="${escapeHTML(item.destination_id)}">После проверки опубликовать</button>` : ''}
     </div>`;
-  }).join('') + suppressedBlocks.map(block => `
+  }).join('') + manualBlocks.map(block => `
+    <div class="telegram-suppressed">
+      <span>Ручное разрешение сохранено · UUID ${escapeHTML(block.block_uuid)}. Публикация не завершена; автоматический повтор остановлен.</span>
+      ${item.state === 'expired' && block.send_attempt_token ? `<button class="button danger" data-republish-block="${escapeHTML(block.block_uuid)}" data-republish-manual="true" data-send-attempt-token="${escapeHTML(block.send_attempt_token)}" data-event-id="${escapeHTML(item.id)}" data-destination-id="${escapeHTML(item.destination_id)}">Продолжить вручную</button>` : ''}
+    </div>`).join('') + suppressedBlocks.map(block => `
     <div class="telegram-suppressed">
       <span>Сообщение удалено в Telegram · UUID ${escapeHTML(block.block_uuid)}</span>
       <button class="button danger" data-republish-block="${escapeHTML(block.block_uuid)}" data-event-id="${escapeHTML(item.id)}" data-destination-id="${escapeHTML(item.destination_id)}">Опубликовать снова</button>
@@ -623,12 +628,15 @@ $('historyTelegramLinks').addEventListener('click', async event => {
   const button = event.target.closest('[data-republish-block]');
   if (!button) return;
   const unknownOutcome = button.dataset.republishUnknown === 'true';
+  const manualResume = button.dataset.republishManual === 'true';
   let unconfirmedPart = 0;
   if (unknownOutcome) {
     const part = Number(button.dataset.unconfirmedPart);
     if (!await appConfirm({ title: 'Сначала проверьте тему Telegram', message: `Проверьте отсутствие именно спорной части ${part} перехвата. Ранее подтверждённые части могут оставаться в теме. Сверьте последнюю принятую Центром редакцию с EAVC. Если спорная часть уже есть или новая редакция ещё в пути, отмените действие.`, confirmLabel: 'Проверил, части нет', danger: true })) return;
     if (!await appConfirm({ title: 'Подтвердите повторную публикацию', message: `Вы подтверждаете, что части ${part} в нужной теме Telegram нет. Центр продолжит публикацию последней принятой им редакции EAVC.`, confirmLabel: 'Опубликовать', danger: true })) return;
     unconfirmedPart = part;
+  } else if (manualResume) {
+    if (!await appConfirm({ title: 'Продолжить ручную публикацию?', message: 'Сверьте последнюю принятую Центром редакцию с EAVC и нужную тему Telegram. Разрешение уже сохранено; если после него отправка началась, эта команда не создаст дубль.', confirmLabel: 'Сверил, продолжить', danger: true })) return;
   } else if (!await appConfirm({ title: 'Опубликовать снова?', message: 'Центр создаст новое Telegram-сообщение только для этого удалённого перехвата. Сообщения других участников затронуты не будут.', confirmLabel: 'Опубликовать' })) return;
   setButtonBusy(button, true, 'Отправляем…');
   try {
@@ -638,12 +646,16 @@ $('historyTelegramLinks').addEventListener('click', async event => {
       confirmed_part_absent: true,
       unconfirmed_part: unconfirmedPart,
       send_attempt_token: button.dataset.sendAttemptToken
-    } : {});
+    } : (manualResume ? {
+      manual_resume: true,
+      checked_current_revision: true,
+      send_attempt_token: button.dataset.sendAttemptToken
+    } : {}));
     closeDialog('historyItemDialog');
     await openHistory(historyKind, historyOffset, true);
-    notify(unknownOutcome ? 'Центр обработал ручную публикацию. Результат ищите в «Доставлено» по последней принятой редакции; прежняя запись остаётся для разбора.' : 'Перехват опубликован заново и привязан к новому message_id.', true);
+    notify(unknownOutcome || manualResume ? 'Центр обработал ручную публикацию. Результат ищите в «Доставлено» по последней принятой редакции; прежняя запись остаётся для разбора.' : 'Перехват опубликован заново и привязан к новому message_id.', true);
   } catch (error) {
-    notify(unknownOutcome ? `${error.message} Обновите историю, затем повторно сверьте редакцию и отсутствие спорной части в нужной теме.` : error.message);
+    notify(unknownOutcome ? `${error.message} Обновите историю, затем повторно сверьте редакцию и отсутствие спорной части в нужной теме.` : (manualResume ? `${error.message} Обновите историю перед повторным действием.` : error.message));
     setButtonBusy(button, false);
   }
 });

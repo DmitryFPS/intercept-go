@@ -15,7 +15,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -376,7 +378,30 @@ func (server *Server) Clients(ctx context.Context) ([]application.RegisteredClie
 type HistoryFilter = stateDB.HistoryFilter
 
 func (server *Server) History(ctx context.Context, kind string, limit, offset int, filter HistoryFilter) (stateDB.ServerHistoryPage, error) {
-	page, err := server.Store.HistoryPage(ctx, kind, limit, offset, time.Now().UTC(), filter)
+	var page stateDB.ServerHistoryPage
+	var err error
+	if kind == "expired" && server.adminMu.TryLock() {
+		// Read the page while holding the same lock as manual publication.
+		// Otherwise a stale expired row could overwrite its freshly committed
+		// receipt. If the lock is busy, show history without reconciling; a later
+		// request can retry. Bound both the read and reconciliation work.
+		reconcileContext, cancel := context.WithTimeout(ctx, 3*time.Second)
+		page, err = server.Store.HistoryPage(reconcileContext, kind, limit, offset, time.Now().UTC(), filter)
+		reconciled := false
+		if err == nil {
+			reconciled = server.refreshExpiredTelegramReceipts(reconcileContext, &page)
+		}
+		server.adminMu.Unlock()
+		cancel()
+		if err != nil {
+			return page, err
+		}
+		if reconciled {
+			page, err = server.Store.HistoryPage(ctx, kind, limit, offset, time.Now().UTC(), filter)
+		}
+	} else {
+		page, err = server.Store.HistoryPage(ctx, kind, limit, offset, time.Now().UTC(), filter)
+	}
 	if err != nil {
 		return page, err
 	}
@@ -386,6 +411,108 @@ func (server *Server) History(ctx context.Context, kind string, limit, offset in
 		}
 	}
 	return page, nil
+}
+
+// refreshExpiredTelegramReceipts reconciles only the currently accepted scoped
+// event with the local gateway JSON. It makes a permit or ambiguous send
+// visible after a crash between the JSON and SQLite writes. No Bot API method
+// is called here.
+func (server *Server) refreshExpiredTelegramReceipts(ctx context.Context, page *stateDB.ServerHistoryPage) bool {
+	if page == nil || len(page.Items) == 0 {
+		return false
+	}
+	reconciled := false
+	server.mu.RLock()
+	cfg := cloneServerConfig(server.config)
+	server.mu.RUnlock()
+	gateways := server.gateways(cfg)
+	for index := range page.Items {
+		if ctx.Err() != nil {
+			break
+		}
+		item := &page.Items[index]
+		if item.State != "expired" || item.DestinationID == "" || !item.ContentReady {
+			continue
+		}
+		gateway, ok := gateways[item.DestinationID].(*telegram.Destination)
+		if !ok {
+			continue
+		}
+		job, err := server.Store.CurrentDeliveryJobForRepublish(ctx, item.ID, item.DestinationID)
+		if err != nil || job.Event.ID != item.ID || job.Event.SourceBlockUUID == "" {
+			continue
+		}
+		receipt, err := gateway.DeliveryReceipt(job.Event, job.Delivery)
+		if err != nil {
+			continue
+		}
+		if telegramReceiptCompletesCurrentJob(job, receipt, job.Event.SourceBlockUUID) {
+			if err := server.Store.ReplaceDeliveryReceipt(ctx, job.Event.ID,
+				job.Delivery.Destination.ID, time.Now().UTC(), receipt); err != nil {
+				if server.Logger != nil {
+					server.Logger.Warn("не удалось восстановить подтверждённую публикацию Telegram", "event_id", item.ID, "error", err)
+				}
+			} else {
+				reconciled = true
+			}
+			continue
+		}
+		if !receiptHasManualActionBlock(receipt) {
+			continue
+		}
+		if item.TelegramChat == strconv.FormatInt(receipt.ChatID, 10) &&
+			item.TelegramTopic == receipt.ThreadID &&
+			slices.Equal(item.TelegramIDs, receipt.MessageIDs) &&
+			reflect.DeepEqual(item.TelegramBlocks, receipt.Blocks) {
+			continue
+		}
+		if err := server.Store.SaveManualDeliveryReceipt(ctx,
+			job.Event.ID, job.Delivery.Destination.ID, receipt); err != nil {
+			if server.Logger != nil {
+				server.Logger.Warn("не удалось сверить квитанцию ручной публикации с SQLite",
+					"event_id", item.ID, "destination_id", item.DestinationID, "error", err)
+			}
+			continue
+		}
+		item.TelegramChat = strconv.FormatInt(receipt.ChatID, 10)
+		item.TelegramTopic = receipt.ThreadID
+		item.TelegramIDs = append([]int64(nil), receipt.MessageIDs...)
+		item.TelegramBlocks = append([]application.DeliveryBlockReceipt(nil), receipt.Blocks...)
+		item.TelegramURLs = nil
+		for _, messageID := range receipt.MessageIDs {
+			if link := telegramHistoryMessageURL(receipt.ChatID, messageID); link != "" {
+				item.TelegramURLs = append(item.TelegramURLs, link)
+			}
+		}
+		item.TelegramOutcomeUnknown = receiptHasUnknownBlock(receipt)
+	}
+	return reconciled
+}
+
+func receiptHasManualActionBlock(receipt application.DeliveryReceipt) bool {
+	for _, block := range receipt.Blocks {
+		if block.UnknownOutcome || block.ManualRepublishPending {
+			return true
+		}
+	}
+	return false
+}
+
+func receiptHasUnknownBlock(receipt application.DeliveryReceipt) bool {
+	for _, block := range receipt.Blocks {
+		if block.UnknownOutcome {
+			return true
+		}
+	}
+	return false
+}
+
+func telegramHistoryMessageURL(chatID, messageID int64) string {
+	chat := strconv.FormatInt(chatID, 10)
+	if messageID <= 0 || !strings.HasPrefix(chat, "-100") || len(chat) <= 4 {
+		return ""
+	}
+	return "https://t.me/c/" + strings.TrimPrefix(chat, "-100") + "/" + strconv.FormatInt(messageID, 10)
 }
 
 // ClearHistory очищает представление завершённой истории, не затрагивая очередь.
@@ -403,6 +530,7 @@ func (server *Server) ClearHistory(ctx context.Context, kind string) error {
 type TelegramRepublishConfirmation struct {
 	CheckedCurrentRevision bool   `json:"checked_current_revision"`
 	ConfirmedPartAbsent    bool   `json:"confirmed_part_absent"`
+	ManualResume           bool   `json:"manual_resume"`
 	UnconfirmedPart        int    `json:"unconfirmed_part"`
 	SendAttemptToken       string `json:"send_attempt_token"`
 }
@@ -454,11 +582,25 @@ func (server *Server) RepublishTelegramBlock(
 	if err != nil {
 		return fmt.Errorf("проверить состояние публикации Telegram: %w", err)
 	}
+	if telegramReceiptCompletesCurrentJob(job, before, blockUUID) {
+		return persistReceiptIndependently(func(saveContext context.Context) error {
+			return server.Store.ReplaceDeliveryReceipt(saveContext, job.Event.ID,
+				job.Delivery.Destination.ID, time.Now().UTC(), before)
+		})
+	}
+	if err := server.saveTelegramManualReceipt(job, before); err != nil {
+		return err
+	}
 	confirmedAbsentPart, err := validateTelegramUnknownRepublishConfirmation(before, job.Delivery, blockUUID, confirmation)
 	if err != nil {
 		return err
 	}
-	allowed, err := gateway.AllowRepublishWithConfirmation(job.Event, blockUUID, confirmedAbsentPart, confirmation.SendAttemptToken)
+	var allowed bool
+	if confirmation.ManualResume {
+		allowed, err = gateway.ResumeManualRepublish(job.Event, blockUUID, confirmation.SendAttemptToken)
+	} else {
+		allowed, err = gateway.AllowRepublishWithConfirmation(job.Event, blockUUID, confirmedAbsentPart, confirmation.SendAttemptToken)
+	}
 	if err != nil {
 		return err
 	}
@@ -501,7 +643,25 @@ func (server *Server) RepublishTelegramBlock(
 			"known_message_ids", receipt.MessageIDs,
 		)
 	}
-	if err := gateway.Deliver(ctx, job.Event, job.Delivery); err != nil {
+	// The permit is already durable in the gateway JSON. Mirror it before the
+	// first POST so a restart can show the operator the current token.
+	if allowed {
+		permitted, receiptErr := gateway.DeliveryReceipt(job.Event, job.Delivery)
+		if receiptErr != nil {
+			return fmt.Errorf("прочитать разрешение ручной публикации: %w", receiptErr)
+		}
+		if err := server.saveTelegramManualReceipt(job, permitted); err != nil {
+			return err
+		}
+	}
+	if err := gateway.DeliverManually(ctx, job.Event, job.Delivery); err != nil {
+		receipt, receiptErr := gateway.DeliveryReceipt(job.Event, job.Delivery)
+		if receiptErr != nil {
+			return fmt.Errorf("повторно опубликовать блок: %v; прочитать состояние Telegram: %w", err, receiptErr)
+		}
+		if saveErr := server.saveTelegramManualReceipt(job, receipt); saveErr != nil {
+			return fmt.Errorf("повторно опубликовать блок: %v; сохранить текущее состояние: %w", err, saveErr)
+		}
 		return fmt.Errorf("повторно опубликовать блок: %w", err)
 	}
 	receipt, err := gateway.DeliveryReceipt(job.Event, job.Delivery)
@@ -509,6 +669,9 @@ func (server *Server) RepublishTelegramBlock(
 		return fmt.Errorf("прочитать ID повторной публикации: %w", err)
 	}
 	if !receiptHasPublishedBlock(receipt, blockUUID) {
+		if err := server.saveTelegramManualReceipt(job, receipt); err != nil {
+			return err
+		}
 		return errors.New("повторная публикация Telegram не завершена: сохранены не все части")
 	}
 	if err := persistReceiptIndependently(func(saveContext context.Context) error {
@@ -526,16 +689,34 @@ func (server *Server) RepublishTelegramBlock(
 	return nil
 }
 
+func (server *Server) saveTelegramManualReceipt(job application.DeliveryJob, receipt application.DeliveryReceipt) error {
+	return persistReceiptIndependently(func(saveContext context.Context) error {
+		return server.Store.SaveManualDeliveryReceipt(saveContext,
+			job.Event.ID, job.Delivery.Destination.ID, receipt)
+	})
+}
+
 func validateTelegramUnknownRepublishConfirmation(
 	receipt application.DeliveryReceipt, delivery domain.PlannedDelivery, blockUUID string,
 	confirmation TelegramRepublishConfirmation,
 ) (int, error) {
 	for _, block := range receipt.Blocks {
-		if !strings.EqualFold(strings.TrimSpace(block.BlockUUID), blockUUID) || !block.UnknownOutcome {
+		if !strings.EqualFold(strings.TrimSpace(block.BlockUUID), blockUUID) {
 			continue
 		}
+		if block.ManualRepublishPending {
+			if !confirmation.ManualResume || !confirmation.CheckedCurrentRevision ||
+				confirmation.ConfirmedPartAbsent || confirmation.UnconfirmedPart != 0 ||
+				confirmation.SendAttemptToken == "" || confirmation.SendAttemptToken != block.SendAttemptToken {
+				return 0, errors.New("ручное разрешение изменилось; обновите историю и сверьте актуальную редакцию")
+			}
+			return 0, nil
+		}
+		if !block.UnknownOutcome {
+			break
+		}
 		part := block.UnconfirmedPart
-		if !confirmation.CheckedCurrentRevision || !confirmation.ConfirmedPartAbsent ||
+		if confirmation.ManualResume || !confirmation.CheckedCurrentRevision || !confirmation.ConfirmedPartAbsent ||
 			confirmation.UnconfirmedPart != part || part <= 0 ||
 			block.ExpectedMessageCount < part || len(block.MessageIDs) != part-1 ||
 			block.SendAttemptToken == "" || confirmation.SendAttemptToken != block.SendAttemptToken ||
@@ -554,7 +735,7 @@ func validateTelegramUnknownRepublishConfirmation(
 		}
 		return part, nil
 	}
-	if confirmation.CheckedCurrentRevision || confirmation.ConfirmedPartAbsent ||
+	if confirmation.ManualResume || confirmation.CheckedCurrentRevision || confirmation.ConfirmedPartAbsent ||
 		confirmation.UnconfirmedPart != 0 || confirmation.SendAttemptToken != "" {
 		return 0, errors.New("состояние публикации Telegram изменилось; обновите историю перед повторной публикацией")
 	}
@@ -586,6 +767,12 @@ func validateTelegramRepublishBlock(job application.DeliveryJob, blockUUID strin
 func receiptHasPublishedBlock(receipt application.DeliveryReceipt, blockUUID string) bool {
 	_, complete := receiptBlockPublicationState(receipt, blockUUID)
 	return complete
+}
+
+func telegramReceiptCompletesCurrentJob(job application.DeliveryJob, receipt application.DeliveryReceipt, blockUUID string) bool {
+	return validateTelegramRepublishBlock(job, blockUUID) == nil &&
+		receipt.Kind == "telegram" && receipt.ThreadID == job.Delivery.Decision.ThreadID &&
+		receiptHasPublishedBlock(receipt, blockUUID)
 }
 
 func receiptBlockPublicationState(receipt application.DeliveryReceipt, blockUUID string) (found, complete bool) {

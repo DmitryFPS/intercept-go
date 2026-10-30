@@ -42,25 +42,27 @@ type destinationItem struct {
 }
 
 type destinationBlock struct {
-	Hash                 string    `json:"hash"`
-	SourceHash           string    `json:"source_hash,omitempty"`
-	SourceVersion        string    `json:"source_version,omitempty"`
-	SourceEventAt        time.Time `json:"source_event_at,omitempty"`
-	ThreadID             int64     `json:"thread_id,omitempty"`
-	MessageIDs           []int64   `json:"message_ids"`
-	DeletedMessageIDs    []int64   `json:"deleted_message_ids,omitempty"`
-	ExpectedMessageCount int       `json:"expected_message_count,omitempty"`
-	Sequence             int       `json:"sequence"`
-	Recovering           bool      `json:"recovering,omitempty"`
-	Suppressed           bool      `json:"suppressed,omitempty"`
-	SuppressedAt         string    `json:"suppressed_at,omitempty"`
-	SuppressedReason     string    `json:"suppressed_reason,omitempty"`
-	UnknownOutcome       bool      `json:"unknown_outcome,omitempty"`
-	SourceDeleted        bool      `json:"source_deleted,omitempty"`
-	SendPending          bool      `json:"send_pending,omitempty"`
-	SendPendingIndex     int       `json:"send_pending_index,omitempty"`
-	SendPendingAt        string    `json:"send_pending_at,omitempty"`
-	SendAttemptID        string    `json:"send_attempt_id,omitempty"`
+	Hash                   string    `json:"hash"`
+	SourceHash             string    `json:"source_hash,omitempty"`
+	SourceVersion          string    `json:"source_version,omitempty"`
+	SourceEventAt          time.Time `json:"source_event_at,omitempty"`
+	ThreadID               int64     `json:"thread_id,omitempty"`
+	MessageIDs             []int64   `json:"message_ids"`
+	DeletedMessageIDs      []int64   `json:"deleted_message_ids,omitempty"`
+	ExpectedMessageCount   int       `json:"expected_message_count,omitempty"`
+	Sequence               int       `json:"sequence"`
+	Recovering             bool      `json:"recovering,omitempty"`
+	Suppressed             bool      `json:"suppressed,omitempty"`
+	SuppressedAt           string    `json:"suppressed_at,omitempty"`
+	SuppressedReason       string    `json:"suppressed_reason,omitempty"`
+	UnknownOutcome         bool      `json:"unknown_outcome,omitempty"`
+	ManualRepublishPending bool      `json:"manual_republish_pending,omitempty"`
+	ManualRepublishToken   string    `json:"manual_republish_token,omitempty"`
+	SourceDeleted          bool      `json:"source_deleted,omitempty"`
+	SendPending            bool      `json:"send_pending,omitempty"`
+	SendPendingIndex       int       `json:"send_pending_index,omitempty"`
+	SendPendingAt          string    `json:"send_pending_at,omitempty"`
+	SendAttemptID          string    `json:"send_attempt_id,omitempty"`
 }
 
 func loadDestinationState(path string) (destinationState, error) {
@@ -174,7 +176,7 @@ func telegramItemInactive(item destinationItem) bool {
 		return true
 	}
 	for _, block := range item.Blocks {
-		if len(block.MessageIDs) > 0 || block.Recovering || block.UnknownOutcome || block.SendPending || (!block.SourceDeleted && !block.Suppressed) {
+		if len(block.MessageIDs) > 0 || block.Recovering || block.UnknownOutcome || block.SendPending || block.ManualRepublishPending || (!block.SourceDeleted && !block.Suppressed) {
 			return false
 		}
 	}

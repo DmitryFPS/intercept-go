@@ -170,16 +170,17 @@ type DeliveryReceipt struct {
 // DeliveryBlockReceipt связывает бизнес-перехват с конечной публикацией.
 // Удалённый вручную блок остаётся видимым в аудите, но не попадает в очередь.
 type DeliveryBlockReceipt struct {
-	BlockUUID            string  `json:"block_uuid"`
-	MessageIDs           []int64 `json:"message_ids,omitempty"`
-	DeletedMessageIDs    []int64 `json:"deleted_message_ids,omitempty"`
-	ExpectedMessageCount int     `json:"expected_message_count,omitempty"`
-	Complete             bool    `json:"complete,omitempty"`
-	Suppressed           bool    `json:"suppressed,omitempty"`
-	SuppressedReason     string  `json:"suppressed_reason,omitempty"`
-	UnknownOutcome       bool    `json:"unknown_outcome,omitempty"`
-	UnconfirmedPart      int     `json:"unconfirmed_part,omitempty"`
-	SendAttemptToken     string  `json:"send_attempt_token,omitempty"`
+	BlockUUID              string  `json:"block_uuid"`
+	MessageIDs             []int64 `json:"message_ids,omitempty"`
+	DeletedMessageIDs      []int64 `json:"deleted_message_ids,omitempty"`
+	ExpectedMessageCount   int     `json:"expected_message_count,omitempty"`
+	Complete               bool    `json:"complete,omitempty"`
+	Suppressed             bool    `json:"suppressed,omitempty"`
+	SuppressedReason       string  `json:"suppressed_reason,omitempty"`
+	UnknownOutcome         bool    `json:"unknown_outcome,omitempty"`
+	ManualRepublishPending bool    `json:"manual_republish_pending,omitempty"`
+	UnconfirmedPart        int     `json:"unconfirmed_part,omitempty"`
+	SendAttemptToken       string  `json:"send_attempt_token,omitempty"`
 }
 
 // DeliveryReceiptProvider сообщает подтверждённые внешние ID после успешной

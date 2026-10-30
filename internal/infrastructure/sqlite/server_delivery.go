@@ -510,6 +510,27 @@ func (store *ServerStore) SavePartialDeliveryReceipt(
 	return changedExactlyOnce(result, err, "сохранить частичный результат доставки")
 }
 
+// SaveManualDeliveryReceipt refreshes the gateway's durable state for an
+// operator action, including jobs that have already expired. It does not change
+// the delivery state or enqueue a retry.
+func (store *ServerStore) SaveManualDeliveryReceipt(
+	ctx context.Context, eventID, destinationID string, receipt application.DeliveryReceipt,
+) error {
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		return fmt.Errorf("кодировать состояние ручной публикации: %w", err)
+	}
+	protected, err := protectDatabaseValue(payload)
+	if err != nil {
+		return fmt.Errorf("защитить состояние ручной публикации: %w", err)
+	}
+	result, err := store.db.ExecContext(ctx, `
+		UPDATE delivery_jobs SET result_json=?
+		WHERE event_id=? AND destination_id=?`,
+		protected, eventID, destinationID)
+	return changedExactlyOnce(result, err, "сохранить состояние ручной публикации")
+}
+
 func (store *ServerStore) markDelivered(
 	ctx context.Context, eventID, destinationID string, at time.Time, receipt []byte,
 ) error {

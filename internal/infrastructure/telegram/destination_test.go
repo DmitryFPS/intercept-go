@@ -627,11 +627,15 @@ func TestDestinationRepublishesOnlyExplicitlySelectedBlock(t *testing.T) {
 	}
 	// Повтор команды до фактической доставки не должен снять разрешение:
 	// интерфейс или сеть могут безопасно повторить один и тот же запрос.
-	allowed, err = destination.AllowRepublish(event, "block-1")
+	permitReceipt, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(permitReceipt.Blocks) != 1 {
+		t.Fatalf("разрешение не отражено в квитанции: receipt=%+v err=%v", permitReceipt, err)
+	}
+	allowed, err = destination.ResumeManualRepublish(event, "block-1", permitReceipt.Blocks[0].SendAttemptToken)
 	if err != nil || !allowed {
 		t.Fatalf("повторное разрешение неидемпотентно: allowed=%v err=%v", allowed, err)
 	}
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+	if err := destination.DeliverManually(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
 	current, err := loadDestinationState(statePath)
@@ -710,7 +714,7 @@ func TestDestinationDoesNotDuplicateUncertainSendAfterRestart(t *testing.T) {
 	if err != nil || !allowed {
 		t.Fatalf("оператор не может разрешить публикацию после проверки Telegram: allowed=%v err=%v", allowed, err)
 	}
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+	if err := destination.DeliverManually(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
 	if sends.Load() != 1 {
@@ -812,7 +816,7 @@ func TestDestinationManualRepublishPreservesKnownParts(t *testing.T) {
 	if !reflect.DeepEqual(current.Items["point-01|source-1"].Blocks["block-1"].MessageIDs, []int64{701}) {
 		t.Fatal("известная первая часть потеряна до повтора")
 	}
-	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+	if err := destination.DeliverManually(context.Background(), event, delivery); err != nil {
 		t.Fatal(err)
 	}
 	receipt, err := destination.DeliveryReceipt(event, delivery)
