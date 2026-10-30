@@ -58,6 +58,9 @@ func (client *Client) waitForLocalQueue(ctx context.Context, path string) (local
 		if err == nil {
 			return handle, nil
 		}
+		if accessErr := CheckClientWriteAccess(client.BaseDir); accessErr != nil {
+			return localQueueHandle{}, accessErr
+		}
 		if stateDB.IsPermanentMigrationError(err) {
 			return localQueueHandle{}, err
 		}
@@ -108,6 +111,10 @@ func (client *Client) storageTransientFailure(title, detail string, err error) {
 func (client *Client) runSupervised(ctx context.Context, cfg config.Client) {
 	for {
 		runErr := client.run(ctx, cfg)
+		var accessErr *ClientWriteAccessError
+		if errors.As(runErr, &accessErr) {
+			return
+		}
 		if errors.Is(runErr, errLocalStorageRetryCycle) && client.requestProcessRestart() {
 			return
 		}
@@ -198,6 +205,15 @@ func (client *Client) run(ctx context.Context, cfg config.Client) error {
 			return ctx.Err()
 		}
 		if errors.Is(err, errLocalStorageRetryCycle) {
+			return err
+		}
+		var accessErr *ClientWriteAccessError
+		if errors.As(err, &accessErr) {
+			client.fail(
+				"Нет прав на запись в папке программы",
+				"Попросите администратора дать вашей учётной записи право изменения папки программы, data и logs, затем запустите программу снова.",
+				err,
+			)
 			return err
 		}
 		client.fail(

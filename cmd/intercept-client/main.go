@@ -43,6 +43,13 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	if accessErr := runner.CheckClientWriteAccess(baseDir); accessErr != nil {
+		showStartupError(fmt.Sprintf(
+			"Текущая учётная запись не может записывать в:\n%s\n\nПереместите всю папку EAVC Connect Station в доступное для записи место или попросите администратора дать вашей учётной записи право изменения этой папки, data, logs и существующих файлов. Затем запустите программу снова.",
+			accessErr.Path,
+		))
+		return
+	}
 	executable, _ := os.Executable()
 	logger, closer, err := observability.NewLogger(filepath.Join(baseDir, "logs", "client.log"), "client")
 	if err != nil {

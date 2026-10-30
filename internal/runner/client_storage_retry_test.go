@@ -61,7 +61,7 @@ func TestClientEndsTransientStorageCycleForAutomaticRestart(t *testing.T) {
 	attempts := 0
 	client.storageOpener = func(context.Context, string) (localQueueHandle, error) {
 		attempts++
-		return localQueueHandle{}, errors.New("database remains locked")
+		return localQueueHandle{}, errors.New("SQLITE_CANTOPEN (14)")
 	}
 
 	if _, err := client.waitForLocalQueue(context.Background(), "client.db"); !errors.Is(err, errLocalStorageRetryCycle) {
