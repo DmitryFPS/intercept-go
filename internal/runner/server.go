@@ -45,6 +45,8 @@ type ServerStatus struct {
 
 // StartProcessing запускает приём и доставку вручную по сохранённым настройкам.
 func (server *Server) StartProcessing() error {
+	server.adminMu.Lock()
+	defer server.adminMu.Unlock()
 	if _, err := os.Stat(server.configPath()); err != nil {
 		return errors.New("сначала настройте связь с рабочими точками")
 	}
@@ -53,6 +55,8 @@ func (server *Server) StartProcessing() error {
 
 // StopProcessing безопасно останавливает приём и доставку, сохраняя очереди.
 func (server *Server) StopProcessing() {
+	server.adminMu.Lock()
+	defer server.adminMu.Unlock()
 	server.stopWorker()
 	server.update(func(status *ServerStatus) {
 		status.State = "paused"
