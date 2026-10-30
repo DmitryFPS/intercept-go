@@ -277,31 +277,48 @@ type htmlMessageToken struct {
 }
 
 func splitHTMLMessage(message string, limit int) []string {
-	tokens := tokenizeHTMLMessage(strings.TrimSpace(message))
-	if len([]rune(message)) <= limit {
+	remaining := strings.TrimSpace(message)
+	if utf8.RuneCountInString(message) <= limit {
 		return []string{strings.TrimSpace(message)}
 	}
 	var chunks []string
 	var current strings.Builder
+	currentRunes := 0
 	var stack []string
-	for _, token := range tokens {
-		nextStack := append([]string(nil), stack...)
+	closingRunes := 0
+	for len(remaining) > 0 {
+		token, tail := nextHTMLMessageToken(remaining)
+		remaining = tail
+		nextClosingRunes := closingRunes
 		if token.name != "" {
 			if token.close {
-				if len(nextStack) > 0 {
-					nextStack = nextStack[:len(nextStack)-1]
+				if len(stack) > 0 {
+					nextClosingRunes -= utf8.RuneCountInString(stack[len(stack)-1]) + 3
 				}
 			} else {
-				nextStack = append(nextStack, token.name)
+				nextClosingRunes += utf8.RuneCountInString(token.name) + 3
 			}
 		}
-		if current.Len() > 0 && runeLen(current.String()+token.raw+closingTags(nextStack)) > limit {
+		tokenRunes := utf8.RuneCountInString(token.raw)
+		if current.Len() > 0 && currentRunes+tokenRunes+nextClosingRunes > limit {
 			chunks = append(chunks, strings.TrimSpace(current.String()+closingTags(stack)))
 			current.Reset()
-			current.WriteString(openingTags(stack))
+			reopening := openingTags(stack)
+			current.WriteString(reopening)
+			currentRunes = utf8.RuneCountInString(reopening)
 		}
 		current.WriteString(token.raw)
-		stack = nextStack
+		currentRunes += tokenRunes
+		if token.name != "" {
+			if token.close {
+				if len(stack) > 0 {
+					stack = stack[:len(stack)-1]
+				}
+			} else {
+				stack = append(stack, token.name)
+			}
+		}
+		closingRunes = nextClosingRunes
 	}
 	if tail := strings.TrimSpace(current.String() + closingTags(stack)); tail != "" {
 		chunks = append(chunks, tail)
@@ -309,30 +326,25 @@ func splitHTMLMessage(message string, limit int) []string {
 	return chunks
 }
 
-func tokenizeHTMLMessage(message string) []htmlMessageToken {
-	var result []htmlMessageToken
-	for len(message) > 0 {
-		if message[0] == '<' {
-			if end := strings.IndexByte(message, '>'); end >= 0 {
-				raw := message[:end+1]
-				name := strings.Trim(strings.TrimSuffix(strings.TrimPrefix(raw, "<"), ">"), " /")
-				result = append(result, htmlMessageToken{raw: raw, name: name, close: strings.HasPrefix(raw, "</")})
-				message = message[end+1:]
-				continue
-			}
+func nextHTMLMessageToken(message string) (htmlMessageToken, string) {
+	if message[0] == '<' {
+		// Допустимые теги шаблона короткие. Ограниченный поиск не даёт
+		// незакрытому '<' многократно просматривать остаток большого текста.
+		prefix := message[:min(len(message), 64)]
+		if end := strings.IndexByte(prefix, '>'); end >= 0 {
+			raw := message[:end+1]
+			name := strings.Trim(strings.TrimSuffix(strings.TrimPrefix(raw, "<"), ">"), " /")
+			return htmlMessageToken{raw: raw, name: name, close: strings.HasPrefix(raw, "</")}, message[end+1:]
 		}
-		if message[0] == '&' {
-			if end := strings.IndexByte(message, ';'); end >= 0 && end < 16 {
-				result = append(result, htmlMessageToken{raw: message[:end+1]})
-				message = message[end+1:]
-				continue
-			}
-		}
-		_, size := utf8.DecodeRuneInString(message)
-		result = append(result, htmlMessageToken{raw: message[:size]})
-		message = message[size:]
 	}
-	return result
+	if message[0] == '&' {
+		prefix := message[:min(len(message), 16)]
+		if end := strings.IndexByte(prefix, ';'); end >= 0 {
+			return htmlMessageToken{raw: message[:end+1]}, message[end+1:]
+		}
+	}
+	_, size := utf8.DecodeRuneInString(message)
+	return htmlMessageToken{raw: message[:size]}, message[size:]
 }
 
 func openingTags(stack []string) string {
@@ -351,7 +363,7 @@ func closingTags(stack []string) string {
 	return builder.String()
 }
 
-func runeLen(value string) int { return len([]rune(value)) }
+func runeLen(value string) int { return utf8.RuneCountInString(value) }
 
 func eventDate(event domain.Event) string {
 	if match := legacyDatePrefix.FindStringSubmatch(event.Source.UpdatedAt); match != nil {

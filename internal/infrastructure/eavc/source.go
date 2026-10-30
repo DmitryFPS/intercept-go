@@ -33,6 +33,9 @@ var requiredBlockColumns = []string{
 // оператор получает явную ошибку, а курсор не сдвигается.
 const maxBoundaryReplay = 1000
 
+// Запас до предела переменных SQLite оставляет место для условий поиска.
+const maxCallsignLookupCodes = 8192
+
 type recordContractError struct{ reason string }
 
 func (err *recordContractError) Error() string { return err.reason }
@@ -427,6 +430,11 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		}
 		if source.hasCallsigns {
 			if err := source.enrichCallsigns(ctx, &items[index]); err != nil {
+				var contractErr *recordContractError
+				if errors.As(err, &contractErr) {
+					items[index].ContractError = contractErr.Error()
+					continue
+				}
 				return nil, after, err
 			}
 		}
@@ -547,7 +555,6 @@ func (source *Source) enrichCallsigns(ctx context.Context, item *application.Sou
 		if len(missing) == 0 {
 			return nil
 		}
-		placeholders := strings.TrimRight(strings.Repeat("?,", len(missing)), ",")
 		numberExpression := "0"
 		if source.callsignColumns["id"] {
 			numberExpression = "id"
@@ -560,37 +567,49 @@ func (source *Source) enrichCallsigns(ctx context.Context, item *application.Sou
 		if source.callsignColumns["tag_desc"] {
 			descriptionExpression = "tag_desc"
 		}
-		query := "SELECT " + numberExpression + ", code, label, " + tagExpression + ", " + descriptionExpression +
-			" FROM intercept_callsigns WHERE " + where +
-			" AND code IN (" + placeholders + ")"
-		args = append(args, stringsToAny(missing)...)
-		rows, err := source.db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return fmt.Errorf("прочитать позывные EAVC: %w", err)
-		}
-		for rows.Next() {
-			var number sql.NullInt64
-			var code, label, tag, description sql.NullString
-			if err := rows.Scan(&number, &code, &label, &tag, &description); err != nil {
-				rows.Close()
-				return fmt.Errorf("декодировать позывной EAVC: %w", err)
+		for start := 0; start < len(missing); start += maxCallsignLookupCodes {
+			end := min(start+maxCallsignLookupCodes, len(missing))
+			batch := missing[start:end]
+			placeholders := strings.TrimRight(strings.Repeat("?,", len(batch)), ",")
+			query := "SELECT " + numberExpression + ", code, label, " + tagExpression + ", " + descriptionExpression +
+				" FROM intercept_callsigns WHERE " + where +
+				" AND code IN (" + placeholders + ")"
+			queryArgs := make([]any, 0, len(args)+len(batch))
+			queryArgs = append(queryArgs, args...)
+			queryArgs = append(queryArgs, stringsToAny(batch)...)
+			rows, err := source.db.QueryContext(ctx, query, queryArgs...)
+			if err != nil {
+				return fmt.Errorf("прочитать позывные EAVC: %w", err)
 			}
-			key := domain.NormalizeCorrespondentCode(code.String)
-			if key != "" && strings.TrimSpace(label.String) != "" {
-				if _, exists := callsigns[key]; !exists {
-					callsigns[key] = domain.Callsign{
-						Number: number.Int64, Code: code.String, Label: label.String,
-						Tag: tag.String, Description: description.String,
+			for rows.Next() {
+				var number sql.NullInt64
+				var code, label, tag, description sql.NullString
+				if err := rows.Scan(&number, &code, &label, &tag, &description); err != nil {
+					if closeErr := rows.Close(); closeErr != nil {
+						return fmt.Errorf("закрыть чтение позывных EAVC: %w", closeErr)
+					}
+					return newRecordContractError("декодировать позывной EAVC для записи %d: %v", item.Record.ID, err)
+				}
+				key := domain.NormalizeCorrespondentCode(code.String)
+				if key != "" && strings.TrimSpace(label.String) != "" {
+					if _, exists := callsigns[key]; !exists {
+						callsigns[key] = domain.Callsign{
+							Number: number.Int64, Code: code.String, Label: label.String,
+							Tag: tag.String, Description: description.String,
+						}
 					}
 				}
 			}
+			rowErr := rows.Err()
+			closeErr := rows.Close()
+			if rowErr != nil {
+				return fmt.Errorf("прочитать позывные EAVC: %w", rowErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("закрыть чтение позывных EAVC: %w", closeErr)
+			}
 		}
-		rowErr := rows.Err()
-		closeErr := rows.Close()
-		if rowErr != nil {
-			return rowErr
-		}
-		return closeErr
+		return nil
 	}
 	missing := func() []string {
 		result := make([]string, 0)

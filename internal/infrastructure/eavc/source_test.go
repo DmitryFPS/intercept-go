@@ -185,6 +185,159 @@ func TestSourceReadsCallsignNumberAndDescription(t *testing.T) {
 	}
 }
 
+func TestSourceReadsMoreCallsignCodesThanSQLiteVariableLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE intercept_items (
+			id INTEGER PRIMARY KEY, session_id INTEGER, session_uuid TEXT,
+			unit_name TEXT, frequency TEXT, group_code TEXT, uuid TEXT,
+			content TEXT, updated_by TEXT, updated_at TEXT
+		);
+		CREATE TABLE intercept_callsigns (
+			id INTEGER PRIMARY KEY, frequency TEXT, group_code TEXT, unit_name TEXT,
+			code TEXT, label TEXT
+		);
+		INSERT INTO intercept_callsigns VALUES
+			(1, '100.0', 'A', 'Позиция', '1', 'Частота'),
+			(2, '101.0', 'B', 'Позиция', '1', 'Подразделение'),
+			(3, '101.0', 'B', 'Позиция', '32767', 'Подразделение 32767'),
+			(4, '101.0', 'B', 'Другая', '32768', 'Общий 32768'),
+			(5, '101.0', 'B', 'Другая', '7', 'Общий 7');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTestBlockSchema(t, db)
+	const codeCount = 32768
+	const codesPerBlock = 4096
+	blockTexts := make([]string, 0, codeCount/codesPerBlock)
+	for blockIndex := 0; blockIndex < codeCount/codesPerBlock; blockIndex++ {
+		var block strings.Builder
+		fmt.Fprintf(&block, "10.%02d\n-Текст", blockIndex)
+		for code := blockIndex*codesPerBlock + 1; code <= (blockIndex+1)*codesPerBlock; code++ {
+			fmt.Fprintf(&block, " (%d)", code)
+		}
+		blockTexts = append(blockTexts, block.String())
+	}
+	if _, err := db.Exec(`INSERT INTO intercept_items VALUES(1, 1, 'session', 'Позиция', '100.0', 'A', 'source-1', ?, 'Оператор', '2026-10-20 10:00:00')`, strings.Join(blockTexts, "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO intercept_items VALUES(2, 1, 'session', 'Другая', '101.0', 'B', 'source-2', '10.01\n-Текст (7)', 'Оператор', '2026-10-20 10:01:00')`); err != nil {
+		t.Fatal(err)
+	}
+	syncTestBlocks(t, db)
+	// В отличие от единого блока на 32768 позывных, эти восемь блоков
+	// проходят также ограничение контракта Клиента: не более 4096 в блоке.
+	if _, err := db.Exec(`DELETE FROM intercept_blocks WHERE item_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	for blockIndex, text := range blockTexts {
+		parts := strings.SplitN(text, "\n", 2)
+		if _, err := db.Exec(`INSERT INTO intercept_blocks(
+			uuid,item_uuid,item_id,time_key,day_offset,ord,header,body,text_hash,updated_by,updated_at,deleted_at
+		) VALUES(?,?,1,?,0,?,?,?,?,?,?,NULL)`,
+			fmt.Sprintf("block-source-1-%d", blockIndex), "source-1", 600+blockIndex,
+			blockIndex, parts[0], parts[1], "", "Оператор", "2026-10-20 10:00:00",
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	items, cursor, err := source.Scan(context.Background(), application.Cursor{}, 10)
+	if err != nil {
+		t.Fatalf("чтение большого набора позывных: %v", err)
+	}
+	if len(items) != 2 || cursor.ID != 2 {
+		t.Fatalf("следующая запись потеряна: items=%d cursor=%+v", len(items), cursor)
+	}
+	if len(items[0].Blocks) != len(blockTexts) {
+		t.Fatalf("число временных блоков изменилось: blocks=%d", len(items[0].Blocks))
+	}
+	for blockIndex, block := range items[0].Blocks {
+		if len(block.Callsigns) != codesPerBlock {
+			t.Fatalf("блок %d содержит %d позывных вместо %d", blockIndex, len(block.Callsigns), codesPerBlock)
+		}
+	}
+	first := items[0].Blocks[0].Callsigns[0]
+	last := items[0].Blocks[len(items[0].Blocks)-1].Callsigns
+	if first.Code != "1" || first.Label != "Частота" ||
+		last[codesPerBlock-2].Code != "32767" || last[codesPerBlock-2].Label != "Подразделение 32767" ||
+		last[codesPerBlock-1].Code != "32768" || last[codesPerBlock-1].Label != "Общий 32768" {
+		t.Fatalf("приоритет или граница пачек позывных нарушены: first=%+v unit=%+v global=%+v",
+			first, last[codesPerBlock-2], last[codesPerBlock-1])
+	}
+	if len(items[1].Blocks) != 1 || len(items[1].Blocks[0].Callsigns) != 1 ||
+		items[1].Blocks[0].Callsigns[0].Label != "Общий 7" {
+		t.Fatalf("позывной следующей записи потерян: %+v", items[1].Blocks)
+	}
+}
+
+func TestSourceIsolatesInvalidCallsignAndContinuesFollowingRecord(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "main.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE intercept_items (
+			id INTEGER PRIMARY KEY, session_id INTEGER, session_uuid TEXT,
+			unit_name TEXT, frequency TEXT, group_code TEXT, uuid TEXT,
+			content TEXT, updated_by TEXT, updated_at TEXT
+		);
+		CREATE TABLE intercept_callsigns (
+			id TEXT, frequency TEXT, group_code TEXT, unit_name TEXT,
+			code TEXT, label TEXT
+		);
+		INSERT INTO intercept_callsigns VALUES
+			('invalid-number', '100.0', 'A', 'Позиция', '1', 'Повреждённый'),
+			('2', '100.0', 'A', 'Позиция', '2', 'Исправный');
+		INSERT INTO intercept_items VALUES
+			(1, 1, 'session', 'Позиция', '100.0', 'A', 'source-1',
+			 '10.00' || char(10) || '-Текст (1)', 'Оператор', '2026-10-20 10:00:00'),
+			(2, 1, 'session', 'Позиция', '100.0', 'A', 'source-2',
+			 '10.01' || char(10) || '-Текст (2)', 'Оператор', '2026-10-20 10:01:00');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTestBlockSchema(t, db)
+	syncTestBlocks(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	items, cursor, err := source.Scan(context.Background(), application.Cursor{}, 10)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("чтение записей: items=%d err=%v", len(items), err)
+	}
+	if !strings.Contains(items[0].ContractError, "декодировать позывной") {
+		t.Fatalf("повреждённый позывной не изолирован: %+v", items[0])
+	}
+	if items[1].ContractError != "" || len(items[1].Blocks) != 1 ||
+		len(items[1].Blocks[0].Callsigns) != 1 ||
+		items[1].Blocks[0].Callsigns[0].Label != "Исправный" || cursor.ID != 2 {
+		t.Fatalf("исправная запись потеряна: item=%+v cursor=%+v", items[1], cursor)
+	}
+}
+
 // Название с конечной пометкой «отложенный режим» распознаётся как обычный отложенный перехват.
 func TestSourceInfersDeferredModeFromUnitName(t *testing.T) {
 	t.Parallel()

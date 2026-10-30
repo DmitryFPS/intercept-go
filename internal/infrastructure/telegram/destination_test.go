@@ -239,6 +239,27 @@ func TestTelegramLengthBoundaryAndBalancedChunks(t *testing.T) {
 	}
 }
 
+func TestSplitHTMLMessageLargeInputUsesBoundedAllocations(t *testing.T) {
+	// Один допустимый блок EAVC может содержать 1 МиБ текста. Разбиение не
+	// должно создавать новую строку для каждого символа такого блока.
+	message := strings.Repeat("я", 1<<19)
+	var chunks []string
+	allocations := testing.AllocsPerRun(1, func() {
+		chunks = splitHTMLMessage(message, maxTelegramMessageRunes-48)
+	})
+	if allocations > 5000 {
+		t.Fatalf("слишком много аллокаций при разбиении 1 МиБ: %.0f", allocations)
+	}
+	if len(chunks) < 2 || strings.Join(chunks, "") != message {
+		t.Fatalf("длинный текст разделён с потерями: частей %d", len(chunks))
+	}
+	for index, chunk := range chunks {
+		if runeLen(chunk) > maxTelegramMessageRunes-48 {
+			t.Fatalf("часть %d превышает лимит", index+1)
+		}
+	}
+}
+
 func TestMissingDescriptionIsNotInvented(t *testing.T) {
 	t.Parallel()
 	event := domain.Event{
