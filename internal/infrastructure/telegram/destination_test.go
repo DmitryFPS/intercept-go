@@ -1916,6 +1916,176 @@ func TestDestinationFallsBackToBaseWhenRedirectTopicWasDeleted(t *testing.T) {
 	}
 }
 
+func TestDestinationTransientRedirectFailureNeverFallsBackToBase(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		statusCode int
+		apiCode    int
+	}{
+		{name: "rate-limit", statusCode: http.StatusTooManyRequests, apiCode: 429},
+		{name: "server-error", statusCode: http.StatusInternalServerError, apiCode: 500},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
+			var threads []int64
+			statePath := filepath.Join(t.TempDir(), "state.json")
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if !strings.HasSuffix(request.URL.Path, "/sendMessage") {
+					t.Errorf("неожиданный Telegram-метод: %s", request.URL.Path)
+					return
+				}
+				var body map[string]any
+				if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+					t.Errorf("прочитать запрос Telegram: %v", err)
+					return
+				}
+				thread := int64(body["message_thread_id"].(float64))
+				threads = append(threads, thread)
+				if len(threads) == 1 {
+					writer.WriteHeader(scenario.statusCode)
+					_ = json.NewEncoder(writer).Encode(map[string]any{
+						"ok": false, "error_code": scenario.apiCode,
+						"description": "message thread not found",
+						"parameters":  map[string]any{"retry_after": 1},
+					})
+					return
+				}
+				_ = json.NewEncoder(writer).Encode(map[string]any{
+					"ok": true, "result": map[string]any{
+						"message_id": 101, "message_thread_id": thread,
+						"chat": map[string]any{"id": -1001},
+					},
+				})
+			}))
+			defer server.Close()
+			newDestination := func() *Destination {
+				api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+				if err != nil {
+					t.Fatal(err)
+				}
+				api.sends.globalInterval = 0
+				api.sends.groupInterval = 0
+				return &Destination{API: api, ChatID: -1001, StatePath: statePath}
+			}
+			base := domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 7}
+			delivery := domain.PlannedDelivery{
+				Decision:        domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42},
+				TopicRedirected: true, BaseDecision: &base,
+			}
+			event := domain.Event{
+				ID: "redirect-transient", ClientID: "point-01",
+				CreatedAt:       time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC),
+				Source:          domain.SourceRecord{UUID: "source-1"},
+				Position:        domain.Position{UnitName: "Игровая команда"},
+				SourceBlockUUID: "block-1", HasActiveBlocks: true,
+				Blocks: []domain.ContentBlock{{UUID: "block-1", Text: "12.00\n-Проверка"}},
+			}
+			first := newDestination()
+			if err := first.Deliver(context.Background(), event, delivery); err == nil {
+				t.Fatal("временная ошибка ошибочно помечена доставкой")
+			}
+			if !reflect.DeepEqual(threads, []int64{42}) {
+				t.Fatalf("после временной ошибки выбран исходный маршрут: %v", threads)
+			}
+			receipt, err := first.DeliveryReceipt(event, delivery)
+			if err != nil || len(receipt.MessageIDs) != 0 || len(receipt.Blocks) != 1 || receipt.Blocks[0].Complete {
+				t.Fatalf("ложная квитанция после временной ошибки: %#v err=%v", receipt, err)
+			}
+			restarted := newDestination()
+			if scenario.statusCode == http.StatusInternalServerError {
+				// HTTP 5xx не доказывает отсутствие публикации. Сначала убеждаемся,
+				// что автоматический повтор заблокирован, затем оператор подтверждает
+				// отсутствие спорной части по сохранённому маркеру попытки.
+				if err := restarted.Deliver(context.Background(), event, delivery); err == nil {
+					t.Fatal("неопределённый исход HTTP 5xx разрешил автоматический дубль")
+				}
+				if !reflect.DeepEqual(threads, []int64{42}) {
+					t.Fatalf("неопределённая отправка повторена автоматически: %v", threads)
+				}
+				receipt, err = restarted.DeliveryReceipt(event, delivery)
+				if err != nil || len(receipt.Blocks) != 1 || !receipt.Blocks[0].UnknownOutcome || receipt.Blocks[0].SendAttemptToken == "" {
+					t.Fatalf("потерян маркер неопределённой отправки: %#v err=%v", receipt, err)
+				}
+				allowed, err := restarted.AllowRepublishWithConfirmation(event, "block-1", 1, receipt.Blocks[0].SendAttemptToken)
+				if err != nil || !allowed {
+					t.Fatalf("подтверждённый ручной повтор не разрешён: allowed=%v err=%v", allowed, err)
+				}
+				if err := restarted.DeliverManually(context.Background(), event, delivery); err != nil {
+					t.Fatalf("ручной повтор в перенаправленную тему не выполнен: %v", err)
+				}
+			} else if err := restarted.Deliver(context.Background(), event, delivery); err != nil {
+				t.Fatalf("повтор после HTTP 429 не выполнен: %v", err)
+			}
+			if !reflect.DeepEqual(threads, []int64{42, 42}) {
+				t.Fatalf("повтор ушёл в исходную или чужую тему: %v", threads)
+			}
+			receipt, err = restarted.DeliveryReceipt(event, delivery)
+			if err != nil || receipt.ThreadID != 42 || !reflect.DeepEqual(receipt.MessageIDs, []int64{101}) ||
+				len(receipt.Blocks) != 1 || !receipt.Blocks[0].Complete {
+				t.Fatalf("неверная квитанция после успешного повтора: %#v err=%v", receipt, err)
+			}
+		})
+	}
+}
+
+func TestDestinationMissingRedirectAndBaseTopicsNeverPublishesElsewhere(t *testing.T) {
+	t.Parallel()
+	var threads []int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			t.Errorf("неожиданный Telegram-метод: %s", request.URL.Path)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("прочитать запрос Telegram: %v", err)
+			return
+		}
+		value, exists := body["message_thread_id"].(float64)
+		if !exists {
+			t.Error("запрос без темы ушёл в General")
+			return
+		}
+		threads = append(threads, int64(value))
+		writer.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"ok": false, "error_code": 400,
+			"description": "Bad Request: message thread not found",
+		})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	destination := Destination{API: api, ChatID: -1001, StatePath: filepath.Join(t.TempDir(), "state.json")}
+	base := domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 7}
+	delivery := domain.PlannedDelivery{
+		Decision:        domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42},
+		TopicRedirected: true, BaseDecision: &base,
+	}
+	event := domain.Event{
+		ID: "both-topics-missing", ClientID: "point-01",
+		CreatedAt:       time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC),
+		Source:          domain.SourceRecord{UUID: "source-1"},
+		Position:        domain.Position{UnitName: "Игровая команда"},
+		SourceBlockUUID: "block-1", HasActiveBlocks: true,
+		Blocks: []domain.ContentBlock{{UUID: "block-1", Text: "12.00\n-Проверка"}},
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err == nil || application.IsPermanentDeliveryError(err) {
+		t.Fatalf("обе удалённые темы должны оставить исправимую ошибку: %v", err)
+	}
+	if !reflect.DeepEqual(threads, []int64{42, 7}) {
+		t.Fatalf("ожидались только перенаправленная и исходная темы: %v", threads)
+	}
+	receipt, err := destination.DeliveryReceipt(event, delivery)
+	if err != nil || len(receipt.MessageIDs) != 0 || len(receipt.Blocks) != 1 || receipt.Blocks[0].Complete {
+		t.Fatalf("ложная квитанция при двух недоступных темах: %#v err=%v", receipt, err)
+	}
+}
+
 func TestDestinationDeletedRedirectAfterPartialSendMovesOnlyKnownPart(t *testing.T) {
 	t.Parallel()
 	var sentThreads []int64

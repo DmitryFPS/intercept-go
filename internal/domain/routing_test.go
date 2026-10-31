@@ -247,6 +247,54 @@ func TestDeferredSuffixKeepsNormalDestinations(t *testing.T) {
 	}
 }
 
+func TestDeferredPositionRedirectUsesNameRuleWithOrWithoutCatalogUUID(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name        string
+		catalogUUID string
+	}{
+		{name: "без UUID каталога"},
+		{name: "с UUID каталога", catalogUUID: "aabbccdd-1122-3344-5566-77889900aabb"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rules := testRuleSet()
+			key := "name:" + NormalizeUnitName("1 мб 155 омбр")
+			rules.TopicRedirects = map[string]TopicRedirect{
+				key: {DestinationID: "aerodrom", ThreadID: 39, TopicName: "Доразведка"},
+			}
+			event := testEvent("1 мб 155 омбр (отложенный режим)")
+			event.Mode = SourceModeDeferred
+			event.Position.CatalogUUID = test.catalogUUID
+
+			plan, err := rules.Resolve(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !plan.Recognized || plan.PositionKey != key || len(plan.Deliveries) != 2 {
+				t.Fatalf("отложенная позиция не распознана по основному правилу: %#v", plan)
+			}
+			for _, delivery := range plan.Deliveries {
+				switch delivery.Destination.ID {
+				case "aerodrom":
+					if !delivery.TopicRedirected || delivery.Decision.Action != RouteDeliver ||
+						delivery.Decision.ThreadID != 39 || delivery.BaseDecision == nil ||
+						delivery.BaseDecision.Action != RouteDeliver || delivery.BaseDecision.ThreadID != 2 {
+						t.Fatalf("неверная целевая или исходная тема: %#v", delivery)
+					}
+				case "word-39":
+					if delivery.TopicRedirected || delivery.BaseDecision != nil ||
+						delivery.Decision.Action != RouteDeliver || delivery.Decision.ThreadID != 0 {
+						t.Fatalf("перенаправление изменило Word-маршрут: %#v", delivery)
+					}
+				default:
+					t.Fatalf("перехват ошибочно ушёл в General или другое направление: %#v", delivery)
+				}
+			}
+		})
+	}
+}
+
 // Для поиска правила снимается только конечная пометка «отложенный режим», остальное название остаётся без изменений.
 func TestRoutingUnitNameRemovesOnlyTrailingDeferredMarker(t *testing.T) {
 	t.Parallel()
