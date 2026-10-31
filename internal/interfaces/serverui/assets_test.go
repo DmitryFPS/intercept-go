@@ -90,6 +90,9 @@ func TestTopicRedirectScreenWiring(t *testing.T) {
 	if !strings.Contains(string(styles), ".topic-redirect-card") {
 		t.Error("для списка перенаправлений нет отдельного оформления")
 	}
+	if strings.Contains(javascript, `${escapeHTML(option.topicName)} · тема`) || strings.Contains(javascript, `${escapeHTML(targetTopic)} · тема`) {
+		t.Error("имя Telegram-темы не должно дублироваться технической подписью того же ID")
+	}
 }
 
 func TestWordTemplateDownloadUsesAuthenticatedAPI(t *testing.T) {

@@ -1381,7 +1381,7 @@ function renderTopicRedirects() {
     const targetTopic = redirect.topic_name?.trim() || `Тема ${redirect.thread_id}`;
     return `<article class="route-card topic-redirect-card" data-redirect-key="${escapeHTML(key)}">
       <div class="topic-redirect-source"><h3>${escapeHTML(positionName(key))}</h3><p>${escapeHTML(destination.name)} · ${escapeHTML(wordRouteLabel(key))}</p></div>
-      <div class="topic-redirect-path"><span>${escapeHTML(originalTopic)}</span><span class="topic-redirect-arrow" aria-hidden="true">→</span><strong>${escapeHTML(targetTopic)} · тема ${escapeHTML(redirect.thread_id)}</strong></div>
+      <div class="topic-redirect-path"><span>${escapeHTML(originalTopic)}</span><span class="topic-redirect-arrow" aria-hidden="true">→</span><strong>${escapeHTML(targetTopic)}</strong></div>
       <div class="route-card-actions"><button class="button ghost" type="button" data-redirect-action="edit">Изменить</button><button class="button danger" type="button" data-redirect-action="remove">Отменить</button></div>
     </article>`;
   }).join('');
@@ -1416,7 +1416,7 @@ function updateTopicRedirectDialog() {
   const options = topicOptionsFor(row);
   const target = form.elements.target_topic;
   target.innerHTML = options.map(option =>
-    `<option value="${escapeHTML(option.value)}" data-destination-id="${escapeHTML(option.destinationID)}" data-thread-id="${escapeHTML(option.threadID)}" data-topic-name="${escapeHTML(option.topicName)}">${escapeHTML(option.topicName)} · тема ${escapeHTML(option.threadID)}</option>`
+    `<option value="${escapeHTML(option.value)}" data-destination-id="${escapeHTML(option.destinationID)}" data-thread-id="${escapeHTML(option.threadID)}" data-topic-name="${escapeHTML(option.topicName)}">${escapeHTML(option.topicName)}</option>`
   ).join('');
   const currentValue = redirect ? topicOptionValue(redirect.destination_id, Number(redirect.thread_id)) : '';
   if ([...target.options].some(option => option.value === currentValue)) target.value = currentValue;
