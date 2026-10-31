@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1913,6 +1914,46 @@ func TestDestinationFallsBackToBaseWhenRedirectTopicWasDeleted(t *testing.T) {
 	item := state.Items["point-01|source-1"]
 	if item.Blocks["block-1"].ThreadID != 7 {
 		t.Fatalf("состояние сохранило недействительную тему: %#v", item.Blocks["block-1"])
+	}
+}
+
+func TestAliasDeletedTopicDoesNotFallBackToTargetBase(t *testing.T) {
+	t.Parallel()
+	var threads []int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			t.Errorf("неожиданная операция: %s", request.URL.Path)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		threads = append(threads, int64(body["message_thread_id"].(float64)))
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": false, "error_code": 400, "description": "Bad Request: message thread not found"})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval, api.sends.groupInterval = 0, 0
+	destination := Destination{API: api, ChatID: -1001, StatePath: filepath.Join(t.TempDir(), "state.json")}
+	base := domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 7}
+	fallback := domain.Destination{ID: "general", Kind: domain.DestinationTelegram, Enabled: true}
+	fallbackDecision := domain.RouteDecision{Action: domain.RouteReview}
+	delivery := domain.PlannedDelivery{Decision: domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42},
+		RuleLevel: "alias", TopicRedirected: true, BaseDecision: &base,
+		FallbackDestination: &fallback, FallbackDecision: &fallbackDecision}
+	event := domain.Event{ID: "alias-1", ClientID: "point-01", CreatedAt: time.Now().UTC(),
+		Source: domain.SourceRecord{UUID: "source-1"}, Position: domain.Position{UnitName: "неизвестное"},
+		Blocks: []domain.ContentBlock{{UUID: "block-1", Text: "12.00\n-Проверка"}}}
+	if err := destination.Deliver(context.Background(), event, delivery); !errors.Is(err, application.ErrTelegramTopicMissing) {
+		t.Fatalf("не получен безопасный сигнал об удалённой теме: %v", err)
+	}
+	if !reflect.DeepEqual(threads, []int64{42}) {
+		t.Fatalf("адаптер ошибочно опубликовал в основную тему цели: %v", threads)
 	}
 }
 

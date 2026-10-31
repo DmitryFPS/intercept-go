@@ -35,6 +35,82 @@ func TestRoutingFallsBackToNameWhenCatalogRuleIsAbsent(t *testing.T) {
 	}
 }
 
+func TestUnknownAliasInheritsExactRouteAndTopicRedirect(t *testing.T) {
+	t.Parallel()
+	rules := testRuleSet()
+	target := "name:1 мб 155 омбр"
+	rules.UnknownAliases = map[string]string{"name:н/у доразведка всу": target}
+	rules.TopicRedirects = map[string]TopicRedirect{target: {DestinationID: "aerodrom", ThreadID: 39, TopicName: "Доразведка"}}
+	for _, input := range []string{"н/у доразведка ВСУ", "  Н/У   ДОРАЗВЕДКА  ВСУ  ", "н/у доразведка ВСУ (отложенный режим)"} {
+		plan, err := rules.Resolve(testEvent(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !plan.Recognized || plan.PositionKey != "name:н/у доразведка всу" || len(plan.Deliveries) != 2 {
+			t.Fatalf("привязка %q не применилась: %+v", input, plan)
+		}
+		for _, delivery := range plan.Deliveries {
+			if delivery.RuleLevel != "alias" {
+				t.Fatalf("не отмечено правило привязки: %+v", delivery)
+			}
+			switch delivery.Destination.ID {
+			case "aerodrom":
+				if delivery.Decision.ThreadID != 39 || !delivery.TopicRedirected {
+					t.Fatalf("не наследована конечная тема: %+v", delivery)
+				}
+			case "word-39":
+				if delivery.Decision.Action != RouteDeliver {
+					t.Fatalf("не наследован Word: %+v", delivery)
+				}
+			default:
+				t.Fatalf("неверный получатель: %+v", delivery)
+			}
+		}
+	}
+	unknown, err := rules.Resolve(testEvent("н/у доразведка ВСУ (отложенный перехват)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unknown.Recognized || len(unknown.Deliveries) != 1 || unknown.Deliveries[0].Decision.ThreadID != 0 {
+		t.Fatalf("посторонняя пометка не должна подменять совпадение: %+v", unknown)
+	}
+	rules.UnknownAliases = nil
+	unknown, err = rules.Resolve(testEvent("н/у доразведка ВСУ"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unknown.Recognized || len(unknown.Deliveries) != 1 || unknown.Deliveries[0].Destination.ID != "shabashka" {
+		t.Fatalf("отмена привязки не вернула General: %+v", unknown)
+	}
+}
+
+func TestUnknownAliasRejectsUnsafeTargets(t *testing.T) {
+	t.Parallel()
+	for name, change := range map[string]func(*RuleSet){
+		"absent": func(r *RuleSet) {
+			r.UnknownAliases = map[string]string{"name:новое": "name:нет маршрута"}
+		},
+		"direct collision": func(r *RuleSet) {
+			r.UnknownAliases = map[string]string{"name:1 мб 155 омбр": "name:1 мб 155 омбр"}
+		},
+		"empty name":          func(r *RuleSet) { r.UnknownAliases = map[string]string{"name:": "name:1 мб 155 омбр"} },
+		"catalog source":      func(r *RuleSet) { r.UnknownAliases = map[string]string{"catalog:123": "name:1 мб 155 омбр"} },
+		"unnormalized source": func(r *RuleSet) { r.UnknownAliases = map[string]string{"name:НОВОЕ": "name:1 мб 155 омбр"} },
+		"general target": func(r *RuleSet) {
+			r.UnknownAliases = map[string]string{"name:новое": "name:1 мб 155 омбр"}
+			r.Positions["name:1 мб 155 омбр"]["aerodrom"] = RouteDecision{Action: RouteDeliver}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rules := testRuleSet()
+			change(&rules)
+			if err := rules.Validate(); err == nil {
+				t.Fatal("опасная привязка принята")
+			}
+		})
+	}
+}
+
 // Неизвестное подразделение уходит только по явно настроенному правилу для новых и ошибочных названий.
 func TestRuleSetRoutesUnknownOnlyByUnknownRow(t *testing.T) {
 	t.Parallel()

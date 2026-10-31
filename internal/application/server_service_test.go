@@ -622,6 +622,36 @@ func TestDeliveryServicePersistsExternalReceipt(t *testing.T) {
 	}
 }
 
+func TestDeliveryServiceMissingAliasTopicUsesConfiguredGeneralOnly(t *testing.T) {
+	t.Parallel()
+	event := serverServiceEvent()
+	fallbackDestination := domain.Destination{ID: "configured-general", Kind: domain.DestinationTelegram, Enabled: true}
+	fallbackDecision := domain.RouteDecision{Action: domain.RouteReview}
+	delivery := domain.PlannedDelivery{
+		Destination: domain.Destination{ID: "target", Kind: domain.DestinationTelegram, Enabled: true},
+		Decision:    domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42},
+		RuleLevel:   "alias", FallbackDestination: &fallbackDestination, FallbackDecision: &fallbackDecision,
+	}
+	queue := &memoryDeliveryQueue{jobs: []DeliveryJob{{Event: event, Delivery: delivery}}}
+	service := DeliveryService{Queue: queue, Now: time.Now, MaxConcurrent: 1, Gateways: map[string]DeliveryGateway{
+		"target":             memoryGateway{err: ErrTelegramTopicMissing},
+		"configured-general": generalReceiptGateway{},
+	}}
+	delivered, err := service.RunOnce(context.Background(), 10)
+	if err != nil || delivered != 1 || queue.fallbackDelivery.Destination.ID != "configured-general" ||
+		len(queue.receipts) != 1 || queue.receipts[0].ThreadID != 0 {
+		t.Fatalf("резервная доставка не закреплена: delivered=%d receipt=%+v fallback=%+v err=%v", delivered, queue.receipts, queue.fallbackDelivery, err)
+	}
+	// Ошибка сети не доказывает удаление темы и не разрешает General.
+	queue = &memoryDeliveryQueue{jobs: []DeliveryJob{{Event: event, Delivery: delivery}}}
+	service.Queue = queue
+	service.Gateways["target"] = memoryGateway{err: errors.New("timeout")}
+	delivered, err = service.RunOnce(context.Background(), 10)
+	if err != nil || delivered != 0 || len(queue.retried) != 1 || queue.fallbackDelivery.Destination.ID != "" {
+		t.Fatalf("временный сбой ошибочно перенаправлен в General: delivered=%d queue=%+v err=%v", delivered, queue, err)
+	}
+}
+
 func TestDeliveryServiceRetriesWhenPublishedReceiptIsTemporarilyUnavailable(t *testing.T) {
 	t.Parallel()
 	event := serverServiceEvent()
@@ -826,6 +856,15 @@ func (gateway memoryGateway) Deliver(_ context.Context, _ domain.Event, _ domain
 
 type receiptGateway struct{}
 
+type generalReceiptGateway struct{}
+
+func (generalReceiptGateway) Deliver(_ context.Context, _ domain.Event, _ domain.PlannedDelivery) error {
+	return nil
+}
+func (generalReceiptGateway) DeliveryReceipt(_ domain.Event, _ domain.PlannedDelivery) (DeliveryReceipt, error) {
+	return DeliveryReceipt{Kind: "telegram", ChatID: -1002, ThreadID: 0, MessageIDs: []int64{801}}, nil
+}
+
 func (receiptGateway) Deliver(_ context.Context, _ domain.Event, _ domain.PlannedDelivery) error {
 	return nil
 }
@@ -880,13 +919,14 @@ func (gateway channelGateway) Deliver(ctx context.Context, _ domain.Event, _ dom
 }
 
 type memoryDeliveryQueue struct {
-	mu              sync.Mutex
-	jobs            []DeliveryJob
-	delivered       []string
-	retried         []string
-	failed          []string
-	receipts        []DeliveryReceipt
-	partialReceipts []DeliveryReceipt
+	mu               sync.Mutex
+	jobs             []DeliveryJob
+	delivered        []string
+	retried          []string
+	failed           []string
+	receipts         []DeliveryReceipt
+	partialReceipts  []DeliveryReceipt
+	fallbackDelivery domain.PlannedDelivery
 }
 
 func (queue *memoryDeliveryQueue) PendingDeliveries(_ context.Context, _ int, _ time.Time) ([]DeliveryJob, error) {
@@ -939,6 +979,17 @@ func (queue *memoryDeliveryQueue) MarkDeliveredWithReceipt(
 	defer queue.mu.Unlock()
 	queue.delivered = append(queue.delivered, eventID+":"+destinationID)
 	queue.receipts = append(queue.receipts, receipt)
+	return nil
+}
+
+func (queue *memoryDeliveryQueue) MarkDeliveredOnAliasFallback(
+	_ context.Context, eventID, destinationID string, _ time.Time, receipt DeliveryReceipt, fallback domain.PlannedDelivery,
+) error {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	queue.delivered = append(queue.delivered, eventID+":"+destinationID)
+	queue.receipts = append(queue.receipts, receipt)
+	queue.fallbackDelivery = fallback
 	return nil
 }
 

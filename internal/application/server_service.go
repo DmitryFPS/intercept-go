@@ -385,7 +385,33 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 		timeout = 20 * time.Second
 	}
 	attemptContext, cancel := context.WithTimeout(ctx, timeout)
+	deliveryForReceipt := job.Delivery
+	fallbackUsed := false
 	err := gateway.Deliver(attemptContext, job.Event, job.Delivery)
+	if errors.Is(err, ErrTelegramTopicMissing) && job.Delivery.RuleLevel == "alias" &&
+		job.Delivery.FallbackDestination != nil && job.Delivery.FallbackDecision != nil {
+		if _, durable := service.Queue.(AliasFallbackQueue); !durable {
+			err = errors.New("очередь не поддерживает безопасное закрепление резервного маршрута")
+		} else if fallbackGateway, exists := service.Gateways[job.Delivery.FallbackDestination.ID]; !exists {
+			err = fmt.Errorf("не настроен получатель для резервного General %q", job.Delivery.FallbackDestination.ID)
+		} else {
+			deliveryForReceipt = domain.PlannedDelivery{
+				Destination: *job.Delivery.FallbackDestination,
+				Decision:    *job.Delivery.FallbackDecision,
+				RuleLevel:   "alias", SourcePositionKey: job.Delivery.SourcePositionKey,
+				SourceUnitNameKey: job.Delivery.SourceUnitNameKey,
+			}
+			gateway = fallbackGateway
+			fallbackUsed = true
+			if service.Logger != nil {
+				service.Logger.Warn("тема привязки удалена; доставка неизвестного названия по настроенному General",
+					"event_id", job.Event.ID, "source_position_key", job.Delivery.SourcePositionKey,
+					"planned_destination_id", job.Delivery.Destination.ID,
+					"fallback_destination_id", deliveryForReceipt.Destination.ID)
+			}
+			err = gateway.Deliver(attemptContext, job.Event, deliveryForReceipt)
+		}
+	}
 	cancel()
 	if err != nil {
 		// Ошибка всей доставки не означает, что Telegram не подтвердил ни
@@ -393,7 +419,7 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 		// перевода задания в повтор или окончательную ошибку.
 		if provider, ok := gateway.(DeliveryReceiptProvider); ok {
 			if queue, ok := service.Queue.(PartialDeliveryReceiptQueue); ok {
-				receipt, receiptErr := provider.DeliveryReceipt(job.Event, job.Delivery)
+				receipt, receiptErr := provider.DeliveryReceipt(job.Event, deliveryForReceipt)
 				if receiptErr != nil {
 					if service.Logger != nil {
 						service.Logger.Warn("частичная квитанция доставки недоступна",
@@ -439,7 +465,7 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 	receiptReady := false
 	if provider, ok := gateway.(DeliveryReceiptProvider); ok {
 		var receiptErr error
-		receipt, receiptErr = provider.DeliveryReceipt(job.Event, job.Delivery)
+		receipt, receiptErr = provider.DeliveryReceipt(job.Event, deliveryForReceipt)
 		if receiptErr != nil {
 			// Публикация уже выполнена, но без устойчивой квитанции нельзя
 			// завершать задание: внешний message_id навсегда исчез бы из
@@ -460,7 +486,18 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 		}
 	}
 	markErr := error(nil)
-	if queue, ok := service.Queue.(DeliveryReceiptQueue); ok && receiptReady {
+	if fallbackUsed && !receiptReady {
+		if err := service.Queue.MarkDeliveryRetry(ctx, job.Event.ID, job.Delivery.Destination.ID,
+			now.Add(retryDelay(job.Attempts+1)), "резервная доставка выполнена, ожидается квитанция"); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if fallbackUsed && receiptReady {
+		markErr = service.Queue.(AliasFallbackQueue).MarkDeliveredOnAliasFallback(
+			ctx, job.Event.ID, job.Delivery.Destination.ID, service.Now(), receipt, deliveryForReceipt,
+		)
+	} else if queue, ok := service.Queue.(DeliveryReceiptQueue); ok && receiptReady {
 		markErr = queue.MarkDeliveredWithReceipt(
 			ctx, job.Event.ID, job.Delivery.Destination.ID, service.Now(), receipt,
 		)

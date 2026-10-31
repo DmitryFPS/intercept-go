@@ -194,6 +194,26 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 		plan.Deliveries[index].SourcePositionKey = positionKey
 		currentRedirected = currentRedirected || plan.Deliveries[index].TopicRedirected
 	}
+	// Правка уже принятого перехвата с тем же исходным названием не должна
+	// переезжать в другой маршрут из-за последующей правки/отмены привязки.
+	// Изменение самого названия в EAVC, напротив, рассчитывается заново.
+	if hasBarrier && len(barrier.Route) > 0 && barrier.Route[0].RuleLevel == "alias" {
+		previousPositionKey, err := sourcePositionKeyForBarrier(ctx, tx, barrier)
+		if err != nil {
+			return false, err
+		}
+		currentNameKey := "name:" + domain.NormalizeUnitName(domain.RoutingUnitName(event.Position.UnitName))
+		if previousPositionKey == positionKey && barrier.Route[0].SourceUnitNameKey == currentNameKey {
+			plan.Deliveries = append([]domain.PlannedDelivery(nil), barrier.Route...)
+			for index := range plan.Deliveries {
+				plan.Deliveries[index].SourcePositionKey = positionKey
+			}
+			currentRedirected = false
+			for _, delivery := range plan.Deliveries {
+				currentRedirected = currentRedirected || delivery.TopicRedirected
+			}
+		}
+	}
 	previousRedirected := false
 	for _, delivery := range barrier.Route {
 		previousRedirected = previousRedirected || delivery.TopicRedirected
@@ -672,6 +692,67 @@ func (store *ServerStore) MarkDeliveredWithReceipt(
 		return fmt.Errorf("защитить результат доставки: %w", err)
 	}
 	return store.markDelivered(ctx, eventID, destinationID, at, protected)
+}
+
+// MarkDeliveredOnAliasFallback сохраняет фактическую публикацию и маршрут
+// следующих редакций одной транзакцией. После сбоя между этими действиями
+// новая редакция могла бы снова выбрать удалённую тему и создать дубль.
+func (store *ServerStore) MarkDeliveredOnAliasFallback(
+	ctx context.Context, eventID, destinationID string, at time.Time,
+	receipt application.DeliveryReceipt, fallback domain.PlannedDelivery,
+) error {
+	if fallback.RuleLevel != "alias" || fallback.Destination.Kind != domain.DestinationTelegram ||
+		fallback.Decision.Action == domain.RouteSkip || fallback.Decision.ThreadID != receipt.ThreadID ||
+		receipt.Kind != "telegram" || receipt.ChatID == 0 {
+		return errors.New("резервная квитанция не соответствует маршруту General")
+	}
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		return fmt.Errorf("кодировать резервную квитанцию: %w", err)
+	}
+	protected, err := protectDatabaseValue(payload)
+	if err != nil {
+		return fmt.Errorf("защитить резервную квитанцию: %w", err)
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var clientID, sourceUUID string
+	if err := tx.QueryRowContext(ctx, `SELECT e.client_id,e.source_uuid FROM received_events e
+		JOIN delivery_jobs j ON j.event_id=e.event_id WHERE e.event_id=? AND j.destination_id=? AND j.state='pending'`,
+		eventID, destinationID).Scan(&clientID, &sourceUUID); err != nil {
+		return fmt.Errorf("найти исходную линию резервной доставки: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE delivery_jobs SET state='delivered', delivered_at=?, last_error='', result_json=?
+		WHERE event_id=? AND destination_id=? AND state='pending'`,
+		at.UTC().Format(time.RFC3339Nano), protected, eventID, destinationID)
+	if err := changedExactlyOnce(result, err, "подтвердить резервную доставку"); err != nil {
+		return err
+	}
+	barrier, exists, err := loadSourceRevisionBarrier(ctx, tx, clientID, sourceUUID)
+	if err != nil {
+		return err
+	}
+	if exists && barrier.EventID == eventID {
+		replaced := false
+		for index, delivery := range barrier.Route {
+			if delivery.Destination.ID != destinationID {
+				continue
+			}
+			barrier.Route[index] = fallback
+			replaced = true
+			break
+		}
+		if !replaced {
+			return errors.New("исходный маршрут не найден в барьере редакций")
+		}
+		if err := saveSourceRevisionBarrier(ctx, tx, barrier); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // SavePartialDeliveryReceipt сохраняет уже известные внешние ID и признаки

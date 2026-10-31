@@ -44,6 +44,38 @@ func TestTopicRedirectSurvivesDraftAndPublication(t *testing.T) {
 	}
 }
 
+func TestUnknownAliasSurvivesDraftPublicationAndRestore(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := serverTestRules()
+	source := "name:н/у доразведка всу"
+	target := "name:1 мб 155 омбр"
+	rules.UnknownAliases = map[string]string{source: target}
+	if err := store.SaveRuleDraft(ctx, rules); err != nil {
+		t.Fatal(err)
+	}
+	draft, exists, err := store.RuleDraft(ctx)
+	if err != nil || !exists || draft.UnknownAliases[source] != target {
+		t.Fatalf("привязка потерялась в черновике: %+v, %v", draft, err)
+	}
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.ActiveRules(ctx)
+	if err != nil || active.UnknownAliases[source] != target {
+		t.Fatalf("привязка потерялась после публикации: %+v, %v", active, err)
+	}
+}
+
 func TestLegacyGeneralDeliveryMigratesToExplicitReview(t *testing.T) {
 	t.Parallel()
 	rules := serverTestRules()

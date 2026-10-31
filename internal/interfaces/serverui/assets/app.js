@@ -12,7 +12,7 @@ const pageTitles = {
   destinations: 'Получатели',
   clients: 'Рабочие точки',
   routes: 'Маршруты',
-  topicRedirects: 'Перенаправление тем'
+  topicRedirects: 'Перенаправление'
 };
 
 const pageContexts = {
@@ -1181,6 +1181,7 @@ function initializeRuleMaps() {
   rules.destinations ||= {};
   rules.positions ||= {};
   rules.topic_redirects ||= {};
+  rules.unknown_aliases ||= {};
   rules.unknown ||= {};
 }
 
@@ -1189,7 +1190,12 @@ function positionName(key) {
 }
 
 function normalizedPositionKey(name) {
-  return `name:${name.trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru-RU')}`;
+  const quotes = String(name).replace(/[«»“”„]/g, '"').replace(/[’`]/g, "'");
+  return `name:${quotes.trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru-RU')}`;
+}
+
+function normalizedAliasKey(name) {
+  return normalizedPositionKey(String(name).replace(/\s*\(отложенный режим\)\s*$/iu, ''));
 }
 
 function sortedRuleDestinations() {
@@ -1383,7 +1389,7 @@ function renderTopicRedirects() {
   const search = $('topicRedirectSearch').value.trim().toLocaleLowerCase('ru-RU');
   const rows = eligible.filter(row => rules.topic_redirects[row.key] &&
     positionName(row.key).toLocaleLowerCase('ru-RU').includes(search));
-  $('topicRedirectCount').textContent = `${rows.length} перенаправлений · ${eligible.length} доступных маршрутов`;
+  $('topicRedirectCount').textContent = `${Object.keys(rules.topic_redirects).length} перенаправлений тем · ${Object.keys(rules.unknown_aliases).length} перенаправлений подразделений`;
   $('topicRedirectRulesMeta').textContent = rulesDirty
     ? `Черновик · основа: версия ${rules.version}`
     : `Опубликована версия ${rules.version}`;
@@ -1404,7 +1410,125 @@ function renderTopicRedirects() {
       <div class="route-card-actions"><button class="button ghost" type="button" data-redirect-action="edit">Изменить</button><button class="button danger" type="button" data-redirect-action="remove">Отменить</button></div>
     </article>`;
   }).join('');
+  renderUnknownAliases();
 }
+
+function eligibleAliasTargets() {
+  return eligibleTopicRedirects().filter(row => {
+    const redirect = rules.topic_redirects[row.key];
+    return Number(redirect?.thread_id || row.decision.thread_id || 0) > 0;
+  });
+}
+
+function aliasTargetLabel(row) {
+  const redirect = rules.topic_redirects[row.key];
+  const topic = redirect?.topic_name || positionName(row.key);
+  return `${positionName(row.key)} · тема «${topic}» · ${wordRouteLabel(row.key)}`;
+}
+
+function renderUnknownAliases() {
+  const search = $('topicRedirectSearch').value.trim().toLocaleLowerCase('ru-RU');
+  const targets = eligibleAliasTargets();
+  const rows = Object.entries(rules.unknown_aliases).sort((a, b) => a[0].localeCompare(b[0], 'ru'))
+    .filter(([source]) => positionName(source).toLocaleLowerCase('ru-RU').includes(search));
+  $('addUnknownAlias').disabled = targets.length === 0;
+  $('unknownAliasList').dataset.emptyMessage = search
+    ? 'По запросу перенаправления не найдены'
+    : targets.length ? 'Пока нет перенаправлений неизвестных подразделений.' : 'Сначала создайте маршрут с действующей темой Telegram.';
+  $('unknownAliasList').innerHTML = rows.map(([source, target]) => {
+    const route = targets.find(row => row.key === target);
+    const targetLabel = route ? aliasTargetLabel(route) : 'Маршрут недоступен';
+    return `<article class="route-card topic-redirect-card" data-alias-key="${escapeHTML(source)}">
+      <div class="topic-redirect-source"><h3>${escapeHTML(positionName(source))}</h3><p>Название из EAVC, которого нет в маршрутах</p></div>
+      <div class="topic-redirect-path"><span>Название в EAVC</span><span class="topic-redirect-arrow" aria-hidden="true">→</span><strong>${escapeHTML(targetLabel)}</strong></div>
+      <div class="route-card-actions"><button class="button ghost" type="button" data-alias-action="edit">Изменить</button><button class="button danger" type="button" data-alias-action="remove">Отменить</button></div>
+    </article>`;
+  }).join('');
+}
+
+function showUnknownAliasDialog(source = '') {
+  const form = $('unknownAliasForm');
+  form.reset();
+  const targets = eligibleAliasTargets();
+  if (!targets.length) {
+    notify('Сначала создайте маршрут с действующей темой Telegram.');
+    return;
+  }
+  form.elements.original_key.value = source;
+  form.elements.source_name.value = source ? positionName(source) : '';
+  form.elements.target_route.innerHTML = targets.map(row =>
+    `<option value="${escapeHTML(row.key)}">${escapeHTML(aliasTargetLabel(row))}</option>`).join('');
+  if (source && targets.some(row => row.key === rules.unknown_aliases[source])) {
+    form.elements.target_route.value = rules.unknown_aliases[source];
+  }
+  $('unknownAliasDialogTitle').textContent = source ? 'Изменить перенаправление' : 'Направить по готовому маршруту';
+  openDialog('unknownAliasDialog');
+}
+
+$('addUnknownAlias').addEventListener('click', () => showUnknownAliasDialog());
+$('unknownAliasList').addEventListener('click', async event => {
+  const button = event.target.closest('button[data-alias-action]');
+  const row = event.target.closest('[data-alias-key]');
+  if (!button || !row) return;
+  const source = row.dataset.aliasKey;
+  if (button.dataset.aliasAction === 'edit') {
+    showUnknownAliasDialog(source);
+    return;
+  }
+  if (!await appConfirm({title: `Отменить привязку «${positionName(source)}»?`, message: 'Новые перехваты с этим названием снова пойдут в General. Уже принятые сохранят прежний маршрут.', confirmLabel: 'Отменить привязку'})) return;
+  const previous = cloneRules(rules);
+  delete rules.unknown_aliases[source];
+  setButtonBusy(button, true, 'Сохраняем…');
+  try {
+    await post('/api/rule-draft', rules);
+    rulesDirty = true;
+    renderRules();
+    notify('Отмена привязки сохранена в черновике.', true);
+  } catch (error) {
+    rules = previous;
+    renderRules();
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
+
+$('unknownAliasForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const source = normalizedAliasKey(form.elements.source_name.value);
+  const original = form.elements.original_key.value;
+  const target = form.elements.target_route.value;
+  if (source === 'name:' || source.length > 205 || rules.positions[source]) {
+    notify('Укажите неизвестное название длиной до 200 символов, которого нет в маршрутах.');
+    return;
+  }
+  if (source !== original && rules.unknown_aliases[source]) {
+    notify('Такое название уже привязано. Измените существующее правило.');
+    return;
+  }
+  if (!eligibleAliasTargets().some(row => row.key === target)) {
+    notify('Выберите готовый маршрут с действующей темой Telegram.');
+    return;
+  }
+  const previous = cloneRules(rules);
+  if (original) delete rules.unknown_aliases[original];
+  rules.unknown_aliases[source] = target;
+  const button = form.querySelector('button[value="save"]');
+  setButtonBusy(button, true, 'Сохраняем…');
+  try {
+    await post('/api/rule-draft', rules);
+    rulesDirty = true;
+    closeDialog('unknownAliasDialog');
+    renderRules();
+    notify('Привязка сохранена в черновике. Опубликуйте маршруты, чтобы она заработала.', true);
+  } catch (error) {
+    rules = previous;
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
 
 function showTopicRedirectDialog(key = '') {
   const form = $('topicRedirectForm');
@@ -1587,6 +1711,10 @@ $('positionsList').addEventListener('click', async event => {
   const key = row.dataset.positionKey;
   if (button.dataset.action === 'edit') showPositionDialog(key);
   if (button.dataset.action === 'delete') {
+    if (Object.values(rules.unknown_aliases).includes(key)) {
+      notify('Сначала отмените или измените привязки неизвестных названий к этому маршруту.');
+      return;
+    }
     if (!await appConfirm({ title: `Удалить «${positionName(key)}»?`, message: 'Позиция будет удалена из черновика маршрутов.', confirmLabel: 'Удалить', danger: true })) return;
     const previous = cloneRules(rules);
     delete rules.positions[key];
@@ -1632,6 +1760,10 @@ $('positionForm').addEventListener('submit', async event => {
     rules.unknown = decisions;
   } else {
     const newKey = normalizedPositionKey(data.get('name'));
+    if (rules.unknown_aliases[normalizedAliasKey(data.get('name'))]) {
+      notify('Это название уже привязано как неизвестное. Сначала отмените привязку.');
+      return;
+    }
     if (newKey !== originalKey && rules.positions[newKey]) {
       notify('Позиция с таким названием уже существует.');
       return;
@@ -1642,6 +1774,11 @@ $('positionForm').addEventListener('submit', async event => {
       delete rules.topic_redirects[originalKey];
     }
     rules.positions[newKey] = decisions;
+    if (originalKey && newKey !== originalKey) {
+      Object.keys(rules.unknown_aliases).forEach(source => {
+        if (rules.unknown_aliases[source] === originalKey) rules.unknown_aliases[source] = newKey;
+      });
+    }
     if (oldRedirect) {
       const destination = rules.destinations[oldRedirect.destination_id];
       const activeTelegram = sortedRuleDestinations().filter(item =>

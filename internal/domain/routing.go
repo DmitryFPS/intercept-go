@@ -55,6 +55,9 @@ type RuleSet struct {
 	Positions      map[string]map[string]RouteDecision `json:"positions"`
 	Unknown        map[string]RouteDecision            `json:"unknown"`
 	TopicRedirects map[string]TopicRedirect            `json:"topic_redirects,omitempty"`
+	// UnknownAliases связывает явно указанное неизвестное имя с готовым маршрутом.
+	// Ключ всегда name:<нормализованное имя>, значение — ключ из Positions.
+	UnknownAliases map[string]string `json:"unknown_aliases,omitempty"`
 }
 
 // PlannedDelivery — одно независимое задание для внешнего получателя.
@@ -69,6 +72,13 @@ type PlannedDelivery struct {
 	// SourcePositionKey сохраняет позицию EAVC после очистки истории, чтобы
 	// последующие редакции продолжали менять сообщение в исходной теме.
 	SourcePositionKey string `json:"source_position_key,omitempty"`
+	// Нужен вместе с catalog UUID: изменение имени в EAVC должно снять старую
+	// привязку, даже если идентификатор каталога не изменился.
+	SourceUnitNameKey string `json:"source_unit_name_key,omitempty"`
+	// FallbackDestination используется только для явно привязанного неизвестного
+	// названия, если Telegram окончательно подтвердил удаление целевой темы.
+	FallbackDestination *Destination   `json:"fallback_destination,omitempty"`
+	FallbackDecision    *RouteDecision `json:"fallback_decision,omitempty"`
 }
 
 // DeliveryPlan объясняет как результат, так и правило, которое его создало.
@@ -86,6 +96,9 @@ func (rules RuleSet) Validate() error {
 		return errors.New("версия маршрутов должна быть положительной")
 	}
 	if len(rules.Destinations) == 0 {
+		if len(rules.UnknownAliases) != 0 {
+			return errors.New("привязка неизвестного названия не может ссылаться на отсутствующие маршруты")
+		}
 		if len(rules.TopicRedirects) != 0 {
 			return errors.New("перенаправление темы не может ссылаться на отсутствующих получателей")
 		}
@@ -121,6 +134,37 @@ func (rules RuleSet) Validate() error {
 		}
 		if err := rules.validateDecisions("позиция "+key, decisions); err != nil {
 			return err
+		}
+	}
+	for source, target := range rules.UnknownAliases {
+		if !strings.HasPrefix(source, "name:") ||
+			source != "name:"+NormalizeUnitName(RoutingUnitName(strings.TrimPrefix(source, "name:"))) ||
+			len(strings.TrimPrefix(source, "name:")) == 0 || utf8.RuneCountInString(source) > 205 {
+			return fmt.Errorf("некорректное название для привязки %q", source)
+		}
+		if _, exists := rules.Positions[source]; exists {
+			return fmt.Errorf("название %q уже имеет собственный маршрут", source)
+		}
+		decisions, exists := rules.Positions[target]
+		if !exists {
+			return fmt.Errorf("привязка %q ссылается на отсутствующий маршрут %q", source, target)
+		}
+		activeTelegram := 0
+		for id, decision := range decisions {
+			if rules.Destinations[id].Enabled && rules.Destinations[id].Kind == DestinationTelegram &&
+				decision.Action != RouteSkip {
+				activeTelegram++
+				threadID := decision.ThreadID
+				if redirect, ok := rules.TopicRedirects[target]; ok && redirect.DestinationID == id {
+					threadID = redirect.ThreadID
+				}
+				if threadID <= 0 {
+					return fmt.Errorf("маршрут %q не указывает существующую тему Telegram", target)
+				}
+			}
+		}
+		if activeTelegram != 1 {
+			return fmt.Errorf("для привязки %q нужен маршрут с одним действующим Telegram-получателем", source)
 		}
 	}
 	for key, redirect := range rules.TopicRedirects {
@@ -214,7 +258,14 @@ func (rules RuleSet) Resolve(event Event) (DeliveryPlan, error) {
 			key, decisions, recognized = nameKey, byName, true
 		}
 	}
+	routeKey := key
 	level := "position"
+	if !recognized {
+		nameKey := "name:" + NormalizeUnitName(RoutingUnitName(event.Position.UnitName))
+		if target, exists := rules.UnknownAliases[nameKey]; exists {
+			key, routeKey, decisions, recognized, level = nameKey, target, rules.Positions[target], true, "alias"
+		}
+	}
 	if !recognized {
 		decisions = rules.Unknown
 		level = "unknown"
@@ -242,20 +293,36 @@ func (rules RuleSet) Resolve(event Event) (DeliveryPlan, error) {
 		redirected := false
 		var baseDecision *RouteDecision
 		if recognized && destination.Kind == DestinationTelegram {
-			if redirect, exists := rules.TopicRedirects[key]; exists && redirect.DestinationID == id {
+			if redirect, exists := rules.TopicRedirects[routeKey]; exists && redirect.DestinationID == id {
 				base := decision
 				baseDecision = &base
 				decision.ThreadID = redirect.ThreadID
 				redirected = true
 			}
 		}
+		var fallbackDestination *Destination
+		var fallbackDecision *RouteDecision
+		if level == "alias" && destination.Kind == DestinationTelegram {
+			for unknownID, unknownDecision := range rules.Unknown {
+				if unknownDecision.Action != RouteReview {
+					continue
+				}
+				copyDestination := rules.Destinations[unknownID]
+				copyDecision := unknownDecision
+				fallbackDestination = &copyDestination
+				fallbackDecision = &copyDecision
+			}
+		}
 		plan.Deliveries = append(plan.Deliveries, PlannedDelivery{
-			Destination:       destination,
-			Decision:          decision,
-			RuleLevel:         level,
-			TopicRedirected:   redirected,
-			BaseDecision:      baseDecision,
-			SourcePositionKey: event.PositionKey(),
+			Destination:         destination,
+			Decision:            decision,
+			RuleLevel:           level,
+			TopicRedirected:     redirected,
+			BaseDecision:        baseDecision,
+			SourcePositionKey:   event.PositionKey(),
+			SourceUnitNameKey:   "name:" + NormalizeUnitName(RoutingUnitName(event.Position.UnitName)),
+			FallbackDestination: fallbackDestination,
+			FallbackDecision:    fallbackDecision,
 		})
 	}
 	return plan, nil

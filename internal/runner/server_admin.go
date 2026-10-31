@@ -1177,6 +1177,18 @@ func canonicalRules(rules domain.RuleSet) (domain.RuleSet, error) {
 		redirects[canonical] = redirect
 	}
 	rules.TopicRedirects = redirects
+	aliases := make(map[string]string, len(rules.UnknownAliases))
+	for source, target := range rules.UnknownAliases {
+		if !strings.HasPrefix(source, "name:") {
+			return domain.RuleSet{}, fmt.Errorf("привязка неизвестного названия должна начинаться с name: %q", source)
+		}
+		canonical := "name:" + domain.NormalizeUnitName(domain.RoutingUnitName(strings.TrimPrefix(source, "name:")))
+		if _, exists := aliases[canonical]; exists {
+			return domain.RuleSet{}, fmt.Errorf("два неизвестных названия после нормализации совпадают: %q", canonical)
+		}
+		aliases[canonical] = canonicalPositionKey(target)
+	}
+	rules.UnknownAliases = aliases
 	return rules, nil
 }
 

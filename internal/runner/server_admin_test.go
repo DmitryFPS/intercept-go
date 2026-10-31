@@ -27,6 +27,24 @@ import (
 	"intercept/internal/provisioning"
 )
 
+func TestCanonicalRulesNormalizesUnknownAliasesWithoutGuessing(t *testing.T) {
+	t.Parallel()
+	rules := domain.RuleSet{UnknownAliases: map[string]string{
+		"name:  Н/У   ДОРАЗВЕДКА  ВСУ (отложенный режим) ": "name: 1 МБ 155 ОМБР ",
+	}}
+	canonical, err := canonicalRules(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical.UnknownAliases["name:н/у доразведка всу"] != "name:1 мб 155 омбр" {
+		t.Fatalf("привязка нормализована не как входящий перехват: %+v", canonical.UnknownAliases)
+	}
+	rules.UnknownAliases["name:н/у доразведка всу"] = "name:другая цель"
+	if _, err := canonicalRules(rules); err == nil {
+		t.Fatal("два одинаковых имени после нормализации не отклонены")
+	}
+}
+
 func TestPublishRulesChecksChangedTopicRedirectsOnly(t *testing.T) {
 	ctx := context.Background()
 	db, err := stateDB.OpenState(filepath.Join(t.TempDir(), "server.db"))

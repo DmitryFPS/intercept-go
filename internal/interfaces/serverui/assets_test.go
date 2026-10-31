@@ -52,7 +52,7 @@ func TestTopicRedirectScreenWiring(t *testing.T) {
 			t.Errorf("раздел перенаправлений не подключает элемент %q", id)
 		}
 	}
-	if !strings.Contains(html, `id="topicRedirects"`) || !strings.Contains(javascript, "topicRedirects: 'Перенаправление тем'") ||
+	if !strings.Contains(html, `id="topicRedirects"`) || !strings.Contains(javascript, "topicRedirects: 'Перенаправление'") ||
 		!strings.Contains(html, `id="topicRedirectDialog"`) || !strings.Contains(javascript, "openDialog('topicRedirectDialog')") {
 		t.Error("отдельное меню и окно перенаправления не подключены")
 	}
@@ -93,6 +93,37 @@ func TestTopicRedirectScreenWiring(t *testing.T) {
 	}
 	if strings.Contains(javascript, `${escapeHTML(option.topicName)} · тема`) || strings.Contains(javascript, `${escapeHTML(targetTopic)} · тема`) {
 		t.Error("имя Telegram-темы не должно дублироваться технической подписью того же ID")
+	}
+}
+
+func TestUnknownAliasScreenWiring(t *testing.T) {
+	index, err := assets.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, javascript := string(index), string(application)
+	for _, id := range []string{"addUnknownAlias", "unknownAliasList", "unknownAliasForm"} {
+		if !strings.Contains(html, `id="`+id+`"`) || !strings.Contains(javascript, `$('`+id+`')`) {
+			t.Errorf("нет связанного элемента %q", id)
+		}
+	}
+	if !strings.Contains(html, `id="addUnknownAlias" class="button primary" type="button">Добавить перенаправление</button>`) {
+		t.Fatal("кнопка неизвестного подразделения должна называть действие, а не добавление названия")
+	}
+	if !strings.Contains(html, `id="unknownAliasDialog"`) || !strings.Contains(javascript, "openDialog('unknownAliasDialog')") {
+		t.Error("окно нового вида перенаправления не подключено")
+	}
+	for _, fragment := range []string{"rules.unknown_aliases ||= {}", "normalizedAliasKey(", "eligibleAliasTargets()", "delete rules.unknown_aliases[source]", "rules.unknown_aliases[source] = target"} {
+		if !strings.Contains(javascript, fragment) {
+			t.Errorf("привязка неизвестного названия не подключена: %q", fragment)
+		}
+	}
+	if !strings.Contains(html, `>Перенаправление</button>`) {
+		t.Error("пункт меню должен помещаться в одну строку")
 	}
 }
 

@@ -54,6 +54,11 @@ func (destination *Destination) DeliverManually(ctx context.Context, event domai
 // временные и неоднозначные ошибки такого переключения не запускают.
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
 	err := destination.deliver(ctx, event, delivery)
+	if err != nil && delivery.RuleLevel == "alias" &&
+		delivery.FallbackDestination != nil && delivery.FallbackDecision != nil &&
+		invalidTelegramTopicError(err) {
+		return fmt.Errorf("%w: %v", application.ErrTelegramTopicMissing, err)
+	}
 	if err == nil || !delivery.TopicRedirected || delivery.BaseDecision == nil ||
 		!invalidTelegramTopicError(err) {
 		return err

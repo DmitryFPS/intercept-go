@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"intercept/internal/domain"
@@ -158,6 +159,10 @@ type DeliveryGateway interface {
 	Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error
 }
 
+// ErrTelegramTopicMissing допускает резервную доставку только после
+// окончательного ответа Telegram об отсутствующей теме, не при сбое сети.
+var ErrTelegramTopicMissing = errors.New("тема Telegram удалена")
+
 // DeliveryReceipt — подтверждённые внешние ID и состояние публикации.
 // Telegram может разбить длинный перехват на несколько сообщений: часть ID уже
 // подтверждена, а исход следующей части ещё неизвестен. Для Word и других
@@ -200,6 +205,12 @@ type DeliveryReceiptProvider interface {
 // DeliveryReceiptQueue расширяет очередь без нарушения старых адаптеров.
 type DeliveryReceiptQueue interface {
 	MarkDeliveredWithReceipt(ctx context.Context, eventID, destinationID string, at time.Time, receipt DeliveryReceipt) error
+}
+
+// AliasFallbackQueue атомарно фиксирует фактическую доставку в General и
+// меняет маршрут барьера ревизий, чтобы следующие редакции не создали дубль.
+type AliasFallbackQueue interface {
+	MarkDeliveredOnAliasFallback(ctx context.Context, eventID, destinationID string, at time.Time, receipt DeliveryReceipt, fallback domain.PlannedDelivery) error
 }
 
 // PartialDeliveryReceiptQueue сохраняет подтверждённые части и сведения о
