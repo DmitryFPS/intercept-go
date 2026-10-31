@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
@@ -594,15 +595,30 @@ func TestDeliveryServiceKeepsDestinationFailuresIndependent(t *testing.T) {
 func TestDeliveryServicePersistsExternalReceipt(t *testing.T) {
 	t.Parallel()
 	event := serverServiceEvent()
-	delivery := domain.PlannedDelivery{Destination: domain.Destination{ID: "telegram", Kind: domain.DestinationTelegram}}
+	delivery := domain.PlannedDelivery{
+		Destination: domain.Destination{ID: "telegram", Kind: domain.DestinationTelegram},
+		Decision:    domain.RouteDecision{ThreadID: 9},
+	}
 	queue := &memoryDeliveryQueue{jobs: []DeliveryJob{{Event: event, Delivery: delivery}}}
+	var logOutput bytes.Buffer
 	service := DeliveryService{
 		Queue: queue, Gateways: map[string]DeliveryGateway{"telegram": receiptGateway{}}, Now: time.Now,
+		Logger: slog.New(slog.NewJSONHandler(&logOutput, nil)),
 	}
 	delivered, err := service.RunOnce(context.Background(), 10)
 	if err != nil || delivered != 1 || len(queue.receipts) != 1 ||
 		len(queue.receipts[0].MessageIDs) != 1 || queue.receipts[0].MessageIDs[0] != 701 {
 		t.Fatalf("результат внешней доставки не сохранён: delivered=%d receipts=%#v err=%v", delivered, queue.receipts, err)
+	}
+	var logRecord struct {
+		ThreadID        int64 `json:"thread_id"`
+		PlannedThreadID int64 `json:"planned_thread_id"`
+	}
+	if err := json.Unmarshal(logOutput.Bytes(), &logRecord); err != nil {
+		t.Fatalf("запись журнала не читается: %v: %s", err, logOutput.String())
+	}
+	if logRecord.ThreadID != 17 || logRecord.PlannedThreadID != 9 {
+		t.Fatalf("журнал должен различать фактическую и запланированную темы: %+v", logRecord)
 	}
 }
 

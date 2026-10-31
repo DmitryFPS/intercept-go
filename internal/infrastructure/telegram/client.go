@@ -140,12 +140,23 @@ type apiError struct {
 // после его начала. Это нужно, чтобы после аварии не создать второй экземпляр
 // уже принятого Telegram сообщения.
 type sendAttemptError struct {
-	attempted bool
-	err       error
+	attempted       bool
+	err             error
+	observedMessage *Message
 }
 
 func (err *sendAttemptError) Error() string { return err.err.Error() }
 func (err *sendAttemptError) Unwrap() error { return err.err }
+
+// ObservedMessage возвращает данные успешного ответа Telegram даже тогда,
+// когда ответ указывает на чужую тему. Это не подтверждение доставки по
+// маршруту: вызывающий код обязан изолировать попытку и сверить сообщение.
+func (err *sendAttemptError) ObservedMessage() (Message, bool) {
+	if err == nil || err.observedMessage == nil {
+		return Message{}, false
+	}
+	return *err.observedMessage, true
+}
 
 // requestFailure хранит только очищенный текст ошибки: исходная ошибка http.Client
 // может содержать URL с токеном бота. Флаг выставляется лишь когда соединение
@@ -360,9 +371,25 @@ func (client *Client) SendHTML(ctx context.Context, chatID, threadID int64, text
 		beforeSend := errors.As(err, &failure) && failure.definitelyNotSent
 		return Message{}, &sendAttemptError{attempted: !beforeSend, err: err}
 	}
-	if message.MessageID <= 0 || (message.Chat.ID != 0 && message.Chat.ID != chatID) {
+	if message.MessageID <= 0 {
 		return Message{}, &sendAttemptError{attempted: true, err: errors.New(
-			"Telegram подтвердил отправку без корректного message_id или чата; исход публикации неизвестен",
+			"Telegram подтвердил отправку без корректного message_id; исход публикации неизвестен",
+		)}
+	}
+	if message.Chat.ID != 0 && message.Chat.ID != chatID {
+		return message, &sendAttemptError{attempted: true, observedMessage: &message, err: fmt.Errorf(
+			"Telegram подтвердил message_id %d в чате %d вместо запрошенного %d; публикация требует ручной сверки",
+			message.MessageID, message.Chat.ID, chatID,
+		)}
+	}
+	// Поле message_thread_id в ответе Bot API необязательное, поэтому его
+	// отсутствие не является отказом. Но явно указанный другой ID означает,
+	// что публикация могла попасть в чужую тему: нельзя помечать её доставленной
+	// или автоматически повторять, создавая дубль.
+	if threadID > 0 && message.MessageThreadID != 0 && message.MessageThreadID != threadID {
+		return message, &sendAttemptError{attempted: true, observedMessage: &message, err: fmt.Errorf(
+			"Telegram подтвердил message_id %d в теме %d вместо запрошенной %d (чат %d); публикация требует ручной сверки",
+			message.MessageID, message.MessageThreadID, threadID, message.Chat.ID,
 		)}
 	}
 	return message, err
@@ -397,8 +424,16 @@ func (client *Client) TestTopic(ctx context.Context, chatID, threadID int64) err
 	if err != nil {
 		return err
 	}
+	if message.MessageID <= 0 || (message.Chat.ID != 0 && message.Chat.ID != chatID) {
+		return errors.New("Telegram не подтвердил корректный ID или чат проверочного сообщения")
+	}
+	wrongThread := threadID > 0 && message.MessageThreadID != 0 && message.MessageThreadID != threadID
 	if err := client.DeleteMessage(ctx, chatID, message.MessageID); err != nil {
 		return fmt.Errorf("проверочное сообщение отправлено, но не удалено; удалите его вручную и выдайте боту право удаления: %w", err)
+	}
+	if wrongThread {
+		return fmt.Errorf("Telegram отправил проверочное сообщение в тему %d вместо %d; перенаправление не опубликовано",
+			message.MessageThreadID, threadID)
 	}
 	return nil
 }

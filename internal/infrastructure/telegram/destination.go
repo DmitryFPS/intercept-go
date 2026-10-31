@@ -31,12 +31,6 @@ type Destination struct {
 
 	mu    sync.Mutex
 	locks map[string]*itemLockEntry
-	// invalidRedirects запоминает подтверждённо удалённые темы Telegram в
-	// пределах работы Центра. Это не ошибка сети: для таких маршрутов новые
-	// события сразу идут по исходной теме и не удерживают очередь повторными
-	// попытками. Ключ включает исходную позицию и ID темы, поэтому новая тема
-	// или новая публикация перенаправления не блокируется старым состоянием.
-	invalidRedirects map[string]string
 }
 
 type itemLockEntry struct {
@@ -59,17 +53,11 @@ func (destination *Destination) DeliverManually(ctx context.Context, event domai
 // удалена, публикация один раз переключается на исходную тему. Сетевые,
 // временные и неоднозначные ошибки такого переключения не запускают.
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
-	if delivery.TopicRedirected && delivery.BaseDecision != nil &&
-		destination.redirectIsInvalid(event, delivery) {
-		return destination.deliverOnBaseRoute(ctx, event, delivery,
-			"ранее подтверждено, что целевая тема Telegram недоступна")
-	}
 	err := destination.deliver(ctx, event, delivery)
 	if err == nil || !delivery.TopicRedirected || delivery.BaseDecision == nil ||
 		!invalidTelegramTopicError(err) {
 		return err
 	}
-	destination.rememberInvalidRedirect(event, delivery, err.Error())
 	return destination.deliverOnBaseRoute(ctx, event, delivery, err.Error())
 }
 
@@ -93,39 +81,6 @@ func (destination *Destination) deliverOnBaseRoute(
 		return fmt.Errorf("перенаправление Telegram недействительно; исходный маршрут не выполнен: %w", err)
 	}
 	return nil
-}
-
-func (destination *Destination) redirectKey(event domain.Event, delivery domain.PlannedDelivery) string {
-	positionKey := strings.TrimSpace(delivery.SourcePositionKey)
-	if positionKey == "" {
-		positionKey = event.PositionKey()
-	}
-	return positionKey + "|" + destinationStateScope(destination) + "|" + fmt.Sprintf("%d", delivery.Decision.ThreadID)
-}
-
-func destinationStateScope(destination *Destination) string {
-	if scope := strings.TrimSpace(destination.StateScope); scope != "" {
-		return scope
-	}
-	return fmt.Sprintf("chat:%d", destination.ChatID)
-}
-
-func (destination *Destination) redirectIsInvalid(event domain.Event, delivery domain.PlannedDelivery) bool {
-	key := destination.redirectKey(event, delivery)
-	destination.mu.Lock()
-	defer destination.mu.Unlock()
-	_, exists := destination.invalidRedirects[key]
-	return exists
-}
-
-func (destination *Destination) rememberInvalidRedirect(event domain.Event, delivery domain.PlannedDelivery, reason string) {
-	key := destination.redirectKey(event, delivery)
-	destination.mu.Lock()
-	if destination.invalidRedirects == nil {
-		destination.invalidRedirects = make(map[string]string)
-	}
-	destination.invalidRedirects[key] = reason
-	destination.mu.Unlock()
 }
 
 // deliver содержит исходную поблочную синхронизацию. Отдельная обёртка выше
@@ -162,6 +117,25 @@ func (destination *Destination) deliver(ctx context.Context, event domain.Event,
 	if item.Blocks == nil {
 		item.Blocks = make(map[string]destinationBlock)
 	}
+	migrateTelegramItemMetadata(&item)
+	// Если прошлое событие уже было опубликовано по базовому маршруту после
+	// удаления целевой темы, следующая редакция обязана исправить именно его.
+	// Проверка делается из устойчивого состояния до routeChanged и до любого
+	// deleteMessage; это работает и после перезапуска Центра.
+	if delivery.TopicRedirected && delivery.BaseDecision != nil &&
+		telegramBlockAlreadyOnBaseRoute(item, event, delivery.BaseDecision.ThreadID) {
+		if destination.Logger != nil {
+			destination.Logger.Info("редакция остаётся в исходной теме после недействительного перенаправления",
+				"event_id", event.ID, "trace_id", event.ID,
+				"source_position_key", delivery.SourcePositionKey,
+				"redirect_thread_id", delivery.Decision.ThreadID,
+				"base_thread_id", delivery.BaseDecision.ThreadID,
+			)
+		}
+		delivery.Decision = *delivery.BaseDecision
+		delivery.TopicRedirected = false
+		delivery.BaseDecision = nil
+	}
 	scopedBlockUUID := strings.TrimSpace(event.SourceBlockUUID)
 	cleanupRequested := delivery.Decision.Action == domain.RouteSkip ||
 		(scopedBlockUUID != "" && event.SourceBlockDeleted) || len(eventBlocks(event)) == 0
@@ -171,7 +145,6 @@ func (destination *Destination) deliver(ctx context.Context, event domain.Event,
 	if err := destination.ensureTelegramItemCapacity(itemKey, legacyItemKey, willStoreRecordCleanup); err != nil {
 		return err
 	}
-	migrateTelegramItemMetadata(&item)
 	if telegramRecordCleanupRejects(item, event) {
 		// A record barrier is persisted before deleting known Telegram IDs. The
 		// same cleanup revision may finish a partially completed deletion and
@@ -583,6 +556,30 @@ func (destination *Destination) deliver(ctx context.Context, event domain.Event,
 			)
 		}
 		if err != nil {
+			var attempt *sendAttemptError
+			if errors.As(err, &attempt) {
+				if observed, ok := attempt.ObservedMessage(); ok && observed.MessageID > 0 {
+					stored.ObservedMessageID = observed.MessageID
+					stored.ObservedThreadID = observed.MessageThreadID
+					stored.ObservedChatID = observed.Chat.ID
+					stored.UnknownOutcome = true
+					stored.Suppressed = true
+					stored.SuppressedReason = "Telegram подтвердил отправку в другой чат или тему; требуется ручная сверка"
+					item.Blocks[blockKey] = stored
+					if saveErr := destination.saveItem(itemKey, item, false); saveErr != nil {
+						return fmt.Errorf("сохранить неожиданный Telegram message_id %d: %w", observed.MessageID, saveErr)
+					}
+					if destination.Logger != nil {
+						destination.Logger.Error("Telegram подтвердил публикацию вне запрошенной темы; автоматический повтор остановлен",
+							"event_id", event.ID, "trace_id", event.ID, "block_uuid", blockKey,
+							"requested_chat_id", destination.ChatID, "requested_thread_id", threadID,
+							"observed_chat_id", observed.Chat.ID, "observed_thread_id", observed.MessageThreadID,
+							"observed_message_id", observed.MessageID,
+						)
+					}
+					err = application.NewPermanentDeliveryError(err)
+				}
+			}
 			return fmt.Errorf("синхронизировать блок %s: %w", blockKey, err)
 		}
 		// История удалённых message_id остаётся частью диагностической цепочки
@@ -592,6 +589,9 @@ func (destination *Destination) deliver(ctx context.Context, event domain.Event,
 		item.Blocks[blockKey] = destinationBlock{
 			Hash: renderHash, SourceHash: baseHash, MessageIDs: messageIDs,
 			DeletedMessageIDs:    append([]int64(nil), stored.DeletedMessageIDs...),
+			ObservedMessageID:    stored.ObservedMessageID,
+			ObservedThreadID:     stored.ObservedThreadID,
+			ObservedChatID:       stored.ObservedChatID,
 			ExpectedMessageCount: len(chunks),
 			Sequence:             block.Sequence, SourceVersion: event.SourceVersion(), SourceEventAt: event.CreatedAt,
 			ThreadID: threadID,
@@ -623,6 +623,25 @@ func (destination *Destination) deliver(ctx context.Context, event domain.Event,
 		return destination.saveItem(legacyItemKey, destinationItem{}, true)
 	}
 	return nil
+}
+
+func telegramBlockAlreadyOnBaseRoute(item destinationItem, event domain.Event, baseThreadID int64) bool {
+	retainedBaseRoute := func(stored destinationBlock, exists bool) bool {
+		return exists && stored.ThreadID == baseThreadID && !stored.SourceDeleted &&
+			(len(stored.MessageIDs) > 0 || stored.UnknownOutcome || stored.SendPending ||
+				stored.ManualRepublishPending || stored.Suppressed)
+	}
+	if blockUUID := strings.TrimSpace(event.SourceBlockUUID); blockUUID != "" {
+		stored, exists := item.Blocks[blockUUID]
+		return retainedBaseRoute(stored, exists)
+	}
+	for _, block := range eventBlocks(event) {
+		stored, exists := item.Blocks[block.Identity()]
+		if retainedBaseRoute(stored, exists) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeliveryReceipt возвращает сохранённые ID конечной публикации, а не ID
@@ -687,8 +706,10 @@ func (destination *Destination) DeliveryReceipt(
 			ExpectedMessageCount: expectedMessageCount, Complete: complete,
 			Suppressed: block.Suppressed, SuppressedReason: block.SuppressedReason,
 			UnknownOutcome: unknownOutcome, ManualRepublishPending: block.ManualRepublishPending,
-			UnconfirmedPart:  unconfirmedPart,
-			SendAttemptToken: telegramUnknownSendToken(block),
+			UnconfirmedPart:   unconfirmedPart,
+			SendAttemptToken:  telegramUnknownSendToken(block),
+			ObservedMessageID: block.ObservedMessageID, ObservedThreadID: block.ObservedThreadID,
+			ObservedChatID: block.ObservedChatID,
 		})
 	}
 	if scoped := strings.TrimSpace(event.SourceBlockUUID); scoped != "" && len(blockReceipts) == 0 {

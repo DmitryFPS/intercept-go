@@ -586,6 +586,7 @@ function openHistoryItem(index) {
   const receiptBlocks = item.telegram_blocks || [];
   const isUnknownBlock = block => block.unknown_outcome === true || String(block.suppressed_reason || '').includes('неизвестен');
   const unknownBlocks = receiptBlocks.filter(isUnknownBlock);
+  const hasObservedWrongRoute = unknownBlocks.some(block => Number(block.observed_message_id || 0) > 0);
   const manualBlocks = receiptBlocks.filter(block => block.manual_republish_pending === true);
   const suppressedBlocks = item.state === 'pending' ? [] : receiptBlocks.filter(block => block.suppressed && !isUnknownBlock(block) && !block.manual_republish_pending);
   const unknownOutcome = item.telegram_outcome_unknown === true || unknownBlocks.length > 0;
@@ -598,12 +599,17 @@ function openHistoryItem(index) {
   }).join('') + (unknownOutcome ? `
     <div class="telegram-uncertain">
       <strong>${item.state === 'pending' ? 'Исход отправки уточняется' : 'Исход публикации неизвестен'}</strong>
-      <span>${item.state === 'pending'
+      <span>${hasObservedWrongRoute
+        ? 'Telegram сообщил об отправке в неожиданную тему. Известные ID указаны ниже. Автоматический повтор остановлен; перед ручной публикацией проверьте это сообщение и нужную тему.'
+        : item.state === 'pending'
         ? 'Telegram мог создать сообщение, но Центр пока не получил подтверждённый message_id. Дождитесь завершения проверки Центром; ручная повторная публикация сейчас недоступна.'
         : 'Telegram мог создать спорную часть сообщения, но Центр не получил её подтверждённый message_id. Сверьте последнюю принятую Центром редакцию с EAVC и проверьте нужную тему. Если новая редакция ещё в пути, дождитесь её. Автоматический повтор остановлен. Если спорная часть уже есть, не публикуйте её снова; автоматической привязки ID нет.'}</span>
       ${unknownBlocks.length === 0 ? '<span>Сведения о частях недоступны. Ручная публикация отключена до разбора состояния.</span>' : ''}
-    </div>` : '') + unknownBlocks.map(block => {
+  </div>` : '') + unknownBlocks.map(block => {
     const confirmed = (block.message_ids || []).filter(id => Number.isSafeInteger(id) && id > 0);
+    const observedID = Number(block.observed_message_id || 0);
+    const observedThread = Number(block.observed_thread_id || 0);
+    const observedChat = Number(block.observed_chat_id || 0);
     const index = Number(block.unconfirmed_part || 0);
     const total = Number(block.expected_message_count || 0);
     const sendAttemptToken = String(block.send_attempt_token || '');
@@ -611,8 +617,9 @@ function openHistoryItem(index) {
     return `
     <div class="telegram-suppressed">
       <span>Неизвестен исход части ${escapeHTML(index || '?')} из ${escapeHTML(total || '?')} · UUID ${escapeHTML(block.block_uuid)}${confirmed.length ? ` · подтверждённые ID: ${confirmed.map(escapeHTML).join(', ')}` : ''}</span>
+      ${observedID > 0 ? `<span>Telegram вернул message_id ${escapeHTML(observedID)} в неожиданной теме ${escapeHTML(observedThread || 'не указана')} (чат ${escapeHTML(observedChat || 'не указан')}). Проверьте и при необходимости удалите именно это сообщение перед ручной публикацией.</span>` : ''}
       ${sendAttemptToken === '' ? '<span>Маркер попытки недоступен. Ручная публикация отключена до разбора состояния.</span>' : ''}
-      ${canRepublish ? `<button class="button danger" data-republish-block="${escapeHTML(block.block_uuid)}" data-republish-unknown="true" data-unconfirmed-part="${escapeHTML(index)}" data-send-attempt-token="${escapeHTML(sendAttemptToken)}" data-event-id="${escapeHTML(item.id)}" data-destination-id="${escapeHTML(item.destination_id)}">После проверки опубликовать</button>` : ''}
+      ${canRepublish ? `<button class="button danger" data-republish-block="${escapeHTML(block.block_uuid)}" data-republish-unknown="true" data-unconfirmed-part="${escapeHTML(index)}" data-send-attempt-token="${escapeHTML(sendAttemptToken)}" data-observed-message-id="${escapeHTML(observedID)}" data-observed-thread-id="${escapeHTML(observedThread)}" data-event-id="${escapeHTML(item.id)}" data-destination-id="${escapeHTML(item.destination_id)}">После проверки опубликовать</button>` : ''}
     </div>`;
   }).join('') + manualBlocks.map(block => `
     <div class="telegram-suppressed">
@@ -634,7 +641,12 @@ $('historyTelegramLinks').addEventListener('click', async event => {
   let unconfirmedPart = 0;
   if (unknownOutcome) {
     const part = Number(button.dataset.unconfirmedPart);
-    if (!await appConfirm({ title: 'Сначала проверьте тему Telegram', message: `Проверьте отсутствие именно спорной части ${part} перехвата. Ранее подтверждённые части могут оставаться в теме. Сверьте последнюю принятую Центром редакцию с EAVC. Если спорная часть уже есть или новая редакция ещё в пути, отмените действие.`, confirmLabel: 'Проверил, части нет', danger: true })) return;
+    const observedID = Number(button.dataset.observedMessageId || 0);
+    const observedThread = Number(button.dataset.observedThreadId || 0);
+    const checkMessage = observedID > 0
+      ? `Telegram сообщил о публикации message_id ${observedID} в неожиданной теме ${observedThread || 'без ID'}. Убедитесь, что это сообщение удалено или отсутствует, а спорной части ${part} нет и в нужной теме. Если сообщение существует, отмените действие.`
+      : `Проверьте отсутствие именно спорной части ${part} перехвата. Ранее подтверждённые части могут оставаться в теме. Сверьте последнюю принятую Центром редакцию с EAVC. Если спорная часть уже есть или новая редакция ещё в пути, отмените действие.`;
+    if (!await appConfirm({ title: 'Сначала проверьте тему Telegram', message: checkMessage, confirmLabel: 'Проверил, части нет', danger: true })) return;
     if (!await appConfirm({ title: 'Подтвердите повторную публикацию', message: `Вы подтверждаете, что части ${part} в нужной теме Telegram нет. Центр продолжит публикацию последней принятой им редакции EAVC.`, confirmLabel: 'Опубликовать', danger: true })) return;
     unconfirmedPart = part;
   } else if (manualResume) {

@@ -126,6 +126,59 @@ func TestPublishRulesChecksChangedTopicRedirectsOnly(t *testing.T) {
 	}
 }
 
+func TestRestoreRulesRejectsDeletedHistoricalRedirectTopic(t *testing.T) {
+	ctx := context.Background()
+	db, err := stateDB.OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := stateDB.NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "name:" + domain.NormalizeUnitName("Позиция")
+	rules := domain.RuleSet{
+		Version: 1,
+		Destinations: map[string]domain.Destination{
+			"a": {ID: "a", Name: "Группа", Kind: domain.DestinationTelegram, Enabled: true},
+		},
+		Positions: map[string]map[string]domain.RouteDecision{
+			key: {"a": {Action: domain.RouteDeliver, ThreadID: 2}},
+		},
+		Unknown: map[string]domain.RouteDecision{"a": {Action: domain.RouteReview}},
+		TopicRedirects: map[string]domain.TopicRedirect{
+			key: {DestinationID: "a", ThreadID: 42, TopicName: "Временная тема"},
+		},
+	}
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	rules.Version = 2
+	rules.TopicRedirects = nil
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store, config: config.Server{Destinations: map[string]config.DestinationConfig{
+		"a": {Kind: domain.DestinationTelegram, BotToken: "123:token", ChatID: -1001},
+	}}}
+	checked := 0
+	server.topicProbe = func(_ context.Context, _ config.DestinationConfig, threadID int64) error {
+		checked++
+		if threadID != 42 {
+			t.Errorf("проверена чужая тема %d", threadID)
+		}
+		return errors.New("тема удалена")
+	}
+	if err := server.RestoreRules(ctx, 1, "test"); err == nil {
+		t.Fatal("историческая версия с удалённой темой стала действующей")
+	}
+	active, err := store.ActiveRules(ctx)
+	if err != nil || active.Version != 2 || len(active.TopicRedirects) != 0 || checked != 1 {
+		t.Fatalf("неудачное восстановление изменило маршруты: active=%#v checked=%d err=%v", active, checked, err)
+	}
+}
+
 func TestRuleDestinationKindMustMatchConfiguredTransport(t *testing.T) {
 	server := &Server{config: config.Server{Destinations: map[string]config.DestinationConfig{
 		"word-39": {Kind: domain.DestinationWord},

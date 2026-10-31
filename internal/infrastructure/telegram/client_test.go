@@ -82,6 +82,73 @@ func TestTopicFailsWhenProbeMessageCannotBeDeleted(t *testing.T) {
 	}
 }
 
+func TestTopicProbeRejectsWrongReturnedThreadAndDeletesProbe(t *testing.T) {
+	t.Parallel()
+	deleted := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			io.WriteString(writer, `{"ok":true,"result":{"message_id":17,"message_thread_id":99,"chat":{"id":-1001}}}`)
+			return
+		}
+		if strings.HasSuffix(request.URL.Path, "/deleteMessage") {
+			deleted = true
+			io.WriteString(writer, `{"ok":true,"result":true}`)
+			return
+		}
+		t.Errorf("неожиданный метод: %s", request.URL.Path)
+	}))
+	defer server.Close()
+	client, _ := NewWithBaseURL("123:token", server.URL, server.Client())
+	client.sends.globalInterval = 0
+	client.sends.groupInterval = 0
+	err := client.TestTopic(context.Background(), -1001, 42)
+	if err == nil || !strings.Contains(err.Error(), "в тему 99 вместо 42") || !deleted {
+		t.Fatalf("чужая тема не остановила публикацию или проба не удалена: deleted=%v err=%v", deleted, err)
+	}
+}
+
+func TestSendHTMLDoesNotConfirmWrongReturnedThread(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		io.WriteString(writer, `{"ok":true,"result":{"message_id":17,"message_thread_id":99,"chat":{"id":-1001}}}`)
+	}))
+	defer server.Close()
+	client, _ := NewWithBaseURL("123:token", server.URL, server.Client())
+	message, err := client.SendHTML(context.Background(), -1001, 42, "Проверка")
+	var attempt *sendAttemptError
+	if !errors.As(err, &attempt) || !attempt.attempted || !strings.Contains(err.Error(), "message_id 17 в теме 99 вместо запрошенной 42") {
+		t.Fatalf("ответ из чужой темы ошибочно подтверждён: %v", err)
+	}
+	if message.MessageID != 17 || message.MessageThreadID != 99 || message.Chat.ID != -1001 {
+		t.Fatalf("известный ответ Telegram потерян: %+v", message)
+	}
+	observed, ok := attempt.ObservedMessage()
+	if !ok || observed != message {
+		t.Fatalf("ошибка не содержит данные для ручной сверки: ok=%v observed=%+v", ok, observed)
+	}
+}
+
+func TestSendHTMLPreservesKnownIDFromUnexpectedChat(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		io.WriteString(writer, `{"ok":true,"result":{"message_id":18,"message_thread_id":42,"chat":{"id":-2002}}}`)
+	}))
+	defer server.Close()
+	client, _ := NewWithBaseURL("123:token", server.URL, server.Client())
+	message, err := client.SendHTML(context.Background(), -1001, 42, "Проверка")
+	var attempt *sendAttemptError
+	if !errors.As(err, &attempt) || !attempt.attempted || message.MessageID != 18 || message.Chat.ID != -2002 {
+		t.Fatalf("ID отправки в другой чат потерян: message=%+v err=%v", message, err)
+	}
+	observed, ok := attempt.ObservedMessage()
+	if !ok || observed != message {
+		t.Fatalf("ошибка не содержит ID для сверки: observed=%+v ok=%v", observed, ok)
+	}
+}
+
 func TestPrivateRecipientLimiterSeparatesBots(t *testing.T) {
 	t.Parallel()
 	first := privateRecipientLimiterID("@First_Point_Bot")

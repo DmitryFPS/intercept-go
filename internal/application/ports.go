@@ -184,6 +184,9 @@ type DeliveryBlockReceipt struct {
 	ManualRepublishPending bool    `json:"manual_republish_pending,omitempty"`
 	UnconfirmedPart        int     `json:"unconfirmed_part,omitempty"`
 	SendAttemptToken       string  `json:"send_attempt_token,omitempty"`
+	ObservedMessageID      int64   `json:"observed_message_id,omitempty"`
+	ObservedThreadID       int64   `json:"observed_thread_id,omitempty"`
+	ObservedChatID         int64   `json:"observed_chat_id,omitempty"`
 }
 
 // DeliveryReceiptProvider сообщает подтверждённые внешние ID после успешной

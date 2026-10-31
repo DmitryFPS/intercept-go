@@ -66,3 +66,43 @@ func TestManualRepublishResumeAllowsChangedTopicOnlyAfterExistingPermit(t *testi
 		t.Fatal("первичная сверка спорной части в прежней теме не должна разрешать отправку в новую тему")
 	}
 }
+
+func TestFallbackReceiptMayUseOnlyOriginalThread(t *testing.T) {
+	t.Parallel()
+	base := domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 7}
+	delivery := domain.PlannedDelivery{
+		Destination:     domain.Destination{ID: "telegram", Kind: domain.DestinationTelegram},
+		Decision:        domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42},
+		TopicRedirected: true, BaseDecision: &base,
+	}
+	if !telegramReceiptMatchesPlannedRoute(42, delivery) || !telegramReceiptMatchesPlannedRoute(7, delivery) ||
+		telegramReceiptMatchesPlannedRoute(99, delivery) {
+		t.Fatal("квитанция должна относиться только к цели или исходному маршруту")
+	}
+	receipt := application.DeliveryReceipt{Kind: "telegram", ThreadID: 7, Blocks: []application.DeliveryBlockReceipt{{
+		BlockUUID: "block-a", MessageIDs: []int64{801}, ExpectedMessageCount: 1, Complete: true,
+	}}}
+	job := application.DeliveryJob{
+		Event:    domain.Event{SourceBlockUUID: "block-a", Blocks: []domain.ContentBlock{{UUID: "block-a", Text: "12:00\n-Проверка"}}},
+		Delivery: delivery,
+	}
+	if !telegramReceiptCompletesCurrentJob(job, receipt, "block-a") {
+		t.Fatal("фактическая квитанция в исходной теме не восстановила задание")
+	}
+	receipt.Blocks[0].Complete = false
+	receipt.Blocks[0].UnknownOutcome = true
+	receipt.Blocks[0].UnconfirmedPart = 2
+	receipt.Blocks[0].ExpectedMessageCount = 2
+	receipt.Blocks[0].SendAttemptToken = "attempt-a"
+	confirmation := TelegramRepublishConfirmation{
+		CheckedCurrentRevision: true, ConfirmedPartAbsent: true,
+		UnconfirmedPart: 2, SendAttemptToken: "attempt-a",
+	}
+	if part, err := validateTelegramUnknownRepublishConfirmation(receipt, delivery, "block-a", confirmation); err != nil || part != 2 {
+		t.Fatalf("ручная сверка спорной части исходной темы заблокирована: part=%d err=%v", part, err)
+	}
+	receipt.ThreadID = 99
+	if _, err := validateTelegramUnknownRepublishConfirmation(receipt, delivery, "block-a", confirmation); err == nil {
+		t.Fatal("посторонняя тема ошибочно принята для ручного разрешения")
+	}
+}

@@ -725,7 +725,7 @@ func validateTelegramUnknownRepublishConfirmation(
 			confirmation.UnconfirmedPart != part || part <= 0 ||
 			block.ExpectedMessageCount < part || len(block.MessageIDs) != part-1 ||
 			block.SendAttemptToken == "" || confirmation.SendAttemptToken != block.SendAttemptToken ||
-			receipt.ThreadID != delivery.Decision.ThreadID {
+			!telegramReceiptMatchesPlannedRoute(receipt.ThreadID, delivery) {
 			return 0, errors.New("для ручной публикации нужна повторная сверка актуальной редакции и отсутствия спорной части в теме Telegram")
 		}
 		seen := make(map[int64]struct{}, len(block.MessageIDs))
@@ -776,8 +776,19 @@ func receiptHasPublishedBlock(receipt application.DeliveryReceipt, blockUUID str
 
 func telegramReceiptCompletesCurrentJob(job application.DeliveryJob, receipt application.DeliveryReceipt, blockUUID string) bool {
 	return validateTelegramRepublishBlock(job, blockUUID) == nil &&
-		receipt.Kind == "telegram" && receipt.ThreadID == job.Delivery.Decision.ThreadID &&
+		receipt.Kind == "telegram" && telegramReceiptMatchesPlannedRoute(receipt.ThreadID, job.Delivery) &&
 		receiptHasPublishedBlock(receipt, blockUUID)
+}
+
+func telegramReceiptMatchesPlannedRoute(threadID int64, delivery domain.PlannedDelivery) bool {
+	if threadID == delivery.Decision.ThreadID {
+		return true
+	}
+	// При подтверждённом удалении целевой темы адаптер может безопасно
+	// доставить этот же перехват в исходную тему. Фактический thread_id в
+	// квитанции тогда отличается от ещё сохранённого плана задания.
+	return delivery.TopicRedirected && delivery.BaseDecision != nil &&
+		threadID == delivery.BaseDecision.ThreadID
 }
 
 func receiptBlockPublicationState(receipt application.DeliveryReceipt, blockUUID string) (found, complete bool) {

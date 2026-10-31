@@ -471,9 +471,16 @@ func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob)
 		return false, markErr
 	}
 	if service.Logger != nil {
+		// При резервной доставке фактическая тема может отличаться от темы
+		// в плане. Для поиска сообщения в Telegram нужен ID из квитанции.
+		actualThreadID := job.Delivery.Decision.ThreadID
+		if receiptReady && receipt.ThreadID != 0 {
+			actualThreadID = receipt.ThreadID
+		}
 		fields := []any{
 			"event_id", job.Event.ID, "trace_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,
-			"thread_id", job.Delivery.Decision.ThreadID, "attempt", job.Attempts + 1,
+			"thread_id", actualThreadID, "planned_thread_id", job.Delivery.Decision.ThreadID,
+			"attempt", job.Attempts + 1,
 			"telegram_message_count", len(receipt.MessageIDs), "final_message_ids", receipt.MessageIDs,
 		}
 		if len(receipt.MessageIDs) > 0 {
