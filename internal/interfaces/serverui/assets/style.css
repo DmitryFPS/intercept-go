@@ -70,3 +70,18 @@
 .telegram-suppressed{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:11px 12px;border:1px solid #f0c5c7;border-radius:10px;background:#fff4f4;color:#92252b;font-size:12px}.telegram-suppressed span{overflow-wrap:anywhere}.telegram-suppressed .button{flex:0 0 auto}
 .telegram-uncertain{display:grid;gap:6px;width:100%;padding:12px;border:1px solid #f0c5c7;border-radius:10px;background:#fff4f4;color:#92252b;font-size:12px;line-height:1.45}.telegram-uncertain strong{font-size:13px}.telegram-uncertain span{overflow-wrap:anywhere}
 @media(max-width:600px){.telegram-suppressed{align-items:stretch;flex-direction:column}.telegram-suppressed .button{width:100%}}
+.topic-redirect-help{margin-bottom:14px}
+.topic-redirect-help strong{display:block;margin-bottom:6px;color:#20314b}
+.topic-redirect-help p{margin:0;color:#65738a;line-height:1.5}
+.topic-redirect-card{grid-template-columns:minmax(200px,1fr) minmax(260px,1.5fr) auto}
+.topic-redirect-path{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.topic-redirect-path strong{overflow-wrap:anywhere}
+.topic-redirect-current{display:grid;gap:5px;padding:13px 15px;border:1px solid #dce7fa;border-radius:11px;background:#f3f7ff}
+.topic-redirect-current span{color:#65738a;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.04em}
+.topic-redirect-current strong{font-size:14px;overflow-wrap:anywhere}
+.topic-redirect-current small,.topic-redirect-modal label small{color:#6d7b91;font-size:11px;font-weight:500;line-height:1.4}
+.topic-redirect-modal{width:min(760px,calc(100vw - 30px))}
+.topic-redirect-modal form{max-height:84vh;overflow-y:auto}
+.topic-redirect-modal .modal-head{margin-bottom:0}
+@media(min-width:761px) and (max-width:1050px){.sidebar nav button.active{font-size:0}.sidebar nav button.active span{font-size:11px}}
+@media(max-width:760px){.sidebar nav{grid-template-columns:repeat(3,minmax(0,1fr));overflow:visible}.topic-redirect-card{grid-template-columns:1fr}.topic-redirect-modal .form{grid-template-columns:1fr}}

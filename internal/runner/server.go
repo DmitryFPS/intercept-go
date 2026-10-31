@@ -125,6 +125,7 @@ type Server struct {
 	rootStop    context.CancelFunc
 	background  sync.WaitGroup
 	signingKey  ed25519.PrivateKey
+	topicProbe  func(context.Context, config.DestinationConfig, int64) error
 }
 
 // NewServer открывает состояние и создаёт начальные правила при первом запуске.

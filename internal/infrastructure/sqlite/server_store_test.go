@@ -1004,6 +1004,137 @@ func TestServerStoreKeepsRevisionAfterOriginalAcrossTopics(t *testing.T) {
 	}
 }
 
+func TestServerStorePinsExistingTelegramRouteButRoutesNewRecordToRedirect(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveClient(ctx, application.RegisteredClient{
+		ID: "textile", Number: "001", Name: "Точка", SenderBotID: 12,
+		SenderBotUsername: "point_bot", ChatID: -1001, ThreadID: 10,
+		KeyID: "key-1", Key: make([]byte, 32), Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rules := serverTestRules()
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	makeEvent := func(id, source, position string, revision int) domain.Event {
+		event := serverTestEvent()
+		event.ID, event.Source.UUID, event.Position.UnitName = id, source, position
+		event.ContentDigest = "digest-" + id
+		event.CreatedAt = base.Add(time.Duration(revision) * time.Minute)
+		event.SourceAt = event.CreatedAt
+		event.ExpiresAt = event.CreatedAt.Add(30 * time.Minute)
+		event.Source.UpdatedAt = event.CreatedAt.Format("2006-01-02 15:04:05")
+		return event
+	}
+	accept := func(event domain.Event, rules domain.RuleSet) {
+		plan, resolveErr := rules.Resolve(event)
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		if accepted, acceptErr := store.Accept(ctx, event, plan); acceptErr != nil || !accepted {
+			t.Fatalf("принять %s: accepted=%v err=%v", event.ID, accepted, acceptErr)
+		}
+	}
+	first := makeEvent("first", "source-1", "1 мб 155 омбр", 1)
+	accept(first, rules)
+	rules.Version = 2
+	rules.TopicRedirects = map[string]domain.TopicRedirect{
+		"name:1 мб 155 омбр": {DestinationID: "a", ThreadID: 39, TopicName: "Доразведка"},
+	}
+	edit := makeEvent("edit", "source-1", "1 мб 155 омбр", 2)
+	accept(edit, rules)
+	job, err := store.DeliveryJobByID(ctx, edit.ID, "a")
+	if err != nil || job.Delivery.Decision.ThreadID != 2 {
+		t.Fatalf("правка опубликованного перехвата сменила тему: %#v, %v", job.Delivery, err)
+	}
+	word, err := store.DeliveryJobByID(ctx, edit.ID, "w")
+	if err != nil || word.Delivery.Decision.Action != domain.RouteDeliver {
+		t.Fatalf("перенаправление изменило решение для 39-ки: %#v, %v", word.Delivery, err)
+	}
+	fresh := makeEvent("fresh", "source-2", "1 мб 155 омбр", 3)
+	accept(fresh, rules)
+	job, err = store.DeliveryJobByID(ctx, fresh.ID, "a")
+	if err != nil || job.Delivery.Decision.ThreadID != 39 {
+		t.Fatalf("новый перехват не попал в перенаправленную тему: %#v, %v", job.Delivery, err)
+	}
+	accept(makeEvent("fresh-for-disable", "source-3", "1 мб 155 омбр", 3), rules)
+	accept(makeEvent("fresh-for-base-change", "source-4", "1 мб 155 омбр", 3), rules)
+	delete(rules.TopicRedirects, "name:1 мб 155 омбр")
+	rules.Version = 3
+	firstAfterCancel := makeEvent("first-after-cancel", "source-1", "1 мб 155 омбр", 4)
+	accept(firstAfterCancel, rules)
+	job, err = store.DeliveryJobByID(ctx, firstAfterCancel.ID, "a")
+	if err != nil || job.Delivery.Decision.ThreadID != 2 {
+		t.Fatalf("отмена перенаправления переместила старый перехват: %#v, %v", job.Delivery, err)
+	}
+	redirectedAfterCancel := makeEvent("redirected-after-cancel", "source-2", "1 мб 155 омбр", 5)
+	accept(redirectedAfterCancel, rules)
+	job, err = store.DeliveryJobByID(ctx, redirectedAfterCancel.ID, "a")
+	if err != nil || job.Delivery.Decision.ThreadID != 39 {
+		t.Fatalf("отмена перенаправления переместила опубликованный в новой теме перехват: %#v, %v", job.Delivery, err)
+	}
+	corrected := makeEvent("corrected", "source-1", "другая позиция", 6)
+	accept(corrected, rules)
+	job, err = store.DeliveryJobByID(ctx, corrected.ID, "a")
+	if err != nil || job.Delivery.Decision.ThreadID != 0 {
+		t.Fatalf("исправление позиции не сменило Telegram-маршрут: %#v, %v", job.Delivery, err)
+	}
+	key := "name:1 мб 155 омбр"
+	rules.Positions[key]["a"] = domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 5}
+	rules.Version = 4
+	changedBase := makeEvent("base-changed", "source-4", "1 мб 155 омбр", 7)
+	accept(changedBase, rules)
+	job, err = store.DeliveryJobByID(ctx, changedBase.ID, "a")
+	if err != nil || job.Delivery.Decision.ThreadID != 5 {
+		t.Fatalf("явное изменение основного маршрута проигнорировано: %#v, %v", job.Delivery, err)
+	}
+	rules.Destinations["b"] = domain.Destination{ID: "b", Name: "Другая группа", Kind: domain.DestinationTelegram, Enabled: true}
+	rules.Unknown["b"] = domain.RouteDecision{Action: domain.RouteReview}
+	rules.Unknown["a"] = domain.RouteDecision{Action: domain.RouteSkip}
+	a := rules.Destinations["a"]
+	a.Enabled = false
+	rules.Destinations["a"] = a
+	rules.Version = 5
+	disabled := makeEvent("recipient-disabled", "source-3", "1 мб 155 омбр", 8)
+	accept(disabled, rules)
+	cleanup, err := store.DeliveryJobByID(ctx, disabled.ID, "a")
+	if err != nil || cleanup.Delivery.Decision.Action != domain.RouteSkip || cleanup.Delivery.RuleLevel != "cleanup" {
+		t.Fatalf("отключённый Telegram-получатель не получил задание очистки: %#v, %v", cleanup.Delivery, err)
+	}
+	word, err = store.DeliveryJobByID(ctx, disabled.ID, "w")
+	if err != nil || word.Delivery.Decision.Action != domain.RouteDeliver {
+		t.Fatalf("отключение Telegram изменило Word-маршрут: %#v, %v", word.Delivery, err)
+	}
+	delete(rules.Destinations, "a")
+	delete(rules.Unknown, "a")
+	delete(rules.Positions[key], "a")
+	rules.Positions[key]["b"] = domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 6}
+	rules.Version = 6
+	changedRecipient := makeEvent("recipient-changed", "source-2", "1 мб 155 омбр", 9)
+	accept(changedRecipient, rules)
+	job, err = store.DeliveryJobByID(ctx, changedRecipient.ID, "b")
+	if err != nil || job.Delivery.Decision.ThreadID != 6 {
+		t.Fatalf("новый Telegram-получатель не получил свою тему: %#v, %v", job.Delivery, err)
+	}
+	cleanup, err = store.DeliveryJobByID(ctx, changedRecipient.ID, "a")
+	if err != nil || cleanup.Delivery.Decision.Action != domain.RouteSkip || cleanup.Delivery.RuleLevel != "cleanup" {
+		t.Fatalf("удалённый Telegram-получатель не получил задание очистки: %#v, %v", cleanup.Delivery, err)
+	}
+	word, err = store.DeliveryJobByID(ctx, changedRecipient.ID, "w")
+	if err != nil || word.Delivery.Decision.Action != domain.RouteDeliver {
+		t.Fatalf("смена Telegram-получателя изменила Word-маршрут: %#v, %v", word.Delivery, err)
+	}
+}
+
 // Ошибка Word-документа одного подразделения не должна задерживать документы
 // остальных подразделений того же удалённого получателя.
 func TestServerStoreSeparatesWordQueuesByPosition(t *testing.T) {

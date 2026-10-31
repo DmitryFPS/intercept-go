@@ -30,6 +30,54 @@ func TestRouteRecipientFilterAssetsStayConnected(t *testing.T) {
 	}
 }
 
+func TestTopicRedirectScreenWiring(t *testing.T) {
+	index, err := assets.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	application, err := assets.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles, err := assets.ReadFile("assets/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, javascript := string(index), string(application)
+	for _, id := range []string{
+		"addTopicRedirect", "topicRedirectList",
+		"topicRedirectForm", "topicRedirectCurrent", "publishTopicRedirects", "positionRedirectNotice",
+	} {
+		if !strings.Contains(html, `id="`+id+`"`) || !strings.Contains(javascript, `$('`+id+`')`) {
+			t.Errorf("раздел перенаправлений не подключает элемент %q", id)
+		}
+	}
+	if !strings.Contains(html, `id="topicRedirects"`) || !strings.Contains(javascript, "topicRedirects: 'Перенаправление тем'") ||
+		!strings.Contains(html, `id="topicRedirectDialog"`) || !strings.Contains(javascript, "openDialog('topicRedirectDialog')") {
+		t.Error("отдельное меню и окно перенаправления не подключены")
+	}
+	for _, fragment := range []string{
+		"rules.topic_redirects[key] = {destination_id: row.destination.id, thread_id: threadID, topic_name: topicName}",
+		"delete rules.topic_redirects[key]",
+		"await post('/api/rule-draft', rules)",
+		"publishCurrentRules(event.currentTarget)",
+		"eligibleTopicRedirects()",
+	} {
+		if !strings.Contains(javascript, fragment) {
+			t.Errorf("черновик перенаправления неполон: нет %q", fragment)
+		}
+	}
+	if strings.Count(javascript, "initializeRuleMaps();") != 2 {
+		t.Error("старый черновик без topic_redirects должен открываться и с обзора, и напрямую")
+	}
+	if !strings.Contains(javascript, "Будет опубликован весь общий черновик") {
+		t.Error("подтверждение публикации не предупреждает о других изменениях маршрутов")
+	}
+	if !strings.Contains(string(styles), ".topic-redirect-card") {
+		t.Error("для списка перенаправлений нет отдельного оформления")
+	}
+}
+
 func TestWordTemplateDownloadUsesAuthenticatedAPI(t *testing.T) {
 	index, err := assets.ReadFile("assets/index.html")
 	if err != nil {
@@ -314,7 +362,7 @@ func TestServiceActionsFollowProcessingState(t *testing.T) {
 		"$('publishRules').disabled = !rulesDirty",
 		"$('positionPrev').disabled = currentPositionPage <= 1",
 		"$('positionNext').disabled = currentPositionPage >= pages",
-		"button.disabled = !rulesDirty",
+		"publishButtons.forEach(item => { item.disabled = !rulesDirty; })",
 	} {
 		if !strings.Contains(javascript, expected) {
 			t.Errorf("не зафиксирована логика вспомогательной серверной кнопки: %s", expected)

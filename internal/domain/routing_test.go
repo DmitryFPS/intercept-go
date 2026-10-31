@@ -134,6 +134,100 @@ func TestRuleSetDoesNotCreateWordForShabashkaPosition(t *testing.T) {
 	}
 }
 
+func TestTopicRedirectChangesOnlyTelegramTopic(t *testing.T) {
+	t.Parallel()
+	rules := testRuleSet()
+	key := "name:" + NormalizeUnitName("1 мб 155 омбр")
+	rules.TopicRedirects = map[string]TopicRedirect{
+		key: {DestinationID: "aerodrom", ThreadID: 39, TopicName: "Доразведка"},
+	}
+	plan, err := rules.Resolve(testEvent("1 мб 155 омбр"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Deliveries) != 2 {
+		t.Fatalf("ожидались Telegram и 39-ка: %#v", plan.Deliveries)
+	}
+	for _, delivery := range plan.Deliveries {
+		switch delivery.Destination.ID {
+		case "aerodrom":
+			if delivery.Decision.ThreadID != 39 {
+				t.Fatalf("перенаправление темы не применилось: %#v", delivery)
+			}
+		case "word-39":
+			if delivery.Decision.Action != RouteDeliver || delivery.Decision.ThreadID != 0 {
+				t.Fatalf("перенаправление изменило отправку на 39-ку: %#v", delivery)
+			}
+		default:
+			t.Fatalf("неожиданный получатель: %#v", delivery)
+		}
+	}
+	if rules.Positions[key]["aerodrom"].ThreadID != 2 {
+		t.Fatal("перенаправление изменило исходный маршрут")
+	}
+	shabashkaKey := "name:" + NormalizeUnitName(`2 об 3 обр ОсН "Спартан" НГУ`)
+	rules.TopicRedirects[shabashkaKey] = TopicRedirect{
+		DestinationID: "shabashka", ThreadID: 593, TopicName: "Доразведка",
+	}
+	withoutWord, err := rules.Resolve(testEvent(`2 об 3 обр ОсН "Спартан" НГУ`))
+	if err != nil || len(withoutWord.Deliveries) != 1 || withoutWord.Deliveries[0].Decision.ThreadID != 593 {
+		t.Fatalf("перенаправление включило не заданную отправку на 39-ку: %#v, %v", withoutWord, err)
+	}
+	unknown, err := rules.Resolve(testEvent("совершенно неизвестная позиция"))
+	if err != nil || unknown.Recognized || len(unknown.Deliveries) != 1 ||
+		unknown.Deliveries[0].Decision.Action != RouteReview || unknown.Deliveries[0].Decision.ThreadID != 0 ||
+		unknown.Deliveries[0].Destination.Kind != DestinationTelegram {
+		t.Fatalf("неизвестная позиция должна остаться в General без DOCX: %#v, %v", unknown, err)
+	}
+	delete(rules.TopicRedirects, key)
+	restored, err := rules.Resolve(testEvent("1 мб 155 омбр"))
+	if err != nil || restored.Deliveries[0].Decision.ThreadID != 2 {
+		t.Fatalf("после отмены перенаправления исходная тема не восстановилась: %#v, %v", restored, err)
+	}
+}
+
+func TestRuleSetRejectsUnsafeTopicRedirects(t *testing.T) {
+	t.Parallel()
+	key := "name:" + NormalizeUnitName("1 мб 155 омбр")
+	for name, change := range map[string]func(*RuleSet){
+		"missing position": func(rules *RuleSet) { delete(rules.Positions, key) },
+		"wrong recipient": func(rules *RuleSet) {
+			rules.TopicRedirects[key] = TopicRedirect{DestinationID: "word-39", ThreadID: 39, TopicName: "Доразведка"}
+		},
+		"multiple Telegram recipients": func(rules *RuleSet) {
+			rules.Positions[key]["shabashka"] = RouteDecision{Action: RouteDeliver, ThreadID: 5}
+		},
+		"disabled recipient": func(rules *RuleSet) {
+			destination := rules.Destinations["aerodrom"]
+			destination.Enabled = false
+			rules.Destinations["aerodrom"] = destination
+		},
+		"same topic": func(rules *RuleSet) {
+			rules.TopicRedirects[key] = TopicRedirect{DestinationID: "aerodrom", ThreadID: 2, TopicName: "Доразведка"}
+		},
+		"general": func(rules *RuleSet) {
+			rules.TopicRedirects[key] = TopicRedirect{DestinationID: "aerodrom", ThreadID: 0, TopicName: "Доразведка"}
+		},
+		"blank name": func(rules *RuleSet) {
+			rules.TopicRedirects[key] = TopicRedirect{DestinationID: "aerodrom", ThreadID: 39, TopicName: " "}
+		},
+		"long name": func(rules *RuleSet) {
+			rules.TopicRedirects[key] = TopicRedirect{DestinationID: "aerodrom", ThreadID: 39, TopicName: strings.Repeat("я", 101)}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rules := testRuleSet()
+			rules.TopicRedirects = map[string]TopicRedirect{
+				key: {DestinationID: "aerodrom", ThreadID: 39, TopicName: "Доразведка"},
+			}
+			change(&rules)
+			if err := rules.Validate(); err == nil {
+				t.Fatal("некорректное перенаправление принято")
+			}
+		})
+	}
+}
+
 // Пометка «отложенный режим» не блокирует перехват и не меняет назначенные ему группы и документы.
 func TestDeferredSuffixKeepsNormalDestinations(t *testing.T) {
 	t.Parallel()

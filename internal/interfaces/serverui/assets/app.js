@@ -11,7 +11,8 @@ const pageTitles = {
   transport: 'Связь с рабочими точками',
   destinations: 'Получатели',
   clients: 'Рабочие точки',
-  routes: 'Маршруты'
+  routes: 'Маршруты',
+  topicRedirects: 'Перенаправление тем'
 };
 
 const pageContexts = {
@@ -19,7 +20,8 @@ const pageContexts = {
   transport: 'ШАГ 1 · НАСТРОЙКА СИСТЕМЫ',
   destinations: 'ШАГ 2 · НАСТРОЙКА СИСТЕМЫ',
   clients: 'ШАГ 3 · НАСТРОЙКА СИСТЕМЫ',
-  routes: 'ШАГ 4 · НАСТРОЙКА СИСТЕМЫ'
+  routes: 'ШАГ 4 · НАСТРОЙКА СИСТЕМЫ',
+  topicRedirects: 'УПРАВЛЕНИЕ МАРШРУТАМИ'
 };
 
 let status = null;
@@ -236,7 +238,7 @@ document.querySelectorAll('.sidebar nav button').forEach(button => {
       if (button.dataset.page === 'dashboard') await loadOverview();
       if (button.dataset.page === 'destinations') await loadDestinations();
       if (button.dataset.page === 'clients') await loadClients();
-      if (button.dataset.page === 'routes') {
+      if (button.dataset.page === 'routes' || button.dataset.page === 'topicRedirects') {
         if (rulesDirty) {
           renderRules();
           await loadRuleHistory();
@@ -844,6 +846,7 @@ async function loadOverview() {
     rules = results[4]?.exists ? results[4].rules : results[3];
     rulesDirty = Boolean(results[4]?.exists);
   }
+  initializeRuleMaps();
   renderReadiness();
 }
 
@@ -1154,14 +1157,19 @@ async function loadRules() {
     request('/api/rule-draft')
   ]);
   rules = draft?.exists ? draft.rules : published;
-  rules.destinations ||= {};
-  rules.positions ||= {};
-  rules.unknown ||= {};
+  initializeRuleMaps();
   rulesDirty = Boolean(draft?.exists);
   currentPositionPage = 1;
   renderRules();
   await loadRuleHistory();
   if (rulesDirty) notify('Неопубликованный черновик восстановлен из центра.', true);
+}
+
+function initializeRuleMaps() {
+  rules.destinations ||= {};
+  rules.positions ||= {};
+  rules.topic_redirects ||= {};
+  rules.unknown ||= {};
 }
 
 function positionName(key) {
@@ -1194,13 +1202,16 @@ function routeDestinationPresentation(destination) {
   };
 }
 
-function decisionSummary(decisions, recipientID = '') {
+function decisionSummary(decisions, recipientID = '', positionKey = '') {
   const chips = sortedRuleDestinations().flatMap(destination => {
     if (recipientID && destination.id !== recipientID) return [];
     const decision = decisions?.[destination.id];
     if (!decision || decision.action === 'skip') return [];
     const action = decision.action === 'review' ? 'На проверку' : 'Отправлять';
-    const topic = destination.kind === 'telegram' && decision.thread_id ? ` · тема ${decision.thread_id}` : '';
+    const redirect = positionKey ? rules.topic_redirects?.[positionKey] : null;
+    const topicID = redirect?.destination_id === destination.id ? redirect.thread_id : decision.thread_id;
+    const topicName = redirect?.destination_id === destination.id ? `${redirect.topic_name} · ` : '';
+    const topic = destination.kind === 'telegram' ? ` · ${topicName}${topicID ? `тема ${topicID}` : 'General'}` : '';
     const type = destination.kind === 'telegram' ? 'Telegram' : 'DOCX';
     return [`<span class="route-chip${decision.action === 'review' ? ' review' : ''}">${escapeHTML(destination.name)} · ${type} · ${action}${escapeHTML(topic)}</span>`];
   });
@@ -1246,6 +1257,7 @@ function renderRules() {
   $('routeFilterCount').textContent = `Показано: ${filtered.length} из ${allKeys.length}`;
   $('clearRouteFilters').disabled = !query && !recipientID;
   $('publishRules').disabled = !rulesDirty;
+  $('publishTopicRedirects').disabled = !rulesDirty;
   $('positionPrev').disabled = currentPositionPage <= 1;
   $('positionNext').disabled = currentPositionPage >= pages;
   $('positionPage').textContent = `Страница ${currentPositionPage} из ${pages}`;
@@ -1262,10 +1274,150 @@ function renderRules() {
   $('positionsList').innerHTML = visible.map(key => `
     <article class="route-card" data-position-key="${escapeHTML(key)}">
       <div><h3>${escapeHTML(positionName(key))}</h3><p>Индивидуальный маршрут</p></div>
-      <div class="route-summary">${decisionSummary(rules.positions[key], recipientID)}</div>
+      <div class="route-summary">${decisionSummary(rules.positions[key], recipientID, key)}</div>
       <div class="route-card-actions"><button class="button ghost" data-action="edit">Изменить</button><button class="button danger" data-action="delete">Удалить</button></div>
     </article>`).join('');
+  renderTopicRedirects();
 }
+
+function eligibleTopicRedirects() {
+  return Object.keys(rules.positions).sort((left, right) => positionName(left).localeCompare(positionName(right), 'ru')).flatMap(key => {
+    const telegram = sortedRuleDestinations().filter(destination => {
+      const decision = rules.positions[key]?.[destination.id];
+      return destination.kind === 'telegram' && destination.enabled && decision && decision.action !== 'skip';
+    });
+    if (telegram.length !== 1) return [];
+    const destination = telegram[0];
+    return [{key, destination, decision: rules.positions[key][destination.id]}];
+  });
+}
+
+function wordRouteLabel(key) {
+  const enabled = sortedRuleDestinations().some(destination =>
+    destination.kind === 'word' && destination.enabled &&
+    rules.positions[key]?.[destination.id]?.action !== 'skip' &&
+    rules.positions[key]?.[destination.id]);
+  return enabled ? 'DOCX: отправляется по основному маршруту' : 'DOCX: не отправляется';
+}
+
+function renderTopicRedirects() {
+  const eligible = eligibleTopicRedirects();
+  const search = $('topicRedirectSearch').value.trim().toLocaleLowerCase('ru-RU');
+  const rows = eligible.filter(row => rules.topic_redirects[row.key] &&
+    positionName(row.key).toLocaleLowerCase('ru-RU').includes(search));
+  $('topicRedirectCount').textContent = `${rows.length} перенаправлений · ${eligible.length} доступных маршрутов`;
+  $('topicRedirectRulesMeta').textContent = rulesDirty
+    ? `Черновик · основа: версия ${rules.version}`
+    : `Опубликована версия ${rules.version}`;
+  $('topicRedirectDraftBadge').classList.toggle('hidden', !rulesDirty);
+  $('addTopicRedirect').disabled = eligible.length === 0;
+  $('topicRedirectList').dataset.emptyMessage = search
+    ? 'По запросу перенаправления не найдены'
+    : eligible.length === 0
+      ? 'Нет подходящих маршрутов. В разделе «Маршруты» назначьте подразделению ровно одного активного Telegram-получателя.'
+      : 'Пока нет перенаправлений. Новые перехваты идут в темы основных маршрутов.';
+  $('topicRedirectList').innerHTML = rows.map(({key, destination, decision}) => {
+    const redirect = rules.topic_redirects[key];
+    const originalTopic = decision.thread_id ? `тема ${decision.thread_id}` : 'General';
+    return `<article class="route-card topic-redirect-card" data-redirect-key="${escapeHTML(key)}">
+      <div><h3>${escapeHTML(positionName(key))}</h3><p>${escapeHTML(destination.name)} · ${escapeHTML(wordRouteLabel(key))}</p></div>
+      <div class="topic-redirect-path"><span>${escapeHTML(originalTopic)}</span><span aria-hidden="true">→</span><strong>${escapeHTML(redirect.topic_name)} · тема ${escapeHTML(redirect.thread_id)}</strong></div>
+      <div class="route-card-actions"><button class="button ghost" type="button" data-redirect-action="edit">Изменить</button><button class="button danger" type="button" data-redirect-action="remove">Отменить</button></div>
+    </article>`;
+  }).join('');
+}
+
+function showTopicRedirectDialog(key = '') {
+  const form = $('topicRedirectForm');
+  form.reset();
+  const eligible = eligibleTopicRedirects();
+  if (!eligible.length) {
+    notify('Сначала создайте маршрут подразделения с одним активным Telegram-получателем.');
+    return;
+  }
+  form.elements.position_key.innerHTML = eligible.map(row =>
+    `<option value="${escapeHTML(row.key)}">${escapeHTML(positionName(row.key))}</option>`).join('');
+  form.elements.position_key.value = key && eligible.some(row => row.key === key) ? key : eligible[0].key;
+  $('topicRedirectDialogTitle').textContent = key ? 'Изменить перенаправление' : 'Новая тема для подразделения';
+  updateTopicRedirectDialog();
+  openDialog('topicRedirectDialog');
+}
+
+function updateTopicRedirectDialog() {
+  const form = $('topicRedirectForm');
+  const key = form.elements.position_key.value;
+  const row = eligibleTopicRedirects().find(item => item.key === key);
+  if (!row) return;
+  const redirect = rules.topic_redirects[key];
+  form.elements.topic_name.value = redirect?.topic_name || '';
+  form.elements.thread_id.value = redirect?.thread_id || '';
+  const originalTopic = row.decision.thread_id ? `тема ${row.decision.thread_id}` : 'General';
+  $('topicRedirectCurrent').innerHTML = `<span>Текущий основной маршрут</span><strong>${escapeHTML(row.destination.name)} · ${escapeHTML(originalTopic)}</strong><small>${escapeHTML(wordRouteLabel(key))}. Изменится только тема Telegram.</small>`;
+}
+
+$('topicRedirectSearch').addEventListener('input', renderTopicRedirects);
+$('addTopicRedirect').addEventListener('click', () => showTopicRedirectDialog());
+$('topicRedirectForm').elements.position_key.addEventListener('change', updateTopicRedirectDialog);
+
+$('topicRedirectList').addEventListener('click', async event => {
+  const button = event.target.closest('button[data-redirect-action]');
+  const row = event.target.closest('[data-redirect-key]');
+  if (!button || !row) return;
+  const key = row.dataset.redirectKey;
+  if (button.dataset.redirectAction === 'edit') {
+    showTopicRedirectDialog(key);
+    return;
+  }
+  if (!await appConfirm({ title: `Отменить перенаправление «${positionName(key)}»?`, message: 'После публикации новые перехваты снова пойдут в тему основного маршрута. Ранее принятые Центром перехваты сохранят прежнюю тему.', confirmLabel: 'Отменить перенаправление' })) return;
+  const previous = cloneRules(rules);
+  delete rules.topic_redirects[key];
+  setButtonBusy(button, true, 'Сохраняем…');
+  try {
+    await post('/api/rule-draft', rules);
+    rulesDirty = true;
+    renderRules();
+    notify('Отмена перенаправления сохранена в черновике.', true);
+  } catch (error) {
+    rules = previous;
+    renderRules();
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
+
+$('topicRedirectForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const key = form.elements.position_key.value;
+  const row = eligibleTopicRedirects().find(item => item.key === key);
+  const threadID = Number(form.elements.thread_id.value);
+  const topicName = form.elements.topic_name.value.trim();
+  if (!row || !Number.isSafeInteger(threadID) || threadID <= 0 || !topicName || topicName.length > 80) {
+    notify('Укажите подразделение, название и числовой ID темы.');
+    return;
+  }
+  if (threadID === Number(row.decision.thread_id || 0)) {
+    notify('Это уже тема основного маршрута. Перенаправление не требуется.');
+    return;
+  }
+  const previous = cloneRules(rules);
+  rules.topic_redirects[key] = {destination_id: row.destination.id, thread_id: threadID, topic_name: topicName};
+  const button = form.querySelector('button[value="save"]');
+  setButtonBusy(button, true, 'Сохраняем…');
+  try {
+    await post('/api/rule-draft', rules);
+    rulesDirty = true;
+    closeDialog('topicRedirectDialog');
+    renderRules();
+    notify('Перенаправление сохранено в черновике. Опубликуйте маршруты, чтобы оно заработало.', true);
+  } catch (error) {
+    rules = previous;
+    notify(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
 
 $('positionSearch').addEventListener('input', () => {
   currentPositionPage = 1;
@@ -1324,6 +1476,7 @@ function showPositionDialog(key = '') {
   form.elements.name.required = !unknown;
   form.elements.name.closest('label').classList.toggle('hidden', unknown);
   $('positionDialogTitle').textContent = unknown ? 'Новые и неопознанные позиции' : (key ? 'Изменить позицию' : 'Новая позиция');
+  $('positionRedirectNotice').classList.toggle('hidden', !rules.topic_redirects?.[key]);
   const destinationList = sortedRuleDestinations();
   $('routeEditor').innerHTML = destinationList.length
     ? destinationList.map(destination => routeControl(destination, decisions[destination.id], unknown)).join('')
@@ -1346,6 +1499,7 @@ $('positionsList').addEventListener('click', async event => {
     if (!await appConfirm({ title: `Удалить «${positionName(key)}»?`, message: 'Позиция будет удалена из черновика маршрутов.', confirmLabel: 'Удалить', danger: true })) return;
     const previous = cloneRules(rules);
     delete rules.positions[key];
+    delete rules.topic_redirects[key];
     setButtonBusy(button, true, 'Удаляем…');
     try {
       await post('/api/rule-draft', rules);
@@ -1391,8 +1545,22 @@ $('positionForm').addEventListener('submit', async event => {
       notify('Позиция с таким названием уже существует.');
       return;
     }
-    if (originalKey) delete rules.positions[originalKey];
+    const oldRedirect = rules.topic_redirects[originalKey];
+    if (originalKey) {
+      delete rules.positions[originalKey];
+      delete rules.topic_redirects[originalKey];
+    }
     rules.positions[newKey] = decisions;
+    if (oldRedirect) {
+      const destination = rules.destinations[oldRedirect.destination_id];
+      const activeTelegram = sortedRuleDestinations().filter(item =>
+        item.kind === 'telegram' && item.enabled && decisions[item.id]?.action !== 'skip');
+      if (destination?.kind === 'telegram' && activeTelegram.length === 1 &&
+          activeTelegram[0].id === oldRedirect.destination_id &&
+          Number(decisions[destination.id].thread_id || 0) !== Number(oldRedirect.thread_id)) {
+        rules.topic_redirects[newKey] = oldRedirect;
+      }
+    }
   }
   setButtonBusy(button, true, 'Сохраняем…');
   try {
@@ -1409,10 +1577,11 @@ $('positionForm').addEventListener('submit', async event => {
   }
 });
 
-$('publishRules').addEventListener('click', async event => {
+async function publishCurrentRules(button) {
   if (!rulesDirty || !rules) return;
-  if (!await appConfirm({ title: 'Опубликовать маршруты?', message: 'Новые правила сразу начнут применяться к следующим перехватам.', confirmLabel: 'Опубликовать' })) return;
-  const button = event.currentTarget;
+  if (!await appConfirm({ title: 'Опубликовать все изменения?', message: 'Будет опубликован весь общий черновик: маршруты, перенаправления и изменения доставки Word, если вы их сохраняли. Новые правила начнут применяться к следующим перехватам.', confirmLabel: 'Опубликовать' })) return;
+  const publishButtons = [$('publishRules'), $('publishTopicRedirects')];
+  publishButtons.forEach(item => { item.disabled = true; });
   setButtonBusy(button, true, 'Публикуем…');
   try {
     await post('/api/rules', rules);
@@ -1422,9 +1591,12 @@ $('publishRules').addEventListener('click', async event => {
     notify(error.message);
   } finally {
     setButtonBusy(button, false);
-    button.disabled = !rulesDirty;
+    publishButtons.forEach(item => { item.disabled = !rulesDirty; });
   }
-});
+}
+
+$('publishRules').addEventListener('click', event => publishCurrentRules(event.currentTarget));
+$('publishTopicRedirects').addEventListener('click', event => publishCurrentRules(event.currentTarget));
 
 async function loadRuleHistory() {
   ruleHistory = await request('/api/rule-versions');

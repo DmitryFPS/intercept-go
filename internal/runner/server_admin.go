@@ -264,6 +264,11 @@ func (server *Server) DeleteDestination(ctx context.Context, id string) error {
 	for _, decisions := range rules.Positions {
 		delete(decisions, id)
 	}
+	for key, redirect := range rules.TopicRedirects {
+		if redirect.DestinationID == id {
+			delete(rules.TopicRedirects, key)
+		}
+	}
 	rules.Version++
 	if err := rules.Validate(); err != nil {
 		return err
@@ -991,6 +996,9 @@ func (server *Server) PublishRules(ctx context.Context, rules domain.RuleSet, au
 		return err
 	}
 	rules = canonical
+	if err := rules.Validate(); err != nil {
+		return err
+	}
 	if err := server.validateRuleDestinations(rules); err != nil {
 		return err
 	}
@@ -1001,12 +1009,65 @@ func (server *Server) PublishRules(ctx context.Context, rules domain.RuleSet, au
 	if err := requireCurrentRuleVersion(rules.Version, active.Version); err != nil {
 		return err
 	}
+	if err := server.checkChangedTopicRedirects(ctx, active, rules); err != nil {
+		return err
+	}
 	next, err := server.Store.NextRuleVersion(ctx)
 	if err != nil {
 		return err
 	}
 	rules.Version = next
 	return server.Store.PublishRules(ctx, rules, author)
+}
+
+func (server *Server) checkChangedTopicRedirects(
+	ctx context.Context, active, next domain.RuleSet,
+) error {
+	server.mu.RLock()
+	configured := cloneDestinations(server.config.Destinations)
+	probe := server.topicProbe
+	server.mu.RUnlock()
+	if probe == nil {
+		clients := make(map[string]*telegram.Client)
+		probe = func(checkCtx context.Context, destination config.DestinationConfig, threadID int64) error {
+			api := clients[destination.BotToken]
+			if api == nil {
+				var err error
+				api, err = telegram.New(destination.BotToken, nil)
+				if err != nil {
+					return err
+				}
+				clients[destination.BotToken] = api
+			}
+			return api.TestTopic(checkCtx, destination.ChatID, threadID)
+		}
+	}
+	keys := make([]string, 0, len(next.TopicRedirects))
+	for key, redirect := range next.TopicRedirects {
+		if previous, exists := active.TopicRedirects[key]; !exists ||
+			previous.DestinationID != redirect.DestinationID || previous.ThreadID != redirect.ThreadID {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	// Несколько тем проверяются в рамках общего срока, чтобы публикация не
+	// ожидала по 20 секунд на каждое перенаправление при сбое Telegram.
+	checkCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	for _, key := range keys {
+		redirect := next.TopicRedirects[key]
+		destination, exists := configured[redirect.DestinationID]
+		if !exists || destination.Kind != domain.DestinationTelegram {
+			return fmt.Errorf("Telegram-получатель для перенаправления %q не настроен", key)
+		}
+		topicCtx, topicCancel := context.WithTimeout(checkCtx, 20*time.Second)
+		err := probe(topicCtx, destination, redirect.ThreadID)
+		topicCancel()
+		if err != nil {
+			return fmt.Errorf("не удалось проверить тему %q для маршрута %q: %w", redirect.TopicName, key, err)
+		}
+	}
+	return nil
 }
 
 func requireCurrentRuleVersion(submitted, active int64) error {
@@ -1082,20 +1143,35 @@ func (server *Server) validateRuleDestinations(rules domain.RuleSet) error {
 func canonicalRules(rules domain.RuleSet) (domain.RuleSet, error) {
 	positions := make(map[string]map[string]domain.RouteDecision, len(rules.Positions))
 	for key, decisions := range rules.Positions {
-		canonical := key
-		switch {
-		case strings.HasPrefix(key, "name:"):
-			canonical = "name:" + domain.NormalizeUnitName(strings.TrimPrefix(key, "name:"))
-		case strings.HasPrefix(key, "catalog:"):
-			canonical = "catalog:" + strings.ToLower(strings.TrimSpace(strings.TrimPrefix(key, "catalog:")))
-		}
+		canonical := canonicalPositionKey(key)
 		if _, exists := positions[canonical]; exists {
 			return domain.RuleSet{}, fmt.Errorf("две позиции после нормализации имеют один ключ %q", canonical)
 		}
 		positions[canonical] = decisions
 	}
 	rules.Positions = positions
+	redirects := make(map[string]domain.TopicRedirect, len(rules.TopicRedirects))
+	for key, redirect := range rules.TopicRedirects {
+		canonical := canonicalPositionKey(key)
+		if _, exists := redirects[canonical]; exists {
+			return domain.RuleSet{}, fmt.Errorf("два перенаправления после нормализации имеют один ключ %q", canonical)
+		}
+		redirect.TopicName = strings.TrimSpace(redirect.TopicName)
+		redirects[canonical] = redirect
+	}
+	rules.TopicRedirects = redirects
 	return rules, nil
+}
+
+func canonicalPositionKey(key string) string {
+	switch {
+	case strings.HasPrefix(key, "name:"):
+		return "name:" + domain.NormalizeUnitName(strings.TrimPrefix(key, "name:"))
+	case strings.HasPrefix(key, "catalog:"):
+		return "catalog:" + strings.ToLower(strings.TrimSpace(strings.TrimPrefix(key, "catalog:")))
+	default:
+		return key
+	}
 }
 
 // SafeDestinations возвращает направления без токенов и паролей.

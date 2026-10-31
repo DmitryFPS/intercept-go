@@ -185,6 +185,52 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 			return false, application.ErrSourceLineageLimit
 		}
 	}
+	// Сохраняем тему прежней публикации, только если тот же Telegram-получатель
+	// и его основной маршрут остаются действующими. Снятие получателя создаёт
+	// задание очистки, а явное изменение маршрута вступает в силу.
+	positionKey := event.PositionKey()
+	currentRedirected := false
+	for index := range plan.Deliveries {
+		plan.Deliveries[index].SourcePositionKey = positionKey
+		currentRedirected = currentRedirected || plan.Deliveries[index].TopicRedirected
+	}
+	previousRedirected := false
+	for _, delivery := range barrier.Route {
+		previousRedirected = previousRedirected || delivery.TopicRedirected
+	}
+	if hasBarrier && (currentRedirected || previousRedirected) {
+		previousPositionKey, err := sourcePositionKeyForBarrier(ctx, tx, barrier)
+		if err != nil {
+			return false, err
+		}
+		if previousPositionKey == positionKey {
+			previousTelegram := make(map[string]domain.PlannedDelivery)
+			for _, delivery := range barrier.Route {
+				if delivery.Destination.Kind == domain.DestinationTelegram && delivery.Decision.Action != domain.RouteSkip {
+					previousTelegram[delivery.Destination.ID] = delivery
+				}
+			}
+			for index, current := range plan.Deliveries {
+				if current.Destination.Kind != domain.DestinationTelegram ||
+					!current.Destination.Enabled || current.Decision.Action == domain.RouteSkip {
+					continue
+				}
+				previous, exists := previousTelegram[current.Destination.ID]
+				if !exists || !(current.TopicRedirected || previous.TopicRedirected) {
+					continue
+				}
+				base := telegramBaseDecision(current)
+				previousBase := telegramBaseDecision(previous)
+				if base.Action != previousBase.Action || base.ThreadID != previousBase.ThreadID {
+					continue
+				}
+				current.Decision.ThreadID = previous.Decision.ThreadID
+				current.TopicRedirected = true
+				current.BaseDecision = &base
+				plan.Deliveries[index] = current
+			}
+		}
+	}
 	// В барьере хранится именно активный маршрут этой редакции. Задания cleanup,
 	// добавленные ниже, не должны становиться маршрутом следующей версии.
 	activeRoute := append([]domain.PlannedDelivery(nil), plan.Deliveries...)
@@ -245,6 +291,44 @@ func (store *ServerStore) Accept(ctx context.Context, event domain.Event, plan d
 		return false, fmt.Errorf("завершить приём события: %w", err)
 	}
 	return true, nil
+}
+
+func telegramBaseDecision(delivery domain.PlannedDelivery) domain.RouteDecision {
+	if delivery.BaseDecision != nil {
+		return *delivery.BaseDecision
+	}
+	return delivery.Decision
+}
+
+func sourcePositionKeyForBarrier(
+	ctx context.Context, tx *sql.Tx, barrier sourceRevisionBarrier,
+) (string, error) {
+	for _, delivery := range barrier.Route {
+		if delivery.SourcePositionKey != "" {
+			return delivery.SourcePositionKey, nil
+		}
+	}
+	// Старый барьер не содержал позицию. Читаем её из принятого события,
+	// пока оно есть в истории; после очистки истории не делаем предположений.
+	var protected []byte
+	err := tx.QueryRowContext(ctx,
+		"SELECT payload_json FROM received_events WHERE event_id=?", barrier.EventID,
+	).Scan(&protected)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("прочитать предыдущую позицию перехвата: %w", err)
+	}
+	plain, err := unprotectDatabaseValue(protected)
+	if err != nil {
+		return "", fmt.Errorf("расшифровать предыдущую позицию перехвата: %w", err)
+	}
+	var previous domain.Event
+	if err := json.Unmarshal(plain, &previous); err != nil {
+		return "", errors.New("предыдущая позиция перехвата повреждена")
+	}
+	return previous.PositionKey(), nil
 }
 
 // addRemovedRouteCleanup добавляет задания удаления для направлений, которые

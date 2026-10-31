@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -22,8 +23,108 @@ import (
 	"intercept/internal/config"
 	"intercept/internal/domain"
 	"intercept/internal/infrastructure/secrets"
+	stateDB "intercept/internal/infrastructure/sqlite"
 	"intercept/internal/provisioning"
 )
+
+func TestPublishRulesChecksChangedTopicRedirectsOnly(t *testing.T) {
+	ctx := context.Background()
+	db, err := stateDB.OpenState(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := stateDB.NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "name:" + domain.NormalizeUnitName("Позиция")
+	rules := domain.RuleSet{
+		Version: 1,
+		Destinations: map[string]domain.Destination{
+			"a": {ID: "a", Name: "Группа", Kind: domain.DestinationTelegram, Enabled: true},
+		},
+		Positions: map[string]map[string]domain.RouteDecision{
+			key: {"a": {Action: domain.RouteDeliver, ThreadID: 2}},
+		},
+		Unknown: map[string]domain.RouteDecision{"a": {Action: domain.RouteReview}},
+	}
+	if err := store.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store, config: config.Server{Destinations: map[string]config.DestinationConfig{
+		"a": {Kind: domain.DestinationTelegram, BotToken: "123:token", ChatID: -1001},
+	}}}
+	var checked []int64
+	server.topicProbe = func(_ context.Context, destination config.DestinationConfig, threadID int64) error {
+		if destination.BotToken != "123:token" || destination.ChatID != -1001 {
+			t.Fatalf("проверка использует чужого бота или чат: %#v", destination)
+		}
+		checked = append(checked, threadID)
+		if threadID == 40 {
+			return errors.New("тема недоступна")
+		}
+		return nil
+	}
+	rules.TopicRedirects = map[string]domain.TopicRedirect{
+		key: {DestinationID: "a", ThreadID: 39, TopicName: "Доразведка"},
+	}
+	if err := server.SaveRuleDraft(ctx, rules); err != nil {
+		t.Fatal(err)
+	}
+	if len(checked) != 0 {
+		t.Fatal("сохранение черновика вызвало проверку Telegram")
+	}
+	if err := server.PublishRules(ctx, rules, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(checked) != 1 || checked[0] != 39 {
+		t.Fatalf("новое перенаправление не проверено ровно один раз: %v", checked)
+	}
+	active, err := store.ActiveRules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.PublishRules(ctx, active, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(checked) != 1 {
+		t.Fatalf("неизменное перенаправление проверено повторно: %v", checked)
+	}
+	active, err = store.ActiveRules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.TopicRedirects[key] = domain.TopicRedirect{DestinationID: "a", ThreadID: 39, TopicName: "Новое название"}
+	if err := server.PublishRules(ctx, active, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(checked) != 1 {
+		t.Fatalf("переименование метки вызвало проверку Telegram: %v", checked)
+	}
+	active, err = store.ActiveRules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.TopicRedirects[key] = domain.TopicRedirect{DestinationID: "a", ThreadID: 40, TopicName: "Другая тема"}
+	if err := server.SaveRuleDraft(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.PublishRules(ctx, active, "test"); err == nil {
+		t.Fatal("недоступная тема опубликована")
+	}
+	if len(checked) != 2 || checked[1] != 40 {
+		t.Fatalf("изменённая тема не проверена: %v", checked)
+	}
+	published, err := store.ActiveRules(ctx)
+	if err != nil || published.TopicRedirects[key].ThreadID != 39 {
+		t.Fatalf("ошибка проверки изменила опубликованный маршрут: %#v, %v", published.TopicRedirects, err)
+	}
+	draft, exists, err := store.RuleDraft(ctx)
+	if err != nil || !exists || draft.TopicRedirects[key].ThreadID != 40 {
+		t.Fatalf("ошибка проверки потеряла черновик: %#v, %v", draft.TopicRedirects, err)
+	}
+}
 
 func TestRuleDestinationKindMustMatchConfiguredTransport(t *testing.T) {
 	server := &Server{config: config.Server{Destinations: map[string]config.DestinationConfig{

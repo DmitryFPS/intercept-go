@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // DestinationKind определяет технический адаптер доставки.
@@ -39,19 +40,35 @@ type RouteDecision struct {
 	Note     string      `json:"note,omitempty"`
 }
 
+// TopicRedirect заменяет только тему единственного Telegram-получателя позиции.
+// Название темы нужно оператору; для отправки используется её числовой ID.
+type TopicRedirect struct {
+	DestinationID string `json:"destination_id"`
+	ThreadID      int64  `json:"thread_id"`
+	TopicName     string `json:"topic_name"`
+}
+
 // RuleSet — атомарно публикуемая версия матрицы маршрутов.
 type RuleSet struct {
-	Version      int64                               `json:"version"`
-	Destinations map[string]Destination              `json:"destinations"`
-	Positions    map[string]map[string]RouteDecision `json:"positions"`
-	Unknown      map[string]RouteDecision            `json:"unknown"`
+	Version        int64                               `json:"version"`
+	Destinations   map[string]Destination              `json:"destinations"`
+	Positions      map[string]map[string]RouteDecision `json:"positions"`
+	Unknown        map[string]RouteDecision            `json:"unknown"`
+	TopicRedirects map[string]TopicRedirect            `json:"topic_redirects,omitempty"`
 }
 
 // PlannedDelivery — одно независимое задание для внешнего получателя.
 type PlannedDelivery struct {
-	Destination Destination   `json:"destination"`
-	Decision    RouteDecision `json:"decision"`
-	RuleLevel   string        `json:"rule_level"`
+	Destination     Destination   `json:"destination"`
+	Decision        RouteDecision `json:"decision"`
+	RuleLevel       string        `json:"rule_level"`
+	TopicRedirected bool          `json:"topic_redirected,omitempty"`
+	// BaseDecision хранит исходный Telegram-маршрут под перенаправлением темы.
+	// Он позволяет отличить отмену перенаправления от изменения самого маршрута.
+	BaseDecision *RouteDecision `json:"base_decision,omitempty"`
+	// SourcePositionKey сохраняет позицию EAVC после очистки истории, чтобы
+	// последующие редакции продолжали менять сообщение в исходной теме.
+	SourcePositionKey string `json:"source_position_key,omitempty"`
 }
 
 // DeliveryPlan объясняет как результат, так и правило, которое его создало.
@@ -69,6 +86,9 @@ func (rules RuleSet) Validate() error {
 		return errors.New("версия маршрутов должна быть положительной")
 	}
 	if len(rules.Destinations) == 0 {
+		if len(rules.TopicRedirects) != 0 {
+			return errors.New("перенаправление темы не может ссылаться на отсутствующих получателей")
+		}
 		if len(rules.Unknown) != 0 {
 			return errors.New("маршрут новых событий не может ссылаться на отсутствующих получателей")
 		}
@@ -101,6 +121,36 @@ func (rules RuleSet) Validate() error {
 		}
 		if err := rules.validateDecisions("позиция "+key, decisions); err != nil {
 			return err
+		}
+	}
+	for key, redirect := range rules.TopicRedirects {
+		decisions, exists := rules.Positions[key]
+		if !exists {
+			return fmt.Errorf("перенаправление ссылается на отсутствующий маршрут %q", key)
+		}
+		if redirect.ThreadID <= 0 {
+			return fmt.Errorf("для перенаправления %q укажите ID темы Telegram больше нуля", key)
+		}
+		name := strings.TrimSpace(redirect.TopicName)
+		if name == "" || utf8.RuneCountInString(name) > 100 || strings.ContainsAny(name, "\r\n\t") {
+			return fmt.Errorf("для перенаправления %q укажите название темы длиной до 100 символов", key)
+		}
+		activeTelegram := 0
+		for id, decision := range decisions {
+			destination := rules.Destinations[id]
+			if !destination.Enabled || destination.Kind != DestinationTelegram || decision.Action == RouteSkip {
+				continue
+			}
+			activeTelegram++
+			if id != redirect.DestinationID {
+				return fmt.Errorf("у маршрута %q несколько Telegram-получателей для перенаправления", key)
+			}
+			if decision.ThreadID == redirect.ThreadID {
+				return fmt.Errorf("маршрут %q уже отправляет в выбранную тему", key)
+			}
+		}
+		if activeTelegram != 1 {
+			return fmt.Errorf("для перенаправления %q нужен ровно один действующий Telegram-получатель", key)
 		}
 	}
 	if err := rules.validateDecisions("неопознанные события", rules.Unknown); err != nil {
@@ -189,10 +239,23 @@ func (rules RuleSet) Resolve(event Event) (DeliveryPlan, error) {
 		if !destination.Enabled || decision.Action == RouteSkip {
 			continue
 		}
+		redirected := false
+		var baseDecision *RouteDecision
+		if recognized && destination.Kind == DestinationTelegram {
+			if redirect, exists := rules.TopicRedirects[key]; exists && redirect.DestinationID == id {
+				base := decision
+				baseDecision = &base
+				decision.ThreadID = redirect.ThreadID
+				redirected = true
+			}
+		}
 		plan.Deliveries = append(plan.Deliveries, PlannedDelivery{
-			Destination: destination,
-			Decision:    decision,
-			RuleLevel:   level,
+			Destination:       destination,
+			Decision:          decision,
+			RuleLevel:         level,
+			TopicRedirected:   redirected,
+			BaseDecision:      baseDecision,
+			SourcePositionKey: event.PositionKey(),
 		})
 	}
 	return plan, nil
