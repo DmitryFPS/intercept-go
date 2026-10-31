@@ -109,7 +109,9 @@ func (store *ServerStore) PendingTransportPackets(
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT update_id,chat_id,message_id,packet_json,attempts,decode_failures FROM transport_inbox
 		WHERE julianday(next_attempt_at)<=julianday(?)
-		ORDER BY julianday(next_attempt_at),update_id LIMIT ?`, now.UTC().Format(time.RFC3339Nano), limit)
+			AND `+sqliteNanoTimeExpr("next_attempt_at")+` <= ?
+		ORDER BY julianday(next_attempt_at),update_id LIMIT ?`,
+		now.UTC().Format(time.RFC3339Nano), sqliteNanoTimeKey(now), limit)
 	if err != nil {
 		return nil, fmt.Errorf("прочитать локальную входную очередь: %w", err)
 	}

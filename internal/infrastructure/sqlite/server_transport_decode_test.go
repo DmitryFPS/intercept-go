@@ -28,6 +28,28 @@ func newTransportDecodeTestStore(t *testing.T) (context.Context, *sql.DB, *Serve
 	return ctx, db, store, time.Now().UTC().Truncate(time.Second).Add(time.Second)
 }
 
+func TestPendingTransportPacketsDoesNotRunNanosecondBeforeRetry(t *testing.T) {
+	t.Parallel()
+	ctx, db, store, base := newTransportDecodeTestStore(t)
+	packet := application.IncomingPacket{UpdateID: 99, ChatID: -1001, MessageID: 199, Payload: []byte("precise")}
+	if err := store.PersistTransportBatch(ctx, "telegram_offset", 100, []application.IncomingPacket{packet}); err != nil {
+		t.Fatal(err)
+	}
+	due := base.Add(time.Minute)
+	if _, err := db.ExecContext(ctx, "UPDATE transport_inbox SET next_attempt_at=? WHERE update_id=99",
+		due.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.PendingTransportPackets(ctx, 25, due.Add(-time.Nanosecond))
+	if err != nil || len(items) != 0 {
+		t.Fatalf("пакет выбран до точного времени повтора: items=%#v err=%v", items, err)
+	}
+	items, err = store.PendingTransportPackets(ctx, 25, due)
+	if err != nil || len(items) != 1 || items[0].Packet.UpdateID != 99 {
+		t.Fatalf("пакет не выбран в точное время повтора: items=%#v err=%v", items, err)
+	}
+}
+
 func transportDecodeState(t *testing.T, ctx context.Context, db *sql.DB, updateID int64) (int, int, time.Time, string, []byte) {
 	t.Helper()
 	var attempts, failures int

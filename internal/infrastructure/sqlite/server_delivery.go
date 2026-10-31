@@ -285,9 +285,10 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 			last_error=CASE WHEN decode_failures>0
 				THEN 'Срок доставки истёк после ошибок расшифрования: ' || last_error
 				ELSE ? END
-		WHERE state='pending' AND julianday(expires_at) < julianday(?)`,
+		WHERE state='pending' AND julianday(expires_at) <= julianday(?)
+			AND `+sqliteNanoTimeExpr("expires_at")+` < ?`,
 		now.UTC().Format(time.RFC3339Nano), domain.FreshnessExpired,
-		now.UTC().Format(time.RFC3339Nano)); err != nil {
+		now.UTC().Format(time.RFC3339Nano), sqliteNanoTimeKey(now)); err != nil {
 		return nil, fmt.Errorf("завершить просроченные доставки: %w", err)
 	}
 	rows, err := store.db.QueryContext(ctx, `
@@ -296,7 +297,9 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 		FROM delivery_jobs j
 		JOIN received_events e ON e.event_id = j.event_id
 		WHERE j.state = 'pending' AND julianday(j.next_attempt_at) <= julianday(?)
+			AND `+sqliteNanoTimeExpr("j.next_attempt_at")+` <= ?
 			AND julianday(j.expires_at) >= julianday(?)
+			AND `+sqliteNanoTimeExpr("j.expires_at")+` >= ?
 			AND NOT EXISTS (
 				SELECT 1
 				FROM delivery_jobs earlier
@@ -313,7 +316,8 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 					)
 			)
 		ORDER BY e.rowid, j.destination_id
-		LIMIT ?`, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), limit)
+		LIMIT ?`, now.UTC().Format(time.RFC3339Nano), sqliteNanoTimeKey(now),
+		now.UTC().Format(time.RFC3339Nano), sqliteNanoTimeKey(now), limit)
 	if err != nil {
 		return nil, fmt.Errorf("прочитать очередь доставки: %w", err)
 	}

@@ -22,8 +22,9 @@ func TestPendingTransportPacketsUsesDueExpressionIndex(t *testing.T) {
 		EXPLAIN QUERY PLAN
 		SELECT update_id,chat_id,message_id,packet_json,attempts,decode_failures FROM transport_inbox
 		WHERE julianday(next_attempt_at)<=julianday(?)
+			AND `+sqliteNanoTimeExpr("next_attempt_at")+` <= ?
 		ORDER BY julianday(next_attempt_at),update_id LIMIT ?`,
-		time.Now().UTC().Format(time.RFC3339Nano), 25)
+		time.Now().UTC().Format(time.RFC3339Nano), sqliteNanoTimeKey(time.Now()), 25)
 	if err != nil {
 		t.Fatal(err)
 	}
