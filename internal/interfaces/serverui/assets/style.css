@@ -85,3 +85,17 @@
 .topic-redirect-modal .modal-head{margin-bottom:0}
 @media(min-width:761px) and (max-width:1050px){.sidebar nav button.active{font-size:0}.sidebar nav button.active span{font-size:11px}}
 @media(max-width:760px){.sidebar nav{grid-template-columns:repeat(3,minmax(0,1fr));overflow:visible}.topic-redirect-card{grid-template-columns:1fr}.topic-redirect-modal .form{grid-template-columns:1fr}}
+
+/* Перенаправление тем: компактная карточка и простая двухполевая форма. */
+.sidebar nav button{white-space:normal;line-height:1.25}
+.topic-redirect-card{grid-template-columns:minmax(190px,1fr) minmax(230px,1.35fr) auto;gap:14px;min-width:0}
+.topic-redirect-source,.topic-redirect-path{min-width:0}
+.topic-redirect-path{display:grid;grid-template-columns:minmax(74px,max-content) 24px minmax(130px,1fr);align-items:center;gap:9px}
+.topic-redirect-path>span:first-child{padding:5px 8px;border-radius:8px;background:#f1f4f8;color:#65738a;font-size:11px;font-weight:700;white-space:nowrap}
+.topic-redirect-path .topic-redirect-arrow{padding:0;background:transparent;color:#718097;text-align:center;font-size:17px;font-weight:700}
+.topic-redirect-path strong{min-width:0;padding:5px 8px;border-radius:8px;background:#eaf1ff;color:#2855a7;font-size:11px;overflow-wrap:anywhere}
+.topic-redirect-card .route-card-actions{justify-content:flex-end;flex-wrap:wrap}
+.topic-redirect-modal{width:min(540px,calc(100vw - 30px))}
+.topic-redirect-modal form{grid-template-columns:1fr;gap:14px;max-height:none;overflow:visible}
+.topic-redirect-modal .modal-head{margin-bottom:2px}
+@media(max-width:900px){.topic-redirect-card{grid-template-columns:1fr}.topic-redirect-card .route-card-actions{justify-content:flex-start}}

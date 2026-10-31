@@ -46,7 +46,7 @@ func TestTopicRedirectScreenWiring(t *testing.T) {
 	html, javascript := string(index), string(application)
 	for _, id := range []string{
 		"addTopicRedirect", "topicRedirectList",
-		"topicRedirectForm", "topicRedirectCurrent", "publishTopicRedirects", "positionRedirectNotice",
+		"topicRedirectForm", "publishTopicRedirects", "positionRedirectNotice",
 	} {
 		if !strings.Contains(html, `id="`+id+`"`) || !strings.Contains(javascript, `$('`+id+`')`) {
 			t.Errorf("раздел перенаправлений не подключает элемент %q", id)
@@ -57,11 +57,13 @@ func TestTopicRedirectScreenWiring(t *testing.T) {
 		t.Error("отдельное меню и окно перенаправления не подключены")
 	}
 	for _, fragment := range []string{
-		"rules.topic_redirects[key] = {destination_id: row.destination.id, thread_id: threadID, topic_name: topicName}",
+		"rules.topic_redirects[key] = {destination_id: destinationID, thread_id: threadID, topic_name: topicName}",
 		"delete rules.topic_redirects[key]",
 		"await post('/api/rule-draft', rules)",
 		"publishCurrentRules(event.currentTarget)",
 		"eligibleTopicRedirects()",
+		"topicOptionsFor(row)",
+		"form.elements.target_topic.selectedOptions[0]",
 	} {
 		if !strings.Contains(javascript, fragment) {
 			t.Errorf("черновик перенаправления неполон: нет %q", fragment)
@@ -72,6 +74,18 @@ func TestTopicRedirectScreenWiring(t *testing.T) {
 	}
 	if !strings.Contains(javascript, "Будет опубликован весь общий черновик") {
 		t.Error("подтверждение публикации не предупреждает о других изменениях маршрутов")
+	}
+	topicDialogStart := strings.Index(html, `<dialog id="topicRedirectDialog"`)
+	if topicDialogStart < 0 {
+		t.Fatal("модальное окно перенаправления не найдено")
+	}
+	topicDialogEnd := strings.Index(html[topicDialogStart:], `</dialog>`)
+	if topicDialogEnd < 0 {
+		t.Fatal("модальное окно перенаправления не закрыто")
+	}
+	topicDialog := html[topicDialogStart : topicDialogStart+topicDialogEnd]
+	if !strings.Contains(topicDialog, `name="target_topic"`) || strings.Contains(topicDialog, `name="topic_name"`) || strings.Contains(topicDialog, `name="thread_id"`) {
+		t.Error("форма перенаправления не должна требовать ручной ввод названия или ID темы")
 	}
 	if !strings.Contains(string(styles), ".topic-redirect-card") {
 		t.Error("для списка перенаправлений нет отдельного оформления")

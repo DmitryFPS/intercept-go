@@ -1210,7 +1210,7 @@ function decisionSummary(decisions, recipientID = '', positionKey = '') {
     const action = decision.action === 'review' ? 'На проверку' : 'Отправлять';
     const redirect = positionKey ? rules.topic_redirects?.[positionKey] : null;
     const topicID = redirect?.destination_id === destination.id ? redirect.thread_id : decision.thread_id;
-    const topicName = redirect?.destination_id === destination.id ? `${redirect.topic_name} · ` : '';
+    const topicName = redirect?.destination_id === destination.id ? `${redirect.topic_name || `Тема ${topicID}`} · ` : '';
     const topic = destination.kind === 'telegram' ? ` · ${topicName}${topicID ? `тема ${topicID}` : 'General'}` : '';
     const type = destination.kind === 'telegram' ? 'Telegram' : 'DOCX';
     return [`<span class="route-chip${decision.action === 'review' ? ' review' : ''}">${escapeHTML(destination.name)} · ${type} · ${action}${escapeHTML(topic)}</span>`];
@@ -1300,6 +1300,65 @@ function wordRouteLabel(key) {
   return enabled ? 'DOCX: отправляется по основному маршруту' : 'DOCX: не отправляется';
 }
 
+function topicNameForRoute(destinationID, threadID) {
+  const known = Object.values(rules.topic_redirects || {}).find(redirect =>
+    String(redirect.destination_id) === String(destinationID) && Number(redirect.thread_id) === Number(threadID) && redirect.topic_name
+  );
+  return known?.topic_name?.trim() || `Тема ${threadID}`;
+}
+
+function topicOptionValue(destinationID, threadID) {
+  return `${destinationID}::${threadID}`;
+}
+
+function topicOptionsFor(row) {
+  const sourceThreadID = Number(row.decision.thread_id || 0);
+  const options = new Map();
+  Object.keys(rules.positions).forEach(key => {
+    const decision = rules.positions[key]?.[row.destination.id];
+    if (!decision || decision.action === 'skip') return;
+    const threadID = Number(decision.thread_id || 0);
+    if (!Number.isSafeInteger(threadID) || threadID <= 0 || threadID === sourceThreadID) return;
+    const value = topicOptionValue(row.destination.id, threadID);
+    if (!options.has(value)) {
+      options.set(value, {
+        value,
+        destinationID: row.destination.id,
+        threadID,
+        topicName: topicNameForRoute(row.destination.id, threadID)
+      });
+    }
+  });
+  Object.values(rules.topic_redirects || {}).forEach(redirect => {
+    const threadID = Number(redirect.thread_id || 0);
+    if (String(redirect.destination_id) !== String(row.destination.id) || !Number.isSafeInteger(threadID) || threadID <= 0 || threadID === sourceThreadID) return;
+    const value = topicOptionValue(redirect.destination_id, threadID);
+    if (!options.has(value)) {
+      options.set(value, {
+        value,
+        destinationID: redirect.destination_id,
+        threadID,
+        topicName: redirect.topic_name?.trim() || `Тема ${threadID}`
+      });
+    }
+  });
+  const current = rules.topic_redirects?.[row.key];
+  if (current && String(current.destination_id) === String(row.destination.id) && Number(current.thread_id) > 0 && Number(current.thread_id) !== sourceThreadID) {
+    const value = topicOptionValue(current.destination_id, Number(current.thread_id));
+    if (!options.has(value)) {
+      options.set(value, {
+        value,
+        destinationID: current.destination_id,
+        threadID: Number(current.thread_id),
+        topicName: current.topic_name?.trim() || `Тема ${current.thread_id}`
+      });
+    }
+  }
+  return [...options.values()].sort((left, right) =>
+    `${left.topicName} ${left.threadID}`.localeCompare(`${right.topicName} ${right.threadID}`, 'ru', {numeric: true})
+  );
+}
+
 function renderTopicRedirects() {
   const eligible = eligibleTopicRedirects();
   const search = $('topicRedirectSearch').value.trim().toLocaleLowerCase('ru-RU');
@@ -1318,10 +1377,11 @@ function renderTopicRedirects() {
       : 'Пока нет перенаправлений. Новые перехваты идут в темы основных маршрутов.';
   $('topicRedirectList').innerHTML = rows.map(({key, destination, decision}) => {
     const redirect = rules.topic_redirects[key];
-    const originalTopic = decision.thread_id ? `тема ${decision.thread_id}` : 'General';
+    const originalTopic = decision.thread_id ? `Тема ${decision.thread_id}` : 'General';
+    const targetTopic = redirect.topic_name?.trim() || `Тема ${redirect.thread_id}`;
     return `<article class="route-card topic-redirect-card" data-redirect-key="${escapeHTML(key)}">
-      <div><h3>${escapeHTML(positionName(key))}</h3><p>${escapeHTML(destination.name)} · ${escapeHTML(wordRouteLabel(key))}</p></div>
-      <div class="topic-redirect-path"><span>${escapeHTML(originalTopic)}</span><span aria-hidden="true">→</span><strong>${escapeHTML(redirect.topic_name)} · тема ${escapeHTML(redirect.thread_id)}</strong></div>
+      <div class="topic-redirect-source"><h3>${escapeHTML(positionName(key))}</h3><p>${escapeHTML(destination.name)} · ${escapeHTML(wordRouteLabel(key))}</p></div>
+      <div class="topic-redirect-path"><span>${escapeHTML(originalTopic)}</span><span class="topic-redirect-arrow" aria-hidden="true">→</span><strong>${escapeHTML(targetTopic)} · тема ${escapeHTML(redirect.thread_id)}</strong></div>
       <div class="route-card-actions"><button class="button ghost" type="button" data-redirect-action="edit">Изменить</button><button class="button danger" type="button" data-redirect-action="remove">Отменить</button></div>
     </article>`;
   }).join('');
@@ -1338,8 +1398,12 @@ function showTopicRedirectDialog(key = '') {
   form.elements.position_key.innerHTML = eligible.map(row =>
     `<option value="${escapeHTML(row.key)}">${escapeHTML(positionName(row.key))}</option>`).join('');
   form.elements.position_key.value = key && eligible.some(row => row.key === key) ? key : eligible[0].key;
-  $('topicRedirectDialogTitle').textContent = key ? 'Изменить перенаправление' : 'Новая тема для подразделения';
+  $('topicRedirectDialogTitle').textContent = 'Перенаправление темы';
   updateTopicRedirectDialog();
+  if (!form.elements.target_topic.options.length) {
+    notify('Для этого маршрута нет другой темы. Сначала добавьте тему в разделе «Маршруты».');
+    return;
+  }
   openDialog('topicRedirectDialog');
 }
 
@@ -1349,10 +1413,16 @@ function updateTopicRedirectDialog() {
   const row = eligibleTopicRedirects().find(item => item.key === key);
   if (!row) return;
   const redirect = rules.topic_redirects[key];
-  form.elements.topic_name.value = redirect?.topic_name || '';
-  form.elements.thread_id.value = redirect?.thread_id || '';
-  const originalTopic = row.decision.thread_id ? `тема ${row.decision.thread_id}` : 'General';
-  $('topicRedirectCurrent').innerHTML = `<span>Текущий основной маршрут</span><strong>${escapeHTML(row.destination.name)} · ${escapeHTML(originalTopic)}</strong><small>${escapeHTML(wordRouteLabel(key))}. Изменится только тема Telegram.</small>`;
+  const options = topicOptionsFor(row);
+  const target = form.elements.target_topic;
+  target.innerHTML = options.map(option =>
+    `<option value="${escapeHTML(option.value)}" data-destination-id="${escapeHTML(option.destinationID)}" data-thread-id="${escapeHTML(option.threadID)}" data-topic-name="${escapeHTML(option.topicName)}">${escapeHTML(option.topicName)} · тема ${escapeHTML(option.threadID)}</option>`
+  ).join('');
+  const currentValue = redirect ? topicOptionValue(redirect.destination_id, Number(redirect.thread_id)) : '';
+  if ([...target.options].some(option => option.value === currentValue)) target.value = currentValue;
+  target.disabled = options.length === 0;
+  const saveButton = form.querySelector('button[value="save"]');
+  saveButton.disabled = options.length === 0;
 }
 
 $('topicRedirectSearch').addEventListener('input', renderTopicRedirects);
@@ -1391,10 +1461,12 @@ $('topicRedirectForm').addEventListener('submit', async event => {
   const form = event.currentTarget;
   const key = form.elements.position_key.value;
   const row = eligibleTopicRedirects().find(item => item.key === key);
-  const threadID = Number(form.elements.thread_id.value);
-  const topicName = form.elements.topic_name.value.trim();
-  if (!row || !Number.isSafeInteger(threadID) || threadID <= 0 || !topicName || topicName.length > 80) {
-    notify('Укажите подразделение, название и числовой ID темы.');
+  const option = form.elements.target_topic.selectedOptions[0];
+  const destinationID = option?.dataset.destinationId || '';
+  const threadID = Number(option?.dataset.threadId || 0);
+  const topicName = option?.dataset.topicName?.trim() || `Тема ${threadID}`;
+  if (!row || !option || String(destinationID) !== String(row.destination.id) || !Number.isSafeInteger(threadID) || threadID <= 0) {
+    notify('Выберите существующую тему Telegram из списка.');
     return;
   }
   if (threadID === Number(row.decision.thread_id || 0)) {
@@ -1402,7 +1474,7 @@ $('topicRedirectForm').addEventListener('submit', async event => {
     return;
   }
   const previous = cloneRules(rules);
-  rules.topic_redirects[key] = {destination_id: row.destination.id, thread_id: threadID, topic_name: topicName};
+  rules.topic_redirects[key] = {destination_id: destinationID, thread_id: threadID, topic_name: topicName};
   const button = form.querySelector('button[value="save"]');
   setButtonBusy(button, true, 'Сохраняем…');
   try {
