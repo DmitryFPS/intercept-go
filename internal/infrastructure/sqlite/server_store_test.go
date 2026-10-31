@@ -459,7 +459,7 @@ func TestServerStoreMigratesRc85DatabaseToTransportInbox(t *testing.T) {
 		t.Fatalf("обновление базы rc85 не прошло: %v", err)
 	}
 	var version int
-	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil || version != 11 {
+	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil || version != 12 {
 		t.Fatalf("новые миграции Центра не применены: version=%d err=%v", version, err)
 	}
 }

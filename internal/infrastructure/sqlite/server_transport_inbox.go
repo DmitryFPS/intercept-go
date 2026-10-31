@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -106,21 +107,21 @@ func (store *ServerStore) PendingTransportPackets(
 		limit = 25
 	}
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT update_id,chat_id,message_id,packet_json,attempts FROM transport_inbox
-		WHERE next_attempt_at<=?
-		ORDER BY next_attempt_at,update_id LIMIT ?`, now.UTC().Format(time.RFC3339Nano), limit)
+		SELECT update_id,chat_id,message_id,packet_json,attempts,decode_failures FROM transport_inbox
+		WHERE julianday(next_attempt_at)<=julianday(?)
+		ORDER BY julianday(next_attempt_at),update_id LIMIT ?`, now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, fmt.Errorf("прочитать локальную входную очередь: %w", err)
 	}
 	type storedPacket struct {
 		updateID, chatID, messageID int64
 		protected                   []byte
-		attempts                    int
+		attempts, decodeFailures    int
 	}
 	stored := make([]storedPacket, 0, limit)
 	for rows.Next() {
 		var value storedPacket
-		if err := rows.Scan(&value.updateID, &value.chatID, &value.messageID, &value.protected, &value.attempts); err != nil {
+		if err := rows.Scan(&value.updateID, &value.chatID, &value.messageID, &value.protected, &value.attempts, &value.decodeFailures); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -135,7 +136,13 @@ func (store *ServerStore) PendingTransportPackets(
 	}
 	items := make([]TransportInboxItem, 0, len(stored))
 	for _, value := range stored {
-		plain, decodeErr := unprotectDatabaseValue(value.protected)
+		plain, decodeErr := store.unprotectPendingValue(value.protected)
+		if decodeErr != nil && bytes.HasPrefix(value.protected, protectedPrefix) {
+			if err := store.retryUnreadableTransport(ctx, value.updateID, value.decodeFailures, now, decodeErr); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		var packet application.IncomingPacket
 		if decodeErr == nil {
 			decodeErr = json.Unmarshal(plain, &packet)
@@ -150,9 +157,50 @@ func (store *ServerStore) PendingTransportPackets(
 			}
 			continue
 		}
+		if value.decodeFailures > 0 {
+			result, err := store.db.ExecContext(ctx, `
+				UPDATE transport_inbox SET decode_failures=0,last_error=''
+				WHERE update_id=? AND decode_failures>0`, value.updateID)
+			if err != nil {
+				return nil, fmt.Errorf("сбросить ошибки чтения входного пакета: %w", err)
+			}
+			if changed, _ := result.RowsAffected(); changed > 0 && store.logger != nil {
+				store.logger.Info("Восстановлено чтение входного пакета", "update_id", value.updateID,
+					"message_id", value.messageID, "decode_failures", value.decodeFailures)
+			}
+		}
 		items = append(items, TransportInboxItem{Packet: packet, Attempts: value.attempts})
 	}
 	return items, nil
+}
+
+// Входной пакет уже сохранён локально, поэтому временный сбой DPAPI не должен
+// удалять ни его, ни транспортное сообщение Telegram. Другие пакеты продолжают
+// обрабатываться, а этот повторяется с ограниченной частотой до восстановления.
+func (store *ServerStore) retryUnreadableTransport(
+	ctx context.Context, updateID int64, previousFailures int, now time.Time, decodeErr error,
+) error {
+	failures := previousFailures + 1
+	delay := deliveryDecodeBackoff(failures)
+	if failures > 5 {
+		delay = 2 * time.Minute
+	}
+	reason := fmt.Sprintf("Ошибка расшифрования входного пакета (попытка %d): %v", failures, decodeErr)
+	if len(reason) > transportInboxErrorLimit {
+		reason = reason[:transportInboxErrorLimit]
+	}
+	result, err := store.db.ExecContext(ctx, `
+		UPDATE transport_inbox SET decode_failures=decode_failures+1,next_attempt_at=?,last_error=?
+		WHERE update_id=? AND decode_failures=?`,
+		now.Add(delay).UTC().Format(time.RFC3339Nano), reason, updateID, previousFailures)
+	if err != nil {
+		return fmt.Errorf("повторить чтение входного пакета: %w", err)
+	}
+	if changed, _ := result.RowsAffected(); changed > 0 && store.logger != nil && (failures == 1 || failures%20 == 0) {
+		store.logger.Warn("Временная ошибка чтения входного пакета", "update_id", updateID,
+			"decode_failures", failures, "retry_after", delay.String(), "error", decodeErr)
+	}
+	return nil
 }
 
 func (store *ServerStore) quarantineCorruptTransportRow(

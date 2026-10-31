@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -418,6 +419,145 @@ func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
 			t.Fatalf("старая версия записи ошибочно подтвердила новый маршрут: found=%v err=%v", found, err)
 		}
 	})
+}
+
+// An unreadable retained event must stop the EAVC scan before its cursor moves.
+// Otherwise an archived record can be skipped permanently when the next scan
+// starts from a newer source timestamp.
+func TestArchivedMetadataDecodeFailureKeepsCursorForRetry(t *testing.T) {
+	testArchivedMetadataReadFailure(t, []byte("unreadable payload"), "открыть сохранённое событие", false)
+}
+
+func TestArchivedMetadataInvalidJSONQuarantinesAndAdvancesCursor(t *testing.T) {
+	protected, err := protectDatabaseValue([]byte("{"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	testArchivedMetadataReadFailure(t, protected, "", true)
+}
+
+func testArchivedMetadataReadFailure(t *testing.T, badPayload []byte, wantError string, invalidJSON bool) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
+	version := now.Format(time.RFC3339Nano)
+	content := "10:00\n-Архивный перехват"
+	block := domain.ContentBlock{UUID: "active-block", Key: "10:00", Text: content, UpdatedAt: version}
+	active := domain.Event{
+		ID: "active-archive-block", ClientID: "textile",
+		CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source:   domain.SourceRecord{ID: 389, UUID: "source-archive", UpdatedAt: version},
+		Position: domain.Position{CatalogUUID: "catalog-a", UnitName: "Игровая точка", Frequency: "119.001", GroupCode: "group-a"},
+		Mode:     domain.SourceModeNormal, Content: content, SourceBlockUUID: block.UUID,
+		Blocks: []domain.ContentBlock{block},
+	}
+	active.ContentDigest = active.CanonicalContentDigest()
+	if inserted, err := queue.Enqueue(ctx, active); err != nil || !inserted {
+		t.Fatalf("не удалось сохранить исходный блок: inserted=%v err=%v", inserted, err)
+	}
+	snapshot := application.SourceTimeSnapshot{
+		SourceID: active.Source.ID, SourceUUID: active.Source.UUID, SourceVersion: version,
+		Blocks: []application.SourceTimeStateEntry{{
+			OccurrenceID: "occurrence-a", CanonicalTime: "10:00", Active: true, Block: block,
+		}},
+	}
+	if err := queue.SaveSourceTimeState(ctx, "uuid:source-archive", application.SourceTimeStateRecord{Snapshot: &snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	archive := application.SourceItem{
+		Record: active.Source, Position: active.Position, Mode: domain.SourceModeUnknown,
+		Content: content, Blocks: []domain.ContentBlock{{Key: "10:00", Text: content, UpdatedAt: version}},
+		Archived: true, ArchiveMetadataAmbiguous: true, ObservedAt: now,
+	}
+	archive.Position.CatalogUUID = ""
+	next := application.Cursor{UpdatedAt: version, ID: active.Source.ID}
+	items := []application.SourceItem{archive}
+	if invalidJSON {
+		later := application.SourceItem{
+			Record:   domain.SourceRecord{ID: 390, UUID: "source-later", UpdatedAt: version},
+			Position: active.Position, Mode: domain.SourceModeNormal,
+			Content: "10:01\n-Следующий перехват", ObservedAt: now,
+		}
+		items = append(items, later)
+		next.ID = later.Record.ID
+	}
+	service := application.ClientService{
+		ClientID: "textile", Source: archiveCursorSource{items: items, next: next},
+		Queue: queue, State: queue, TimeState: queue, BatchSize: 10,
+		CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	var protected []byte
+	if err := db.QueryRowContext(ctx, "SELECT payload_json FROM client_events WHERE event_id=?", active.ID).Scan(&protected); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE client_events SET payload_json=? WHERE event_id=?", badPayload, active.ID); err != nil {
+		t.Fatal(err)
+	}
+	if invalidJSON {
+		queued, err := service.CollectOnce(ctx)
+		if err != nil || queued != 1 {
+			t.Fatalf("повреждённый архив остановил следующую запись: queued=%d err=%v", queued, err)
+		}
+		if cursor, err := queue.Cursor(ctx, "eavc"); err != nil || cursor != next {
+			t.Fatalf("курсор не прошёл повреждённый архив: cursor=%+v err=%v", cursor, err)
+		}
+		state, exists, err := queue.LoadSourceTimeState(ctx, "uuid:source-archive")
+		if err != nil || !exists || state.Conflict == nil || state.Conflict.Kind != "archive_metadata_unverifiable" ||
+			state.Snapshot == nil || state.Snapshot.SourcePosition != nil {
+			t.Fatalf("архив не изолирован явным конфликтом: state=%+v exists=%v err=%v", state, exists, err)
+		}
+		var archiveEvents, laterEvents int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_events WHERE source_uuid LIKE 'source-archive|block:%' AND event_id<>?", active.ID).Scan(&archiveEvents); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_events WHERE source_uuid='source-later'").Scan(&laterEvents); err != nil {
+			t.Fatal(err)
+		}
+		if archiveEvents != 0 || laterEvents != 1 {
+			t.Fatalf("архивное событие отправлено или следующий перехват потерян: archive=%d later=%d", archiveEvents, laterEvents)
+		}
+		return
+	}
+	if _, err := service.CollectOnce(ctx); err == nil || !strings.Contains(err.Error(), wantError) {
+		t.Fatalf("ошибка чтения архивной истории проигнорирована или неверно классифицирована: %v", err)
+	}
+	if cursor, err := queue.Cursor(ctx, "eavc"); err != nil || cursor != (application.Cursor{}) {
+		t.Fatalf("курсор сдвинулся после ошибки: cursor=%+v err=%v", cursor, err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE client_events SET payload_json=? WHERE event_id=?", protected, active.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CollectOnce(ctx); err != nil {
+		t.Fatalf("повтор после восстановления не обработан: %v", err)
+	}
+	if cursor, err := queue.Cursor(ctx, "eavc"); err != nil || cursor != next {
+		t.Fatalf("курсор не продвинулся после успешного повтора: cursor=%+v err=%v", cursor, err)
+	}
+	state, exists, err := queue.LoadSourceTimeState(ctx, "uuid:source-archive")
+	if err != nil || !exists || state.Conflict != nil || state.Snapshot == nil || state.Snapshot.SourcePosition == nil {
+		t.Fatalf("маршрут архивного блока не восстановлен: state=%+v exists=%v err=%v", state, exists, err)
+	}
+}
+
+type archiveCursorSource struct {
+	items []application.SourceItem
+	next  application.Cursor
+}
+
+func (source archiveCursorSource) Scan(_ context.Context, after application.Cursor, _ int) ([]application.SourceItem, application.Cursor, error) {
+	if after == source.next {
+		return nil, after, nil
+	}
+	return source.items, source.next, nil
 }
 
 func TestClientQueueCleansRC88ExpiredMigrationArtifact(t *testing.T) {

@@ -138,6 +138,7 @@ func NewServer(ctx context.Context, baseDir, version string, logger *slog.Logger
 		db.Close()
 		return nil, err
 	}
+	store.SetLogger(logger)
 	activeRules, rulesErr := store.ActiveRules(ctx)
 	if rulesErr != nil {
 		rules, defaultErr := defaults.InitialRules()

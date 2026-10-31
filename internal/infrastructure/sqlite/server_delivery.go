@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,6 +13,13 @@ import (
 	"intercept/internal/application"
 	"intercept/internal/domain"
 )
+
+func (store *ServerStore) unprotectPendingValue(value []byte) ([]byte, error) {
+	if store.pendingUnprotect != nil {
+		return store.pendingUnprotect(value)
+	}
+	return unprotectDatabaseValue(value)
+}
 
 // Барьеры не удаляются вместе с журналом: иначе старый пакет смог бы снова
 // создать публикацию. Жёсткий предел превращает бесконечный рост от
@@ -273,17 +281,22 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 	}
 	if _, err := store.db.ExecContext(ctx, `
 		UPDATE delivery_jobs
-		SET state='expired', expired_at=?, last_error=?
-		WHERE state='pending' AND expires_at < ?`,
+		SET state='expired', expired_at=?,
+			last_error=CASE WHEN decode_failures>0
+				THEN 'Срок доставки истёк после ошибок расшифрования: ' || last_error
+				ELSE ? END
+		WHERE state='pending' AND julianday(expires_at) < julianday(?)`,
 		now.UTC().Format(time.RFC3339Nano), domain.FreshnessExpired,
 		now.UTC().Format(time.RFC3339Nano)); err != nil {
 		return nil, fmt.Errorf("завершить просроченные доставки: %w", err)
 	}
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT j.event_id, j.destination_id, e.payload_json, j.delivery_json, j.attempts
+		SELECT j.event_id, j.destination_id, e.payload_json, j.delivery_json,
+			j.attempts, j.decode_failures, j.expires_at
 		FROM delivery_jobs j
 		JOIN received_events e ON e.event_id = j.event_id
-		WHERE j.state = 'pending' AND j.next_attempt_at <= ? AND j.expires_at >= ?
+		WHERE j.state = 'pending' AND julianday(j.next_attempt_at) <= julianday(?)
+			AND julianday(j.expires_at) >= julianday(?)
 			AND NOT EXISTS (
 				SELECT 1
 				FROM delivery_jobs earlier
@@ -306,13 +319,15 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 	}
 	type storedDelivery struct {
 		eventID, destinationID        string
+		expiresAt                     string
 		eventPayload, deliveryPayload []byte
-		attempts                      int
+		attempts, decodeFailures      int
 	}
 	stored := make([]storedDelivery, 0, limit)
 	for rows.Next() {
 		var value storedDelivery
-		if err := rows.Scan(&value.eventID, &value.destinationID, &value.eventPayload, &value.deliveryPayload, &value.attempts); err != nil {
+		if err := rows.Scan(&value.eventID, &value.destinationID, &value.eventPayload,
+			&value.deliveryPayload, &value.attempts, &value.decodeFailures, &value.expiresAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("прочитать задание доставки: %w", err)
 		}
@@ -329,15 +344,29 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 	for _, value := range stored {
 		var job application.DeliveryJob
 		job.Attempts = value.attempts
-		eventPlain, decodeErr := unprotectDatabaseValue(value.eventPayload)
+		eventPlain, decodeErr := store.unprotectPendingValue(value.eventPayload)
 		eventCorrupt := decodeErr != nil
+		if decodeErr != nil && bytes.HasPrefix(value.eventPayload, protectedPrefix) {
+			if err := store.retryUnreadableDelivery(ctx, value.eventID, value.destinationID,
+				value.decodeFailures, value.expiresAt, now, "события", decodeErr); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if decodeErr == nil {
 			decodeErr = json.Unmarshal(eventPlain, &job.Event)
 			eventCorrupt = decodeErr != nil
 		}
 		if decodeErr == nil {
 			var deliveryPlain []byte
-			deliveryPlain, decodeErr = unprotectDatabaseValue(value.deliveryPayload)
+			deliveryPlain, decodeErr = store.unprotectPendingValue(value.deliveryPayload)
+			if decodeErr != nil && bytes.HasPrefix(value.deliveryPayload, protectedPrefix) {
+				if err := store.retryUnreadableDelivery(ctx, value.eventID, value.destinationID,
+					value.decodeFailures, value.expiresAt, now, "маршрута", decodeErr); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			if decodeErr == nil {
 				decodeErr = json.Unmarshal(deliveryPlain, &job.Delivery)
 			}
@@ -352,9 +381,77 @@ func (store *ServerStore) PendingDeliveries(ctx context.Context, limit int, now 
 			}
 			continue
 		}
+		if value.decodeFailures > 0 {
+			result, err := store.db.ExecContext(ctx, `
+				UPDATE delivery_jobs SET decode_failures=0,last_error=''
+				WHERE event_id=? AND destination_id=? AND state='pending' AND decode_failures>0`,
+				value.eventID, value.destinationID)
+			if err != nil {
+				return nil, fmt.Errorf("сбросить ошибки чтения задания: %w", err)
+			}
+			if changed, _ := result.RowsAffected(); changed > 0 && store.logger != nil {
+				store.logger.Info("Восстановлено чтение задания доставки", "event_id", value.eventID,
+					"destination_id", value.destinationID, "decode_failures", value.decodeFailures)
+			}
+		}
 		jobs = append(jobs, job)
 	}
 	return jobs, nil
+}
+
+// Ошибка DPAPI ещё не доказывает порчу сохранённых данных: Центр может
+// прочитать тот же BLOB при следующем проходе. Повторы продолжаются до
+// существующего срока доставки, но другие независимые потоки не задерживаются.
+func (store *ServerStore) retryUnreadableDelivery(
+	ctx context.Context, eventID, destinationID string, previousFailures int, expiresAt string, now time.Time,
+	phase string, decodeErr error,
+) error {
+	failures := previousFailures + 1
+	// Корректирующее удаление нельзя завершать по таймеру: иначе ошибочная
+	// публикация навсегда останется снаружи. После длительного сбоя нужен
+	// сигнал оператору, но само задание и порядок его потока сохраняются.
+	if strings.HasPrefix(expiresAt, "9999-") && failures >= 60 && failures%60 == 0 && store.logger != nil {
+		store.logger.Error("Требует вмешательства: бессрочное задание не расшифровывается",
+			"event_id", eventID, "destination_id", destinationID,
+			"decode_failures", failures, "error", decodeErr)
+	}
+	reason := fmt.Sprintf("Ошибка расшифрования %s (попытка %d): %v", phase, failures, decodeErr)
+	if len(reason) > 2000 {
+		reason = reason[:2000]
+	}
+	delay := deliveryDecodeBackoff(failures)
+	if strings.HasPrefix(expiresAt, "9999-") && failures > 5 {
+		delay = 2 * time.Minute
+	}
+	result, err := store.db.ExecContext(ctx, `
+		UPDATE delivery_jobs SET decode_failures=decode_failures+1,next_attempt_at=?,last_error=?
+		WHERE event_id=? AND destination_id=? AND state='pending' AND decode_failures=?`,
+		now.Add(delay).UTC().Format(time.RFC3339Nano), reason,
+		eventID, destinationID, previousFailures)
+	if err != nil {
+		return fmt.Errorf("повторить чтение задания доставки: %w", err)
+	}
+	if changed, _ := result.RowsAffected(); changed > 0 && store.logger != nil && (failures == 1 || failures%20 == 0) {
+		store.logger.Warn("Временная ошибка чтения задания доставки", "event_id", eventID,
+			"destination_id", destinationID, "phase", phase, "decode_failures", failures,
+			"retry_after", delay.String(), "error", decodeErr)
+	}
+	return nil
+}
+
+func deliveryDecodeBackoff(failures int) time.Duration {
+	switch failures {
+	case 1:
+		return 2 * time.Second
+	case 2:
+		return 4 * time.Second
+	case 3:
+		return 8 * time.Second
+	case 4:
+		return 16 * time.Second
+	default:
+		return 30 * time.Second
+	}
 }
 
 func (store *ServerStore) quarantineCorruptDelivery(

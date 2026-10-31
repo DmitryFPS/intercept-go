@@ -255,3 +255,14 @@ CREATE UNIQUE INDEX client_shift_current_position_idx
 CREATE INDEX client_shift_history_idx
 	ON client_shift_sessions(client_id, opened_at DESC, session_uuid);
 `
+
+// Ошибки чтения DPAPI считаются отдельно от попыток внешней доставки.
+// Это позволяет повторить временный сбой, даже если Telegram уже был недоступен.
+const serverDeliveryDecodeRetryMigration = `
+ALTER TABLE delivery_jobs ADD COLUMN decode_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE transport_inbox ADD COLUMN decode_failures INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX transport_inbox_due_jd_idx
+	ON transport_inbox(julianday(next_attempt_at), update_id);
+CREATE INDEX delivery_jobs_due_jd_idx
+	ON delivery_jobs(state, julianday(next_attempt_at));
+`

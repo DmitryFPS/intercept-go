@@ -634,11 +634,18 @@ func (queue *ClientQueue) RecoverArchivedTimeMetadata(
 			}
 			plain, err := unprotectDatabaseValue(protected)
 			if err != nil {
-				continue
+				rows.Close()
+				return "", "", false, fmt.Errorf("открыть сохранённое событие архивного блока: %w", err)
 			}
 			var event domain.Event
-			if err := json.Unmarshal(plain, &event); err != nil ||
-				!queuedEventProvesArchivedMetadata(event, item, entry) {
+			// Защита DPAPI может отказать временно — тогда сканирование
+			// повторяется без сдвига курсора. Некорректный JSON уже не может
+			// доказать маршрут: изолируем архивный блок через conflict ниже,
+			// не удерживая все более новые записи EAVC.
+			if err := json.Unmarshal(plain, &event); err != nil {
+				continue
+			}
+			if !queuedEventProvesArchivedMetadata(event, item, entry) {
 				continue
 			}
 			if found && (mode != event.Mode || catalogUUID != event.Position.CatalogUUID) {

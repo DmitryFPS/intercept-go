@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -20,6 +21,14 @@ const (
 type ServerStore struct {
 	db                *sql.DB
 	maxSourceLineages int
+	logger            *slog.Logger
+	// Только для изолированных тестов отказа; в работе используется DPAPI.
+	pendingUnprotect func([]byte) ([]byte, error)
+}
+
+// SetLogger подключает эксплуатационный журнал до запуска рабочих потоков.
+func (store *ServerStore) SetLogger(logger *slog.Logger) {
+	store.logger = logger
 }
 
 // NewServerStore применяет миграции и защищает чувствительные столбцы.
@@ -28,7 +37,7 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 		serverMigration, serverDeliveryOrderMigration, serverStreamRepairMigration,
 		serverObservabilityMigration, serverIntegrityMigration, serverHistoryIndexesMigration,
 		serverDeliveryResultMigration, serverTransportAuditMigration, serverTransportInboxMigration,
-		serverRevisionBarrierMigration, serverShiftStateMigration,
+		serverRevisionBarrierMigration, serverShiftStateMigration, serverDeliveryDecodeRetryMigration,
 	}); err != nil {
 		return nil, err
 	}
