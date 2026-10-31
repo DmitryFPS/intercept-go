@@ -1301,6 +1301,13 @@ function wordRouteLabel(key) {
 }
 
 function topicNameForRoute(destinationID, threadID) {
+  const routeKey = Object.keys(rules.positions || {}).sort((left, right) =>
+    positionName(left).localeCompare(positionName(right), 'ru')
+  ).find(key => {
+    const decision = rules.positions[key]?.[destinationID];
+    return decision && decision.action !== 'skip' && Number(decision.thread_id || 0) === Number(threadID);
+  });
+  if (routeKey) return positionName(routeKey);
   const known = Object.values(rules.topic_redirects || {}).find(redirect =>
     String(redirect.destination_id) === String(destinationID) && Number(redirect.thread_id) === Number(threadID) && redirect.topic_name
   );

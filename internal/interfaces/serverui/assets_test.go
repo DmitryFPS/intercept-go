@@ -63,6 +63,7 @@ func TestTopicRedirectScreenWiring(t *testing.T) {
 		"publishCurrentRules(event.currentTarget)",
 		"eligibleTopicRedirects()",
 		"topicOptionsFor(row)",
+		"positionName(routeKey)",
 		"form.elements.target_topic.selectedOptions[0]",
 	} {
 		if !strings.Contains(javascript, fragment) {
