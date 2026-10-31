@@ -262,6 +262,257 @@ func TestTimeStateQuarantinesOversizedRecordWithoutPersistingUntrustedSnapshot(t
 	}
 }
 
+func TestTimeStatePreservesOvernightBlocksAcrossArchive(t *testing.T) {
+	t.Parallel()
+	version := "2026-10-30 21:03:33"
+	active := timeStateTestItem(version, []domain.ContentBlock{{
+		UUID: "physical-overnight", DayOffset: 1,
+		Text: "00.03\n-Проверка", UpdatedAt: version,
+	}})
+	active.Position.CatalogUUID = "catalog-77"
+	before := planSourceTimeBlocks(active, SourceTimeStateRecord{}, false, time.Now())
+	if before.Conflict != nil || len(before.Item.Blocks) != 1 ||
+		!strings.HasPrefix(before.Item.Blocks[0].UUID, "time:d1:0003:") {
+		t.Fatalf("неверный активный блок: %#v", before)
+	}
+	archive := timeStateTestItem("2026-10-30T21:03:33Z", []domain.ContentBlock{{
+		UUID: "legacy-synthetic", DayOffset: 0,
+		Text: "00.03\n-Проверка", UpdatedAt: version,
+	}})
+	archive.Archived = true
+	archive.Mode = domain.SourceModeUnknown
+	after := planSourceTimeBlocks(archive, before.Record, true, time.Now())
+	if after.Conflict != nil || len(after.Item.Blocks) != 1 || len(after.Item.DeletedBlocks) != 0 ||
+		after.Item.Blocks[0].UUID != before.Item.Blocks[0].UUID ||
+		after.Item.Mode != active.Mode || after.Item.Position.CatalogUUID != active.Position.CatalogUUID ||
+		!sourceTimeStateRecordsEqual(before.Record, after.Record) {
+		t.Fatalf("архив породил ложную замену блока: before=%#v after=%#v", before, after)
+	}
+	legacySnapshot := *before.Record.Snapshot
+	legacySnapshot.SourceMode = ""
+	legacySnapshot.SourcePosition = nil
+	legacySnapshot.SourceContentHash = ""
+	legacy := planSourceTimeBlocks(archive, SourceTimeStateRecord{Snapshot: &legacySnapshot}, true, time.Now())
+	if legacy.Conflict != nil || legacy.Item.Mode != domain.SourceModeUnknown ||
+		legacy.Item.Position.CatalogUUID != "" {
+		t.Fatalf("старый снимок без метаданных должен оставаться безопасно неоднозначным: %#v", legacy)
+	}
+}
+
+func TestClientArchiveReplayDoesNotQueueOvernightReplacement(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 21, 4, 0, 0, time.UTC)
+	version := "2026-10-30 21:03:33"
+	active := timeStateTestItem(version, []domain.ContentBlock{{
+		UUID: "physical-overnight", DayOffset: 1,
+		Text: "00.03\n-Проверка", UpdatedAt: version,
+	}})
+	active.Position.CatalogUUID = "catalog-77"
+	active.ObservedAt = now
+	source := &replaySource{item: active}
+	queue := newMemoryClientState()
+	service := ClientService{
+		ClientID: "textile", Source: source, Queue: queue, State: queue,
+		BatchSize: 10, CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("активный блок: queued=%d err=%v", queued, err)
+	}
+	first := queue.events[0]
+	if !strings.HasPrefix(first.SourceBlockUUID, "time:d1:0003:") {
+		t.Fatalf("неверная идентичность исходного блока: %q", first.SourceBlockUUID)
+	}
+
+	now = now.Add(time.Minute)
+	archive := timeStateTestItem("2026-10-30T21:03:33Z", []domain.ContentBlock{{
+		UUID: "legacy-synthetic", DayOffset: 0,
+		Text: "00.03\n-Проверка", UpdatedAt: version,
+	}})
+	archive.Archived = true
+	archive.ArchiveMetadataAmbiguous = true
+	archive.Mode = domain.SourceModeUnknown
+	archive.ObservedAt = now
+	source.item = archive
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+		t.Fatalf("архив повторно поставил блок: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 1 || queue.events[0].ID != first.ID || queue.timeSaves != 1 {
+		t.Fatalf("архив изменил очередь или историю: events=%#v saves=%d", queue.events, queue.timeSaves)
+	}
+	archive.Record.UpdatedAt = "2026-10-30T21:05:33Z"
+	archive.Content = "00.03\n-Изменено"
+	archive.Blocks[0].Text = archive.Content
+	source.item = archive
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+		t.Fatalf("изменённый архив вышел с потерянным маршрутом: queued=%d err=%v", queued, err)
+	}
+	if state := queue.timeStates[sourceTimeStateKey(active)]; state.Conflict == nil ||
+		state.Conflict.Kind != "archive_metadata_unverifiable" {
+		t.Fatalf("изменённый архив не изолирован: %#v", state.Conflict)
+	}
+}
+
+func TestClientArchiveReplayRecoversAfterStateSaveBeforeEnqueue(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 21, 4, 0, 0, time.UTC)
+	version := "2026-10-30 21:03:33"
+	active := timeStateTestItem(version, []domain.ContentBlock{{
+		UUID: "physical-overnight", DayOffset: 1,
+		Text: "00.03\n-Проверка", UpdatedAt: version,
+	}})
+	before := planSourceTimeBlocks(active, SourceTimeStateRecord{}, false, now)
+	queue := newMemoryClientState()
+	if err := queue.SaveSourceTimeState(context.Background(), sourceTimeStateKey(active), before.Record); err != nil {
+		t.Fatal(err)
+	}
+	// A crash can leave the saved time state with no queue row or cursor.
+	archive := timeStateTestItem(version, []domain.ContentBlock{{
+		UUID: "legacy-synthetic", DayOffset: 0,
+		Text: "00.03\n-Проверка", UpdatedAt: version,
+	}})
+	archive.Archived = true
+	archive.ObservedAt = now
+	service := ClientService{
+		ClientID: "textile", Source: &replaySource{item: archive}, Queue: queue, State: queue,
+		BatchSize: 10, CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("архив не восстановил незаписанное событие: queued=%d err=%v", queued, err)
+	}
+	if len(queue.events) != 1 || queue.events[0].SourceBlockUUID != before.Item.Blocks[0].UUID {
+		t.Fatalf("восстановление потеряло прежний ID блока: events=%#v", queue.events)
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+		t.Fatalf("повтор восстановления создал событие: queued=%d err=%v", queued, err)
+	}
+}
+
+func TestTimeStateArchiveReplayRetainsIndependentSameTimeOccurrences(t *testing.T) {
+	t.Parallel()
+	version := "2026-10-30 21:03:33"
+	active := timeStateTestItem(version, []domain.ContentBlock{
+		{UUID: "physical-a", DayOffset: 1, Text: "00.03\n-Первый", UpdatedAt: version},
+		{UUID: "physical-b", DayOffset: 1, Text: "00.03#1\n-Второй", UpdatedAt: version},
+	})
+	before := planSourceTimeBlocks(active, SourceTimeStateRecord{}, false, time.Now())
+	archive := timeStateTestItem(version, []domain.ContentBlock{{
+		UUID: "legacy-synthetic", DayOffset: 0,
+		Text: "00.03\n-Первый\n00.03#1\n-Второй", UpdatedAt: version,
+	}})
+	archive.Archived = true
+	after := planSourceTimeBlocks(archive, before.Record, true, time.Now())
+	if after.Conflict != nil || len(after.Item.Blocks) != 2 || len(after.Item.DeletedBlocks) != 0 ||
+		after.Item.Blocks[0].UUID != before.Item.Blocks[0].UUID ||
+		after.Item.Blocks[1].UUID != before.Item.Blocks[1].UUID ||
+		after.Item.Blocks[0].UUID == after.Item.Blocks[1].UUID {
+		t.Fatalf("архив смешал одинаковые времена: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestTimeStateArchiveFallbackWhenContentChangesOrSnapshotMissing(t *testing.T) {
+	t.Parallel()
+	version := "2026-10-30 21:03:33"
+	active := timeStateTestItem(version, []domain.ContentBlock{{
+		UUID: "physical-overnight", DayOffset: 1,
+		Text: "00.03\n-Проверка", UpdatedAt: version,
+	}})
+	before := planSourceTimeBlocks(active, SourceTimeStateRecord{}, false, time.Now())
+	legacySnapshot := *before.Record.Snapshot
+	legacySnapshot.SourceMode = ""
+	legacySnapshot.SourcePosition = nil
+	legacySnapshot.SourceContentHash = ""
+	legacy := SourceTimeStateRecord{Snapshot: &legacySnapshot}
+	archive := timeStateTestItem(version, []domain.ContentBlock{{
+		UUID: "legacy-synthetic", DayOffset: 0,
+		Text: "00.03\n-Изменено", UpdatedAt: version,
+	}})
+	archive.Archived = true
+	changed := planSourceTimeBlocks(archive, legacy, true, time.Now())
+	if changed.Conflict != nil || len(changed.Item.Blocks) != 1 || len(changed.Item.DeletedBlocks) != 1 ||
+		changed.Item.Blocks[0].UUID == before.Item.Blocks[0].UUID {
+		t.Fatalf("изменённый архив ошибочно принят за прежний блок: %#v", changed)
+	}
+	missing := planSourceTimeBlocks(archive, SourceTimeStateRecord{}, false, time.Now())
+	if missing.Conflict != nil || len(missing.Item.Blocks) != 1 || len(missing.Item.DeletedBlocks) != 0 ||
+		!strings.HasPrefix(missing.Item.Blocks[0].UUID, "time:d0:0003:") {
+		t.Fatalf("архив без прежней истории не прочитан: %#v", missing)
+	}
+}
+
+func TestClientLegacyArchiveMetadataQuarantineDoesNotBlockLaterActiveCorrection(t *testing.T) {
+	now := time.Date(2026, 10, 30, 21, 4, 0, 0, time.UTC)
+	version := "2026-10-30 21:03:33"
+	active := timeStateTestItem(version, []domain.ContentBlock{{
+		UUID: "physical-overnight", DayOffset: 1,
+		Text: "00.03\n-Проверка", UpdatedAt: version,
+	}})
+	active.Position.CatalogUUID = "catalog-77"
+	initial := planSourceTimeBlocks(active, SourceTimeStateRecord{}, false, now)
+	legacy := *initial.Record.Snapshot
+	legacy.SourceMode, legacy.SourcePosition, legacy.SourceContentHash = "", nil, ""
+	queue := newMemoryClientState()
+	if err := queue.SaveSourceTimeState(context.Background(), sourceTimeStateKey(active), SourceTimeStateRecord{Snapshot: &legacy}); err != nil {
+		t.Fatal(err)
+	}
+	archive := timeStateTestItem("2026-10-30T21:03:33Z", []domain.ContentBlock{{
+		UUID: "legacy-synthetic", Text: "00.03\n-Проверка", UpdatedAt: version,
+	}})
+	archive.Archived, archive.ArchiveMetadataAmbiguous = true, true
+	archive.Mode = domain.SourceModeUnknown
+	source := &replaySource{item: archive}
+	service := ClientService{
+		ClientID: "textile", Source: source, Queue: queue, State: queue,
+		BatchSize: 10, CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+		t.Fatalf("неподтверждённый архив ушёл в очередь: queued=%d err=%v", queued, err)
+	}
+	state := queue.timeStates[sourceTimeStateKey(active)]
+	if state.Conflict == nil || state.Conflict.Kind != "archive_metadata_unverifiable" || len(queue.events) != 0 {
+		t.Fatalf("нет диагностического карантина: state=%#v events=%#v", state, queue.events)
+	}
+	archive.Record.UpdatedAt = "2026-10-30T21:04:33Z"
+	archive.Content = "00.03\n-Изменено"
+	archive.Blocks[0].Text = archive.Content
+	source.item = archive
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+		t.Fatalf("новая архивная версия вышла с неизвестным маршрутом: queued=%d err=%v", queued, err)
+	}
+	corrected := timeStateTestItem("2026-10-30 21:05:33", []domain.ContentBlock{{
+		UUID: "physical-overnight", DayOffset: 1,
+		Text: "00.03\n-Изменено", UpdatedAt: "2026-10-30 21:05:33",
+	}})
+	corrected.Position.CatalogUUID = "catalog-77"
+	source.item = corrected
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 1 {
+		t.Fatalf("исправленная активная версия не принята: queued=%d err=%v", queued, err)
+	}
+	if state := queue.timeStates[sourceTimeStateKey(active)]; state.Conflict != nil {
+		t.Fatalf("исправление не сняло карантин: %#v", state.Conflict)
+	}
+}
+
+func TestClientArchiveWithoutSnapshotDoesNotGuessLostRoutingMetadata(t *testing.T) {
+	now := time.Date(2026, 10, 30, 21, 4, 0, 0, time.UTC)
+	archive := timeStateTestItem("2026-10-30T21:03:33Z", []domain.ContentBlock{{
+		UUID: "legacy-synthetic", Text: "00.03\n-Проверка", UpdatedAt: "2026-10-30T21:03:33Z",
+	}})
+	archive.Archived, archive.ArchiveMetadataAmbiguous = true, true
+	archive.Mode = domain.SourceModeUnknown
+	queue := newMemoryClientState()
+	service := ClientService{
+		ClientID: "textile", Source: &replaySource{item: archive}, Queue: queue, State: queue,
+		BatchSize: 10, CatchUpExisting: true, Now: func() time.Time { return now },
+	}
+	if queued, err := service.CollectOnce(context.Background()); err != nil || queued != 0 {
+		t.Fatalf("архив без истории отправлен с предположенным маршрутом: queued=%d err=%v", queued, err)
+	}
+	state := queue.timeStates[sourceTimeStateKey(archive)]
+	if len(queue.events) != 0 || state.Conflict == nil || state.Conflict.Kind != "archive_metadata_unverifiable" {
+		t.Fatalf("архив без истории не изолирован: events=%#v state=%#v", queue.events, state)
+	}
+}
+
 func timeStateTestItem(version string, blocks []domain.ContentBlock) SourceItem {
 	content := make([]string, 0, len(blocks))
 	for _, block := range blocks {

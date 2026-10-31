@@ -22,16 +22,25 @@ type SourceTimeStateStore interface {
 	SaveSourceTimeState(ctx context.Context, sourceKey string, record SourceTimeStateRecord) error
 }
 
+// ArchivedTimeMetadataStore recovers routing metadata only from every retained
+// block event of a legacy snapshot. A partial history is not sufficient.
+type ArchivedTimeMetadataStore interface {
+	RecoverArchivedTimeMetadata(ctx context.Context, item SourceItem, snapshot SourceTimeSnapshot) (domain.SourceMode, string, bool, error)
+}
+
 type SourceTimeStateRecord struct {
 	Snapshot *SourceTimeSnapshot `json:"snapshot,omitempty"`
 	Conflict *SourceTimeConflict `json:"conflict,omitempty"`
 }
 
 type SourceTimeSnapshot struct {
-	SourceID      int64                  `json:"source_id"`
-	SourceUUID    string                 `json:"source_uuid"`
-	SourceVersion string                 `json:"source_version"`
-	Blocks        []SourceTimeStateEntry `json:"blocks"`
+	SourceID          int64                  `json:"source_id"`
+	SourceUUID        string                 `json:"source_uuid"`
+	SourceVersion     string                 `json:"source_version"`
+	SourceMode        domain.SourceMode      `json:"source_mode,omitempty"`
+	SourcePosition    *domain.Position       `json:"source_position,omitempty"`
+	SourceContentHash string                 `json:"source_content_hash,omitempty"`
+	Blocks            []SourceTimeStateEntry `json:"blocks"`
 }
 
 // SourceTimeStateEntry описывает логическое вхождение заголовка. Несколько
@@ -161,6 +170,20 @@ func planSourceTimeBlocks(
 		plan.Record.Conflict = plan.Conflict
 		return plan
 	}
+	if item.Archived && exists && stored.Snapshot != nil && stored.Conflict == nil &&
+		sameArchivedTimeObservations(item, observed, *stored.Snapshot) {
+		// EAVC removes physical blocks when it archives a closed session. Its
+		// fallback text parser can assign a different day offset to unchanged
+		// content, especially when a session crosses midnight. Keep the saved
+		// logical identities and let the queue deduplicate (or recover) events.
+		plan.Item = itemFromTimeState(item, stored.Snapshot.Blocks)
+		if sameArchivedSourceMetadata(*stored.Snapshot, item) {
+			plan.Item.Mode = stored.Snapshot.SourceMode
+			plan.Item.Position.CatalogUUID = stored.Snapshot.SourcePosition.CatalogUUID
+		}
+		plan.Record = stored
+		return plan
+	}
 
 	if !exists || stored.Snapshot == nil {
 		if len(observed) == 0 && len(item.DeletedBlocks) > 0 {
@@ -237,6 +260,71 @@ func planSourceTimeBlocks(
 	return plan
 }
 
+func sameArchivedTimeObservations(
+	item SourceItem, observed []sourceTimeObservation, snapshot SourceTimeSnapshot,
+) bool {
+	if item.Record.ID <= 0 || snapshot.SourceID != item.Record.ID ||
+		!strings.EqualFold(strings.TrimSpace(snapshot.SourceUUID), strings.TrimSpace(item.Record.UUID)) ||
+		strings.TrimSpace(snapshot.SourceVersion) == "" ||
+		!sameArchivedSourceVersion(snapshot.SourceVersion, item.Record.UpdatedAt) {
+		return false
+	}
+	active := activeTimeEntries(snapshot.Blocks)
+	if len(active) != len(observed) {
+		return false
+	}
+	for index, current := range observed {
+		previous := active[index]
+		if previous.CanonicalTime != current.CanonicalTime ||
+			normalizeTimeStateText(previous.Block.Text) != normalizeTimeStateText(current.Block.Text) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameArchivedSourceVersion(previous, current string) bool {
+	if strings.TrimSpace(current) == "" {
+		return false
+	}
+	previousEvent := domain.Event{Source: domain.SourceRecord{UpdatedAt: previous}}
+	currentEvent := domain.Event{Source: domain.SourceRecord{UpdatedAt: current}}
+	return previousEvent.CanonicalSourceVersion() == currentEvent.CanonicalSourceVersion()
+}
+
+func sameArchivedSourceMetadata(snapshot SourceTimeSnapshot, item SourceItem) bool {
+	if snapshot.SourcePosition == nil || snapshot.SourceContentHash == "" ||
+		snapshot.SourceContentHash != sourceTimeContentHash(item.Content) ||
+		snapshot.SourcePosition.UnitName != item.Position.UnitName ||
+		snapshot.SourcePosition.Frequency != item.Position.Frequency ||
+		snapshot.SourcePosition.GroupCode != item.Position.GroupCode {
+		return false
+	}
+	switch snapshot.SourceMode {
+	case domain.SourceModeNormal, domain.SourceModeDeferred, domain.SourceModeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func sourceTimeSnapshotHasMetadata(snapshot SourceTimeSnapshot) bool {
+	if snapshot.SourcePosition == nil || snapshot.SourceContentHash == "" {
+		return false
+	}
+	switch snapshot.SourceMode {
+	case domain.SourceModeNormal, domain.SourceModeDeferred, domain.SourceModeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func sourceTimeContentHash(content string) string {
+	digest := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(digest[:])
+}
+
 func sameTimeStateSource(snapshot SourceTimeSnapshot, item SourceItem) bool {
 	if snapshot.SourceID != 0 && item.Record.ID != 0 && snapshot.SourceID != item.Record.ID &&
 		(strings.TrimSpace(snapshot.SourceUUID) == "" || strings.TrimSpace(item.Record.UUID) == "") {
@@ -247,10 +335,13 @@ func sameTimeStateSource(snapshot SourceTimeSnapshot, item SourceItem) bool {
 }
 
 func sourceTimeSnapshot(item SourceItem, entries []SourceTimeStateEntry) SourceTimeSnapshot {
+	position := item.Position
 	return SourceTimeSnapshot{
 		SourceID: item.Record.ID, SourceUUID: strings.TrimSpace(item.Record.UUID),
 		SourceVersion: strings.TrimSpace(item.Record.UpdatedAt),
-		Blocks:        append([]SourceTimeStateEntry(nil), entries...),
+		SourceMode:    item.Mode, SourcePosition: &position,
+		SourceContentHash: sourceTimeContentHash(item.Content),
+		Blocks:            append([]SourceTimeStateEntry(nil), entries...),
 	}
 }
 

@@ -35,8 +35,11 @@ type SourceItem struct {
 	Blocks        []domain.ContentBlock
 	DeletedBlocks []domain.ContentBlock
 	Archived      bool
-	UpdatedBy     string
-	ObservedAt    time.Time
+	// ArchiveMetadataAmbiguous is set when the active EAVC schema has routing
+	// columns that the archive table omits.
+	ArchiveMetadataAmbiguous bool
+	UpdatedBy                string
+	ObservedAt               time.Time
 	// ContractError изолирует одну несовместимую/повреждённую запись EAVC.
 	// Клиент журналирует её и продолжает следующие записи; после исправления
 	// оператором новая updated_at снова попадёт в чтение.

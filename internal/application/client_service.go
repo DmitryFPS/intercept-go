@@ -135,11 +135,59 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 					return queued, stateErr
 				}
 			}
+			originalStored := stored
+			if item.ArchiveMetadataAmbiguous {
+				var safe bool
+				observed, observeErr := observeSourceTimeBlocks(item.Blocks)
+				if observeErr == nil && exists && stored.Snapshot != nil &&
+					sameArchivedTimeObservations(item, observed, *stored.Snapshot) {
+					if sourceTimeSnapshotHasMetadata(*stored.Snapshot) {
+						safe = sameArchivedSourceMetadata(*stored.Snapshot, item)
+					} else if metadata, ok := service.Queue.(ArchivedTimeMetadataStore); ok {
+						mode, catalogUUID, found, recoveryErr := metadata.RecoverArchivedTimeMetadata(ctx, item, *stored.Snapshot)
+						if recoveryErr != nil {
+							return queued, recoveryErr
+						}
+						if found {
+							snapshot := *stored.Snapshot
+							position := item.Position
+							position.CatalogUUID = catalogUUID
+							snapshot.SourceMode = mode
+							snapshot.SourcePosition = &position
+							snapshot.SourceContentHash = sourceTimeContentHash(item.Content)
+							stored.Snapshot = &snapshot
+							stored.Conflict = nil
+							safe = true
+						}
+					}
+				}
+				if !safe {
+					conflict := newSourceTimeConflict(
+						"archive_metadata_unverifiable",
+						"архивная запись не имеет доказанных данных маршрута",
+						item.Record.UpdatedAt, "", 0, nil, len(observed), service.Now().UTC(),
+					)
+					quarantined := SourceTimeStateRecord{Snapshot: stored.Snapshot, Conflict: conflict}
+					if timeState != nil && !sourceTimeStateRecordsEqual(originalStored, quarantined) {
+						if err := timeState.SaveSourceTimeState(ctx, stateKey, quarantined); err != nil {
+							return queued, err
+						}
+					}
+					if service.Logger != nil {
+						service.Logger.Warn("архивная запись EAVC изолирована до доказательства маршрута",
+							"source_id", item.Record.ID, "source_uuid", item.Record.UUID,
+							"source_version", item.Record.UpdatedAt, "reason", conflict.Reason,
+						)
+					}
+					continue
+				}
+				stored.Conflict = nil
+			}
 			prepared := planSourceTimeBlocks(item, stored, exists, service.Now().UTC())
 			// Состояние сохраняется до очереди: после аварийного завершения повтор
 			// получит те же occurrence-ID. Tombstone остаются в снимке и поэтому
 			// удаление также не потеряется при таком повторе.
-			if timeState != nil && (!exists || !sourceTimeStateRecordsEqual(stored, prepared.Record)) {
+			if timeState != nil && (!exists || !sourceTimeStateRecordsEqual(originalStored, prepared.Record)) {
 				if stateErr := timeState.SaveSourceTimeState(ctx, stateKey, prepared.Record); stateErr != nil {
 					return queued, stateErr
 				}

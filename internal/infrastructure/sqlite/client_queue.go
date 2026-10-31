@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -402,7 +403,12 @@ func (queue *ClientQueue) SeedBlockBaselinesFromLegacy(
 // снимок поэтому получает синтетические legacy-UUID и без этой проверки был бы
 // принят как новый перехват.
 //
-// Подавление разрешено только при двух независимых доказательствах:
+// Для логических time: идентичностей каждый архивный блок сверяется с записью
+// очереди или очищенной историей. При потере архивом mode/catalog_uuid можно
+// также сверить содержимое сохранённого события в очереди. Это сохраняет
+// незаписанные события после аварийного завершения между сохранением снимка и
+// постановкой в очередь.
+// Для старых физических идентичностей действует миграционная проверка:
 //   - раньше замечено не меньше самостоятельных UUID блоков, чем есть в архиве;
 //   - среди них есть версия, равная последней версии архивной записи.
 //
@@ -417,6 +423,7 @@ func (queue *ClientQueue) SeedArchiveBaselinesFromSeenBlocks(
 		return false, nil
 	}
 	expectedBlocks := make(map[string]struct{}, len(events))
+	logicalBlocks := true
 	for _, event := range events {
 		if err := event.Validate(); err != nil {
 			return false, fmt.Errorf("проверить архивную идентичность: %w", err)
@@ -433,6 +440,7 @@ func (queue *ClientQueue) SeedArchiveBaselinesFromSeenBlocks(
 			return false, nil
 		}
 		expectedBlocks[blockUUID] = struct{}{}
+		logicalBlocks = logicalBlocks && strings.HasPrefix(blockUUID, "time:")
 	}
 	if len(expectedBlocks) == 0 {
 		return false, nil
@@ -442,6 +450,54 @@ func (queue *ClientQueue) SeedArchiveBaselinesFromSeenBlocks(
 		return false, fmt.Errorf("начать проверку архивного повтора: %w", err)
 	}
 	defer tx.Rollback()
+	if logicalBlocks {
+		// A saved time snapshot may survive a crash after only some block events
+		// reached the queue. Historical block count cannot prove that each event
+		// of the current version was actually queued.
+		allSeen := true
+		clearedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		for _, event := range events {
+			lineage, version, digest := event.SourceLineageKey(), event.SourceVersion(), event.ContentDigest
+			var seen int
+			err := tx.QueryRowContext(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM client_events
+					WHERE source_uuid=? AND source_version=? AND content_digest=?
+					UNION ALL
+					SELECT 1 FROM client_cleared_events
+					WHERE source_uuid=? AND source_version=? AND content_digest=?
+				)`, lineage, version, digest, lineage, version, digest).Scan(&seen)
+			if err != nil {
+				return false, fmt.Errorf("сверить архивный блок с историей очереди: %w", err)
+			}
+			if seen == 0 {
+				// Archive rows drop source_mode and catalog_uuid. Their digest can
+				// change even when the same logical block was already queued.
+				matched, matchErr := archivedBlockMatchesQueuedEvent(ctx, tx, event)
+				if matchErr != nil {
+					return false, matchErr
+				}
+				if matched {
+					seen = 1
+				}
+			}
+			if seen == 0 {
+				allSeen = false
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT OR IGNORE INTO client_cleared_events(
+					source_uuid, source_version, content_digest, cleared_at
+				) VALUES(?, ?, ?, ?)`, lineage, version, digest, clearedAt,
+			); err != nil {
+				return false, fmt.Errorf("сохранить подтверждённый архивный блок: %w", err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("завершить проверку архивных блоков: %w", err)
+		}
+		return allSeen, nil
+	}
 	prefix := sourceUUID + "|block:"
 	var knownBlocks, latestVersion int
 	err = tx.QueryRowContext(ctx, `
@@ -476,6 +532,165 @@ func (queue *ClientQueue) SeedArchiveBaselinesFromSeenBlocks(
 		return false, fmt.Errorf("завершить подавление архивного повтора: %w", err)
 	}
 	return true, nil
+}
+
+func archivedBlockMatchesQueuedEvent(ctx context.Context, tx *sql.Tx, archive domain.Event) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT payload_json FROM client_events WHERE source_uuid=? AND source_version=?`,
+		archive.SourceLineageKey(), archive.SourceVersion(),
+	)
+	if err != nil {
+		return false, fmt.Errorf("прочитать историю архивного блока: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var protected []byte
+		if err := rows.Scan(&protected); err != nil {
+			return false, fmt.Errorf("прочитать событие архивного блока: %w", err)
+		}
+		plain, err := unprotectDatabaseValue(protected)
+		if err != nil {
+			return false, fmt.Errorf("открыть событие архивного блока: %w", err)
+		}
+		var queued domain.Event
+		if err := json.Unmarshal(plain, &queued); err != nil {
+			return false, fmt.Errorf("разобрать событие архивного блока: %w", err)
+		}
+		if sameArchivedQueuedBlock(archive, queued) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("прочитать историю архивного блока: %w", err)
+	}
+	return false, nil
+}
+
+func sameArchivedQueuedBlock(archive, queued domain.Event) bool {
+	if archive.SourceLineageKey() != queued.SourceLineageKey() ||
+		archive.SourceVersion() != queued.SourceVersion() ||
+		archive.Source.ID != queued.Source.ID ||
+		!strings.EqualFold(archive.Source.UUID, queued.Source.UUID) ||
+		archive.Source.SessionID != queued.Source.SessionID ||
+		archive.Source.SessionUUID != queued.Source.SessionUUID ||
+		archive.Position.UnitName != queued.Position.UnitName ||
+		archive.Position.Frequency != queued.Position.Frequency ||
+		archive.Position.GroupCode != queued.Position.GroupCode ||
+		archive.Position.CatalogUUID != "" ||
+		(archive.Mode != domain.SourceModeUnknown && archive.Mode != queued.Mode) ||
+		archive.SourceBlockDeleted || queued.SourceBlockDeleted ||
+		archive.HasActiveBlocks != queued.HasActiveBlocks ||
+		archive.Content != queued.Content || archive.UpdatedBy != queued.UpdatedBy ||
+		len(archive.Blocks) != 1 || len(queued.Blocks) != 1 {
+		return false
+	}
+	archiveBlock, queuedBlock := archive.Blocks[0], queued.Blocks[0]
+	archiveBlock.Sequence, queuedBlock.Sequence = 0, 0
+	if len(archiveBlock.Callsigns) == 0 {
+		archiveBlock.Callsigns = nil
+	}
+	if len(queuedBlock.Callsigns) == 0 {
+		queuedBlock.Callsigns = nil
+	}
+	return reflect.DeepEqual(archiveBlock, queuedBlock)
+}
+
+// RecoverArchivedTimeMetadata requires an intact queued payload for every
+// active block in a legacy time snapshot. Cleared identities cannot prove the
+// missing mode and catalog UUID.
+func (queue *ClientQueue) RecoverArchivedTimeMetadata(
+	ctx context.Context, item application.SourceItem, snapshot application.SourceTimeSnapshot,
+) (domain.SourceMode, string, bool, error) {
+	entries := make([]application.SourceTimeStateEntry, 0, len(snapshot.Blocks))
+	for _, entry := range snapshot.Blocks {
+		if entry.Active {
+			entries = append(entries, entry)
+		}
+	}
+	if len(entries) == 0 {
+		return "", "", false, nil
+	}
+	var mode domain.SourceMode
+	var catalogUUID string
+	for _, entry := range entries {
+		lineage := strings.TrimSpace(item.Record.UUID)
+		if lineage == "" {
+			lineage = fmt.Sprintf("id:%d", item.Record.ID)
+		}
+		lineage += "|block:" + strings.ToLower(strings.TrimSpace(entry.Block.Identity()))
+		rows, err := queue.db.QueryContext(ctx, `
+			SELECT payload_json FROM client_events WHERE source_uuid=? AND source_version=?`,
+			lineage, strings.TrimSpace(entry.Block.UpdatedAt),
+		)
+		if err != nil {
+			return "", "", false, fmt.Errorf("прочитать сохранённые события архивного блока: %w", err)
+		}
+		found := false
+		for rows.Next() {
+			var protected []byte
+			if err := rows.Scan(&protected); err != nil {
+				rows.Close()
+				return "", "", false, fmt.Errorf("прочитать сохранённое событие архивного блока: %w", err)
+			}
+			plain, err := unprotectDatabaseValue(protected)
+			if err != nil {
+				continue
+			}
+			var event domain.Event
+			if err := json.Unmarshal(plain, &event); err != nil ||
+				!queuedEventProvesArchivedMetadata(event, item, entry) {
+				continue
+			}
+			if found && (mode != event.Mode || catalogUUID != event.Position.CatalogUUID) {
+				rows.Close()
+				return "", "", false, nil
+			}
+			if mode != "" && (mode != event.Mode || catalogUUID != event.Position.CatalogUUID) {
+				rows.Close()
+				return "", "", false, nil
+			}
+			mode, catalogUUID, found = event.Mode, event.Position.CatalogUUID, true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return "", "", false, fmt.Errorf("прочитать сохранённые события архивного блока: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return "", "", false, fmt.Errorf("закрыть чтение архивного блока: %w", err)
+		}
+		if !found {
+			return "", "", false, nil
+		}
+	}
+	return mode, catalogUUID, true, nil
+}
+
+func queuedEventProvesArchivedMetadata(
+	event domain.Event, item application.SourceItem, entry application.SourceTimeStateEntry,
+) bool {
+	if event.Source.ID != item.Record.ID ||
+		!strings.EqualFold(event.Source.UUID, item.Record.UUID) ||
+		(domain.Event{Source: event.Source}).CanonicalSourceVersion() !=
+			(domain.Event{Source: item.Record}).CanonicalSourceVersion() ||
+		event.Source.SessionID != item.Record.SessionID ||
+		event.Source.SessionUUID != item.Record.SessionUUID ||
+		event.Position.UnitName != item.Position.UnitName ||
+		event.Position.Frequency != item.Position.Frequency ||
+		event.Position.GroupCode != item.Position.GroupCode ||
+		event.SourceBlockDeleted || len(event.Blocks) != 1 ||
+		!strings.EqualFold(event.SourceBlockUUID, entry.Block.Identity()) ||
+		event.SourceVersion() != strings.TrimSpace(entry.Block.UpdatedAt) ||
+		event.Content != entry.Block.Text || event.Blocks[0].Text != entry.Block.Text ||
+		event.UpdatedBy != entry.Block.UpdatedBy ||
+		!reflect.DeepEqual(event.Blocks[0].Callsigns, entry.Block.Callsigns) {
+		return false
+	}
+	switch event.Mode {
+	case domain.SourceModeNormal, domain.SourceModeDeferred, domain.SourceModeUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 // Pending выбирает только головы независимых очередей подразделений.

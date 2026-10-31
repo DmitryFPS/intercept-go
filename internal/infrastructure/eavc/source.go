@@ -401,6 +401,7 @@ func (source *Source) Scan(ctx context.Context, after application.Cursor, limit 
 		}
 		item.Content = content.String
 		item.Archived = isArchive
+		item.ArchiveMetadataAmbiguous = isArchive && (source.hasSourceMode || source.hasCatalogUUID)
 		item.UpdatedBy = updatedBy.String
 		item.ObservedAt = time.Now().UTC()
 		items = append(items, item)
