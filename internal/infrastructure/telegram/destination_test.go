@@ -1679,6 +1679,100 @@ func TestTerminalEditErrorClassification(t *testing.T) {
 	}
 }
 
+func TestInvalidTelegramTopicErrorIsNarrow(t *testing.T) {
+	t.Parallel()
+	for _, description := range []string{
+		"Bad Request: message thread not found",
+		"Bad Request: TOPIC_ID_INVALID",
+		"Bad Request: forum topic not found",
+	} {
+		if !invalidTelegramTopicError(&apiError{code: 400, httpStatus: 400, description: description}) {
+			t.Errorf("удалённая тема не распознана: %s", description)
+		}
+	}
+	for _, err := range []error{
+		&apiError{code: 400, httpStatus: 400, description: "Bad Request: chat not found"},
+		&apiError{code: 429, httpStatus: 429, description: "Too Many Requests"},
+		&apiError{code: 500, httpStatus: 500, description: "message thread not found"},
+	} {
+		if invalidTelegramTopicError(err) {
+			t.Errorf("ошибка ошибочно признана удалённой темой: %v", err)
+		}
+	}
+}
+
+func TestDestinationFallsBackToBaseWhenRedirectTopicWasDeleted(t *testing.T) {
+	t.Parallel()
+	var threads []string
+	nextID := int64(100)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+		if method != "sendMessage" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("прочитать тело Telegram: %v", err)
+			return
+		}
+		thread := "0"
+		if value, ok := body["message_thread_id"]; ok {
+			thread = fmt.Sprint(value)
+		}
+		threads = append(threads, thread)
+		if thread == "42" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": false, "error_code": 400,
+				"description": "Bad Request: message thread not found",
+			})
+			return
+		}
+		nextID++
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"ok": true, "result": map[string]any{"message_id": nextID},
+		})
+	}))
+	defer server.Close()
+	api, err := NewWithBaseURL("123:token", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sends.globalInterval = 0
+	api.sends.groupInterval = 0
+	destination := Destination{API: api, ChatID: -1001, StatePath: filepath.Join(t.TempDir(), "state.json")}
+	baseDecision := domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 7}
+	delivery := domain.PlannedDelivery{
+		Decision:          domain.RouteDecision{Action: domain.RouteDeliver, ThreadID: 42},
+		TopicRedirected:   true,
+		BaseDecision:      &baseDecision,
+		SourcePositionKey: "name:игровая команда",
+	}
+	event := domain.Event{
+		ID: "event-1", ClientID: "point-01", CreatedAt: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC),
+		Source:   domain.SourceRecord{UUID: "source-1"},
+		Position: domain.Position{UnitName: "Игровая команда"},
+		Blocks:   []domain.ContentBlock{{UUID: "block-1", Text: "12.00\n-Проверка"}},
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatalf("исходная тема не использована после удаления перенаправления: %v", err)
+	}
+	if err := destination.Deliver(context.Background(), event, delivery); err != nil {
+		t.Fatalf("известная недоступная тема не должна повторно блокировать доставку: %v", err)
+	}
+	if !reflect.DeepEqual(threads, []string{"42", "7"}) {
+		t.Fatalf("ожидалась одна проверка удалённой темы и одна публикация в исходную, получено %v", threads)
+	}
+	state, err := loadDestinationState(destination.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := state.Items["point-01|source-1"]
+	if item.Blocks["block-1"].ThreadID != 7 {
+		t.Fatalf("состояние сохранило недействительную тему: %#v", item.Blocks["block-1"])
+	}
+}
+
 func TestMissingEditErrorClassification(t *testing.T) {
 	t.Parallel()
 	for _, description := range []string{

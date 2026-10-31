@@ -1093,6 +1093,12 @@ func (server *Server) RestoreRules(ctx context.Context, version int64, author st
 	if err := server.validateRuleDestinations(rules); err != nil {
 		return fmt.Errorf("эту версию нельзя восстановить: %w", err)
 	}
+	// Восстановление — это новая публикация, поэтому даже историческое
+	// перенаправление повторно проверяется в Telegram. Иначе удалённая тема из
+	// старой версии могла бы снова стать активной и удерживать очередь.
+	if err := server.checkChangedTopicRedirects(ctx, domain.RuleSet{}, rules); err != nil {
+		return fmt.Errorf("эту версию нельзя восстановить: %w", err)
+	}
 	next, err := server.Store.NextRuleVersion(ctx)
 	if err != nil {
 		return err

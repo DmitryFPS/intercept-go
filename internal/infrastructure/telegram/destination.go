@@ -31,6 +31,12 @@ type Destination struct {
 
 	mu    sync.Mutex
 	locks map[string]*itemLockEntry
+	// invalidRedirects запоминает подтверждённо удалённые темы Telegram в
+	// пределах работы Центра. Это не ошибка сети: для таких маршрутов новые
+	// события сразу идут по исходной теме и не удерживают очередь повторными
+	// попытками. Ключ включает исходную позицию и ID темы, поэтому новая тема
+	// или новая публикация перенаправления не блокируется старым состоянием.
+	invalidRedirects map[string]string
 }
 
 type itemLockEntry struct {
@@ -48,8 +54,84 @@ func (destination *Destination) DeliverManually(ctx context.Context, event domai
 }
 
 // Deliver создаёт, редактирует и удаляет сообщения так, чтобы Telegram отражал
-// текущее состояние записи EAVC без дубликатов.
+// текущее состояние записи EAVC без дубликатов. Перенаправление темы — только
+// дополнительная настройка: если Telegram подтвердил, что целевая тема
+// удалена, публикация один раз переключается на исходную тему. Сетевые,
+// временные и неоднозначные ошибки такого переключения не запускают.
 func (destination *Destination) Deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
+	if delivery.TopicRedirected && delivery.BaseDecision != nil &&
+		destination.redirectIsInvalid(event, delivery) {
+		return destination.deliverOnBaseRoute(ctx, event, delivery,
+			"ранее подтверждено, что целевая тема Telegram недоступна")
+	}
+	err := destination.deliver(ctx, event, delivery)
+	if err == nil || !delivery.TopicRedirected || delivery.BaseDecision == nil ||
+		!invalidTelegramTopicError(err) {
+		return err
+	}
+	destination.rememberInvalidRedirect(event, delivery, err.Error())
+	return destination.deliverOnBaseRoute(ctx, event, delivery, err.Error())
+}
+
+func (destination *Destination) deliverOnBaseRoute(
+	ctx context.Context, event domain.Event, delivery domain.PlannedDelivery, reason string,
+) error {
+	base := *delivery.BaseDecision
+	redirectThreadID := delivery.Decision.ThreadID
+	delivery.Decision = base
+	delivery.TopicRedirected = false
+	delivery.BaseDecision = nil
+	if destination.Logger != nil {
+		destination.Logger.Warn("перенаправление Telegram недействительно; используется исходная тема",
+			"event_id", event.ID, "trace_id", event.ID,
+			"source_position_key", delivery.SourcePositionKey,
+			"redirect_thread_id", redirectThreadID, "base_thread_id", base.ThreadID,
+			"reason", reason,
+		)
+	}
+	if err := destination.deliver(ctx, event, delivery); err != nil {
+		return fmt.Errorf("перенаправление Telegram недействительно; исходный маршрут не выполнен: %w", err)
+	}
+	return nil
+}
+
+func (destination *Destination) redirectKey(event domain.Event, delivery domain.PlannedDelivery) string {
+	positionKey := strings.TrimSpace(delivery.SourcePositionKey)
+	if positionKey == "" {
+		positionKey = event.PositionKey()
+	}
+	return positionKey + "|" + destinationStateScope(destination) + "|" + fmt.Sprintf("%d", delivery.Decision.ThreadID)
+}
+
+func destinationStateScope(destination *Destination) string {
+	if scope := strings.TrimSpace(destination.StateScope); scope != "" {
+		return scope
+	}
+	return fmt.Sprintf("chat:%d", destination.ChatID)
+}
+
+func (destination *Destination) redirectIsInvalid(event domain.Event, delivery domain.PlannedDelivery) bool {
+	key := destination.redirectKey(event, delivery)
+	destination.mu.Lock()
+	defer destination.mu.Unlock()
+	_, exists := destination.invalidRedirects[key]
+	return exists
+}
+
+func (destination *Destination) rememberInvalidRedirect(event domain.Event, delivery domain.PlannedDelivery, reason string) {
+	key := destination.redirectKey(event, delivery)
+	destination.mu.Lock()
+	if destination.invalidRedirects == nil {
+		destination.invalidRedirects = make(map[string]string)
+	}
+	destination.invalidRedirects[key] = reason
+	destination.mu.Unlock()
+}
+
+// deliver содержит исходную поблочную синхронизацию. Отдельная обёртка выше
+// нужна, чтобы fallback на базовую тему выполнялся после полного освобождения
+// блокировки записи и не мог создать взаимную блокировку.
+func (destination *Destination) deliver(ctx context.Context, event domain.Event, delivery domain.PlannedDelivery) error {
 	if destination.API == nil || destination.ChatID == 0 || strings.TrimSpace(destination.StatePath) == "" {
 		return errors.New("telegram-направление настроено не полностью")
 	}
@@ -1251,6 +1333,29 @@ func telegramSendDefinitelyNotCreated(err error) bool {
 	var limited *rateLimitError
 	return errors.As(err, &limited) && limited.httpStatus >= 200 &&
 		limited.httpStatus < 500 && limited.apiCode == 429
+}
+
+// invalidTelegramTopicError отличает окончательно отсутствующую тему от
+// временной недоступности Telegram, лимита частоты и ошибки самого чата.
+// Только этот узкий класс ошибок разрешает безопасно вернуться к исходной
+// теме: остальные ошибки обязаны пройти обычный механизм повторов.
+func invalidTelegramTopicError(err error) bool {
+	if !definitiveTelegramBadRequest(err) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"message thread not found",
+		"topic_id_invalid",
+		"topic id invalid",
+		"forum topic not found",
+		"thread_id_invalid",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (destination *Destination) deleteAll(ctx context.Context, blocks map[string]destinationBlock) error {
