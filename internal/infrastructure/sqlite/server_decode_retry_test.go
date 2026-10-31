@@ -188,6 +188,80 @@ func TestPendingDeliveriesRecoversEventDPAPIAfterStoreRestart(t *testing.T) {
 	}
 }
 
+type cleanupDeliverySpy struct{ calls int }
+
+func (gateway *cleanupDeliverySpy) Deliver(_ context.Context, _ domain.Event, delivery domain.PlannedDelivery) error {
+	if delivery.RuleLevel != "cleanup" || delivery.Decision.Action != domain.RouteSkip {
+		return errors.New("ожидалась корректирующая очистка")
+	}
+	gateway.calls++
+	return nil
+}
+
+func TestCleanupDeliverySurvivesDPAPIRetryPastEventExpiry(t *testing.T) {
+	t.Parallel()
+	ctx, db, store, base := newDecodeRetryTestStore(t)
+	acceptDecodeRetryEvent(t, ctx, store, "before-route-change", 0, base, "a", "w")
+	for _, destinationID := range []string{"a", "w"} {
+		if err := store.MarkDelivered(ctx, "before-route-change", destinationID, base); err != nil {
+			t.Fatal(err)
+		}
+	}
+	acceptDecodeRetryEvent(t, ctx, store, "after-route-change", 1, base, "a")
+	if err := store.MarkDelivered(ctx, "after-route-change", "a", base.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	var routeBlob []byte
+	if err := db.QueryRowContext(ctx, `
+		SELECT delivery_json FROM delivery_jobs
+		WHERE event_id='after-route-change' AND destination_id='w'`,
+	).Scan(&routeBlob); err != nil {
+		t.Fatal(err)
+	}
+	failedOnce := false
+	store.pendingUnprotect = func(value []byte) ([]byte, error) {
+		if bytes.Equal(value, routeBlob) && !failedOnce {
+			failedOnce = true
+			return nil, errors.New("The data is invalid")
+		}
+		return unprotectDatabaseValue(value)
+	}
+	firstAttempt := base.Add(time.Hour - time.Second)
+	jobs, err := store.PendingDeliveries(ctx, 10, firstAttempt)
+	if err != nil || len(jobs) != 0 || !failedOnce {
+		t.Fatalf("ошибка DPAPI не задержала очистку: jobs=%#v failed=%v err=%v", jobs, failedOnce, err)
+	}
+	state, _, failures, nextAt, _ := decodeRetryState(t, ctx, db, "after-route-change", "w")
+	if state != "pending" || failures != 1 || !nextAt.After(base.Add(time.Hour)) {
+		t.Fatalf("очистка потеряна до восстановления: state=%q failures=%d next=%v", state, failures, nextAt)
+	}
+
+	restarted, err := NewServerStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := &cleanupDeliverySpy{}
+	service := application.DeliveryService{
+		Queue:         restarted,
+		Gateways:      map[string]application.DeliveryGateway{"w": gateway},
+		Now:           func() time.Time { return nextAt },
+		MaxConcurrent: 1,
+	}
+	count, err := service.RunOnce(ctx, 10)
+	if err != nil || count != 1 || gateway.calls != 1 {
+		t.Fatalf("после восстановления очистка не выполнена: count=%d calls=%d err=%v", count, gateway.calls, err)
+	}
+	state, _, failures, _, _ = decodeRetryState(t, ctx, db, "after-route-change", "w")
+	if state != "delivered" || failures != 0 {
+		t.Fatalf("очистка не завершена устойчиво: state=%q failures=%d", state, failures)
+	}
+	count, err = service.RunOnce(ctx, 10)
+	if err != nil || count != 0 || gateway.calls != 1 {
+		t.Fatalf("после завершения очистка выполнена повторно: count=%d calls=%d err=%v", count, gateway.calls, err)
+	}
+}
+
 func TestPendingDeliveriesRetriesDPAPIUntilExpiryAndUnblocksStream(t *testing.T) {
 	t.Parallel()
 	ctx, db, store, base := newDecodeRetryTestStore(t)

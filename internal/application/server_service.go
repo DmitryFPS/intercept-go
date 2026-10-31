@@ -357,7 +357,9 @@ func limitParallelWordDestinations(jobs []DeliveryJob) []DeliveryJob {
 
 func (service *DeliveryService) deliverOne(ctx context.Context, job DeliveryJob) (bool, error) {
 	now := service.Now().UTC()
-	if job.Event.Expired(now) {
+	// Корректирующее удаление уже опубликованного результата не ограничено
+	// сроком исходного перехвата: оно должно выполняться и после долгого сбоя.
+	if job.Delivery.RuleLevel != "cleanup" && job.Event.Expired(now) {
 		if service.Logger != nil {
 			service.Logger.Warn("доставка отменена: событие старше допустимого срока",
 				"event_id", job.Event.ID, "trace_id", job.Event.ID, "destination_id", job.Delivery.Destination.ID,

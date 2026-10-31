@@ -335,6 +335,54 @@ func TestServerDeliveryWindowExactTwoHourBoundary(t *testing.T) {
 	}
 }
 
+func TestDeliveryServiceCleanupAfterOriginalEventExpiry(t *testing.T) {
+	t.Parallel()
+	event := serverServiceEvent()
+	event.ExpiresAt = event.CreatedAt.Add(30 * time.Minute)
+	now := event.ExpiresAt.Add(time.Second)
+
+	tests := []struct {
+		name      string
+		ruleLevel string
+		wantCount int
+		wantState string
+	}{
+		{name: "корректирующая очистка", ruleLevel: "cleanup", wantCount: 1, wantState: "delivered"},
+		{name: "обычная доставка", wantCount: 0, wantState: "expired"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			queue := &memoryDeliveryQueue{jobs: []DeliveryJob{{
+				Event: event,
+				Delivery: domain.PlannedDelivery{
+					Destination: domain.Destination{ID: "word", Kind: domain.DestinationWord},
+					Decision:    domain.RouteDecision{Action: domain.RouteSkip},
+					RuleLevel:   test.ruleLevel,
+				},
+			}}}
+			service := DeliveryService{
+				Queue: queue, Gateways: map[string]DeliveryGateway{"word": memoryGateway{}},
+				Now: func() time.Time { return now },
+			}
+			count, err := service.RunOnce(context.Background(), 1)
+			if err != nil || count != test.wantCount {
+				t.Fatalf("доставка после истечения срока: count=%d err=%v", count, err)
+			}
+			switch test.wantState {
+			case "delivered":
+				if len(queue.delivered) != 1 || len(queue.retried) != 0 {
+					t.Fatalf("очистка не выполнена: delivered=%v expired=%v", queue.delivered, queue.retried)
+				}
+			case "expired":
+				if len(queue.delivered) != 0 || len(queue.retried) != 1 ||
+					queue.retried[0] != event.ID+":word:expired" {
+					t.Fatalf("обычная доставка не просрочена: delivered=%v expired=%v", queue.delivered, queue.retried)
+				}
+			}
+		})
+	}
+}
+
 // Задержка уже скачанного пакета в локальной очереди не превращает своевременный
 // перехват в просроченный: граница свежести фиксируется при скачивании.
 func TestServerServiceUsesDurableIngressTimeForFreshness(t *testing.T) {
