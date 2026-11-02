@@ -281,7 +281,7 @@ func TestServerTransportInboxQuarantinesCorruptStoredRowAndReturnsNext(t *testin
 	var inbox, rejected, cleanup int
 	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_inbox WHERE update_id=1").Scan(&inbox)
 	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets").Scan(&rejected)
-	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup WHERE message_id=101").Scan(&cleanup)
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup_scoped WHERE message_id=101").Scan(&cleanup)
 	if inbox != 0 || rejected != 1 || cleanup != 1 {
 		t.Fatalf("повреждённая строка изолирована неатомарно: inbox=%d rejected=%d cleanup=%d", inbox, rejected, cleanup)
 	}
@@ -369,12 +369,12 @@ func TestServerTransportInboxCompletionQueuesCleanupInSameTransaction(t *testing
 	if err := store.PersistTransportBatch(ctx, "telegram_offset", 8, []application.IncomingPacket{packet}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteTransportPacket(ctx, packet.UpdateID, packet.MessageID); err != nil {
+	if err := store.CompleteTransportPacket(ctx, packet.UpdateID, packet.ChatID, packet.MessageID); err != nil {
 		t.Fatal(err)
 	}
 	var inbox, cleanup int
 	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_inbox").Scan(&inbox)
-	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup WHERE message_id=?", packet.MessageID).Scan(&cleanup)
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup_scoped WHERE message_id=?", packet.MessageID).Scan(&cleanup)
 	if inbox != 0 || cleanup != 1 {
 		t.Fatalf("завершение неатомарно: inbox=%d cleanup=%d", inbox, cleanup)
 	}
@@ -410,7 +410,7 @@ func TestServerTransportInboxQuarantineIsAtomicAndDoesNotReturn(t *testing.T) {
 	}
 	var rejected, cleanup int
 	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets").Scan(&rejected)
-	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup WHERE message_id=?", packet.MessageID).Scan(&cleanup)
+	_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup_scoped WHERE message_id=?", packet.MessageID).Scan(&cleanup)
 	if rejected != 1 || cleanup != 1 {
 		t.Fatalf("неатомарный карантин: rejected=%d cleanup=%d", rejected, cleanup)
 	}

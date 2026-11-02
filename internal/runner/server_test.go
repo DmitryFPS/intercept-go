@@ -7,6 +7,7 @@ import (
 	"intercept/internal/application"
 	"intercept/internal/config"
 	"intercept/internal/domain"
+	"intercept/internal/infrastructure/telegram"
 )
 
 // Черновик настроек можно менять в панели, не затрагивая уже работающую копию сервера.
@@ -19,6 +20,32 @@ func TestCloneServerConfigDoesNotShareDestinationMap(t *testing.T) {
 	clone.Destinations["b"] = config.DestinationConfig{Kind: domain.DestinationWord}
 	if _, exists := original.Destinations["b"]; exists {
 		t.Fatal("копия конфигурации разделяет map направлений")
+	}
+}
+
+func TestGatewaysReuseTransportTelegramClientForSameBot(t *testing.T) {
+	t.Parallel()
+	const transportToken = "123:transport-token"
+	transportAPI, err := telegram.New(transportToken, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{BaseDir: t.TempDir()}
+	cfg := config.Server{
+		Transport: config.ServerTransport{BotToken: transportToken},
+		Destinations: map[string]config.DestinationConfig{
+			"same-bot":  {Kind: domain.DestinationTelegram, BotToken: transportToken, ChatID: -1001},
+			"other-bot": {Kind: domain.DestinationTelegram, BotToken: "456:other-token", ChatID: -1002},
+		},
+	}
+	gateways := server.gatewaysWithTransportAPI(cfg, transportAPI)
+	same, ok := gateways["same-bot"].(*telegram.Destination)
+	if !ok || same.API != transportAPI {
+		t.Fatal("направление того же бота не разделяет Telegram client с транспортом")
+	}
+	other, ok := gateways["other-bot"].(*telegram.Destination)
+	if !ok || other.API == transportAPI {
+		t.Fatal("направление другого бота ошибочно использует транспортный Telegram client")
 	}
 }
 

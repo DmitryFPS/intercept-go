@@ -20,7 +20,15 @@ import (
 	"intercept/internal/domain"
 	"intercept/internal/infrastructure/docx"
 	"intercept/internal/infrastructure/secrets"
+	stateDB "intercept/internal/infrastructure/sqlite"
 	"intercept/internal/infrastructure/telegram"
+)
+
+const (
+	transportInboxWorkerCount   = 3
+	transportInboxLeaseDuration = 2 * time.Minute
+	transportInboxLeaseRenewal  = 30 * time.Second
+	transportInboxLeaseTimeout  = 5 * time.Second
 )
 
 func (server *Server) restartWorker(parent context.Context) error {
@@ -99,7 +107,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	// Доставка уже принятых заданий не зависит от входящего Telegram polling.
 	// Запускаем очередь до проверки webhook, чтобы временная недоступность
 	// транспортного бота не блокировала Word и другие готовые направления.
-	gateways := server.gateways(cfg)
+	gateways := server.gatewaysWithTransportAPI(cfg, api)
 	delivery := &application.DeliveryService{
 		Queue: server.Store, Gateways: gateways, Now: time.Now,
 		MaxConcurrent: 4, AttemptTimeout: 2 * time.Minute, Logger: server.Logger,
@@ -147,7 +155,7 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	}
 	reception := &application.ServerService{
 		Clients: server.Store, Rules: server.Store, Store: server.Store,
-		DeliveryWindow: cfg.DeliveryTimeout(),
+		Now: time.Now, DeliveryWindow: cfg.DeliveryTimeout(),
 	}
 	receiver := &telegram.ServerReceiver{
 		API: api, ChatID: cfg.Transport.ChatID, MaxBytes: 4 * 1024 * 1024, Logger: server.Logger,
@@ -181,8 +189,8 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	}
 	// Даже файлы, отброшенные до расшифровки (исчезнувшие, чужие или
 	// повреждённые), очищаются через ту же долговечную очередь, что и принятые.
-	receiver.Discard = func(discardContext context.Context, messageID int64) {
-		server.deleteTransportPacket(discardContext, receiver, messageID)
+	receiver.Discard = func(discardContext context.Context, messageID int64) error {
+		return server.enqueueTransportPacketDeletion(discardContext, receiver.ChatID, messageID)
 	}
 	server.update(func(status *ServerStatus) {
 		status.State = "running"
@@ -194,10 +202,14 @@ func (server *Server) run(ctx context.Context, cfg config.Server) {
 	// может быстро освободить суточную Telegram-очередь, даже если проверка,
 	// подтверждение или конечные получатели временно задерживаются.
 	transportContext, stopTransport := context.WithCancel(ctx)
-	transportProducers.Add(1)
+	transportProducers.Add(2)
 	go func() {
 		defer transportProducers.Done()
 		server.transportInboxLoop(transportContext, receiver, reception)
+	}()
+	go func() {
+		defer transportProducers.Done()
+		server.transportCleanupLoop(transportContext, receiver)
 	}()
 	server.transportIntakeLoop(transportContext, receiver)
 	stopTransport()
@@ -261,51 +273,99 @@ func (server *Server) transportIntakeLoop(ctx context.Context, receiver *telegra
 func (server *Server) transportInboxLoop(
 	ctx context.Context, receiver *telegram.ServerReceiver, reception *application.ServerService,
 ) {
-	recentAcknowledgements := make(map[string]time.Time)
-	nextCleanupAt := time.Time{}
-	nextPruneAt := time.Time{}
+	tracker := newAcknowledgementTracker(make(map[string]time.Time))
+	var workers sync.WaitGroup
+	workers.Add(transportInboxWorkerCount)
+	for range transportInboxWorkerCount {
+		go func() {
+			defer workers.Done()
+			server.transportInboxWorker(ctx, receiver, reception, tracker)
+		}()
+	}
+	workers.Wait()
+}
+
+func (server *Server) transportInboxWorker(
+	ctx context.Context,
+	receiver *telegram.ServerReceiver,
+	reception *application.ServerService,
+	tracker *acknowledgementTracker,
+) {
 	for ctx.Err() == nil {
-		now := time.Now().UTC()
-		if !now.Before(nextPruneAt) {
-			if dropped, err := server.Store.PruneTransportDeletions(ctx, now); err != nil {
-				if ctx.Err() == nil {
-					server.Logger.Warn("не удалось ограничить очередь удаления транспортных файлов", "error", err)
-				}
-			} else if dropped > 0 {
-				server.Logger.Warn("устаревшие запросы на удаление транспортных файлов удалены из технической очереди",
-					"count", dropped)
-			}
-			nextPruneAt = now.Add(time.Minute)
-		}
-		items, err := server.Store.PendingTransportPackets(ctx, 25, time.Now().UTC())
+		items, err := server.Store.ClaimTransportPackets(
+			ctx, 1, time.Now().UTC(), transportInboxLeaseDuration,
+		)
 		if err != nil {
 			if ctx.Err() == nil {
-				server.Logger.Error("не удалось прочитать локальную входную очередь", "error", err)
+				server.Logger.Error("не удалось арендовать пакет локальной входной очереди", "error", err)
 			}
-			if !waitForRetry(ctx, 2*time.Second) {
+			if !waitForRetry(ctx, 500*time.Millisecond) {
 				return
 			}
 			continue
 		}
 		if len(items) == 0 {
-			now := time.Now().UTC()
-			if !now.Before(nextCleanupAt) {
-				server.retryTransportDeletions(ctx, receiver)
-				nextCleanupAt = now.Add(time.Minute)
-			}
-			if !waitForRetry(ctx, 250*time.Millisecond) {
+			if !waitForRetry(ctx, 100*time.Millisecond) {
 				return
 			}
 			continue
 		}
 		for _, item := range items {
 			if ctx.Err() != nil {
+				server.releaseTransportLease(item.Packet.UpdateID, item.LeaseToken)
 				return
 			}
-			server.processTransportInboxItem(ctx, receiver, reception, item.Packet, item.Attempts, recentAcknowledgements)
+			itemContext, cancelItem := context.WithCancelCause(ctx)
+			renewalDone := make(chan error, 1)
+			go func() {
+				renewalDone <- server.keepTransportLease(
+					itemContext, cancelItem, item.Packet.UpdateID, item.LeaseToken,
+				)
+			}()
+			server.processTransportInboxItemWithLease(
+				itemContext, receiver, reception, item.Packet, item.Attempts, item.LeaseToken, tracker,
+			)
+			cancelItem(context.Canceled)
+			renewalErr := <-renewalDone
+			if renewalErr != nil && ctx.Err() == nil && !errors.Is(renewalErr, stateDB.ErrTransportLeaseLost) {
+				server.Logger.Warn("не удалось продлить аренду входного пакета; обработка безопасно остановлена",
+					"transport_update_id", item.Packet.UpdateID, "error", renewalErr)
+			}
+			// Complete/Retry/Quarantine уже сняли аренду атомарно. Повторный release
+			// безопасен и нужен для отмены HTTP-запроса или ошибки heartbeat.
+			server.releaseTransportLease(item.Packet.UpdateID, item.LeaseToken)
+			if ctx.Err() != nil {
+				return
+			}
 		}
-		server.retryTransportDeletions(ctx, receiver)
-		nextCleanupAt = time.Now().UTC().Add(time.Minute)
+	}
+}
+
+func (server *Server) keepTransportLease(
+	ctx context.Context,
+	cancelProcessing context.CancelCauseFunc,
+	updateID int64,
+	leaseToken string,
+) error {
+	ticker := time.NewTicker(transportInboxLeaseRenewal)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			renewContext, cancelRenewal := context.WithTimeout(ctx, transportInboxLeaseTimeout)
+			_, err := server.Store.RenewTransportPacketLease(
+				renewContext, updateID, leaseToken, time.Now().UTC(), transportInboxLeaseDuration,
+			)
+			cancelRenewal()
+			if err != nil {
+				// После утраты аренды обработчик не имеет права продолжать внешние
+				// действия. Все завершающие SQL-операции дополнительно сверяют token.
+				cancelProcessing(err)
+				return err
+			}
+		}
 	}
 }
 
@@ -317,9 +377,33 @@ func (server *Server) processTransportInboxItem(
 	attempts int,
 	recentAcknowledgements map[string]time.Time,
 ) {
+	server.processTransportInboxItemWithLease(
+		ctx, receiver, reception, packet, attempts, "",
+		newAcknowledgementTracker(recentAcknowledgements),
+	)
+}
+
+func (server *Server) processTransportInboxItemWithLease(
+	ctx context.Context,
+	receiver *telegram.ServerReceiver,
+	reception *application.ServerService,
+	packet application.IncomingPacket,
+	attempts int,
+	leaseToken string,
+	acknowledgements *acknowledgementTracker,
+) {
 	retry := func(reason string, err error) {
+		if ctx.Err() != nil {
+			return
+		}
 		next := time.Now().UTC().Add(transportInboxRetryDelay(attempts))
-		if retryErr := server.Store.MarkTransportRetry(ctx, packet.UpdateID, next, err.Error()); retryErr != nil {
+		var retryErr error
+		if leaseToken == "" {
+			retryErr = server.Store.MarkTransportRetry(ctx, packet.UpdateID, next, err.Error())
+		} else {
+			retryErr = server.Store.MarkTransportRetryLease(ctx, packet.UpdateID, next, err.Error(), leaseToken)
+		}
+		if retryErr != nil && ctx.Err() == nil && !errors.Is(retryErr, stateDB.ErrTransportLeaseLost) {
 			server.Logger.Error("не удалось сохранить повтор входного пакета",
 				"transport_update_id", packet.UpdateID, "error", retryErr)
 		}
@@ -327,7 +411,20 @@ func (server *Server) processTransportInboxItem(
 			"transport_message_id", packet.MessageID, "next_attempt_at", next, "error", err)
 	}
 	complete := func() bool {
-		if err := server.Store.CompleteTransportPacket(ctx, packet.UpdateID, packet.MessageID); err != nil {
+		var err error
+		if leaseToken == "" {
+			err = server.Store.CompleteTransportPacket(ctx, packet.UpdateID, packet.ChatID, packet.MessageID)
+		} else {
+			err = server.Store.CompleteTransportPacketLease(
+				ctx, packet.UpdateID, packet.ChatID, packet.MessageID, leaseToken,
+			)
+		}
+		if err != nil {
+			if errors.Is(err, stateDB.ErrTransportLeaseLost) {
+				server.Logger.Warn("аренда входного пакета завершилась в другом обработчике",
+					"transport_update_id", packet.UpdateID)
+				return false
+			}
 			retry("не удалось завершить локальный входной пакет", err)
 			return false
 		}
@@ -400,7 +497,13 @@ func (server *Server) processTransportInboxItem(
 			"Пакет окончательно отклонён и помещён в карантин", "", "", false, 200))
 		server.Logger.Warn("пакет помещён в карантин", "error", err,
 			"sender_bot_id", packet.SenderBotID, "content_kind", "unverified")
-		if quarantineErr := server.Store.QuarantineTransportPacket(ctx, packet, err.Error()); quarantineErr != nil {
+		var quarantineErr error
+		if leaseToken == "" {
+			quarantineErr = server.Store.QuarantineTransportPacket(ctx, packet, err.Error())
+		} else {
+			quarantineErr = server.Store.QuarantineTransportPacketLease(ctx, packet, err.Error(), leaseToken)
+		}
+		if quarantineErr != nil {
 			retry("не удалось сохранить пакет в карантин", quarantineErr)
 		}
 		return
@@ -434,15 +537,16 @@ func (server *Server) processTransportInboxItem(
 	)
 	acknowledgedAt := time.Now().UTC()
 	ackKey := acknowledgementKey(result)
-	if acknowledgementDue(recentAcknowledgements, ackKey, acknowledgedAt) {
+	if acknowledgements.reserve(ackKey, acknowledgedAt) {
 		if err := receiver.Acknowledge(
 			ctx, result.ClientBotUsername, result.EventID, result.Status, result.AcknowledgementKey,
 			packet.MessageID, result.AckTraceV4,
 		); err != nil {
+			acknowledgements.release(ackKey)
 			retry("не удалось подтвердить событие рабочей точке", err)
 			return
 		}
-		recentAcknowledgements[ackKey] = acknowledgedAt
+		acknowledgements.complete(ackKey, acknowledgedAt)
 	}
 	if !complete() {
 		return
@@ -478,6 +582,45 @@ func transportObservation(
 }
 
 const duplicateAcknowledgementInterval = 90 * time.Second
+
+type acknowledgementTracker struct {
+	mu       sync.Mutex
+	recent   map[string]time.Time
+	inFlight map[string]struct{}
+}
+
+func newAcknowledgementTracker(recent map[string]time.Time) *acknowledgementTracker {
+	if recent == nil {
+		recent = make(map[string]time.Time)
+	}
+	return &acknowledgementTracker{recent: recent, inFlight: make(map[string]struct{})}
+}
+
+// reserve не позволяет двум параллельным пакетам одного события одновременно
+// отправить одинаковый ACK. При ошибке резерв освобождается для следующей
+// долговечной попытки; после успеха действует прежнее защитное окно.
+func (tracker *acknowledgementTracker) reserve(key string, now time.Time) bool {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	if _, exists := tracker.inFlight[key]; exists || !acknowledgementDue(tracker.recent, key, now) {
+		return false
+	}
+	tracker.inFlight[key] = struct{}{}
+	return true
+}
+
+func (tracker *acknowledgementTracker) release(key string) {
+	tracker.mu.Lock()
+	delete(tracker.inFlight, key)
+	tracker.mu.Unlock()
+}
+
+func (tracker *acknowledgementTracker) complete(key string, at time.Time) {
+	tracker.mu.Lock()
+	tracker.recent[key] = at
+	delete(tracker.inFlight, key)
+	tracker.mu.Unlock()
+}
 
 // Смена исхода «просрочено» → «принято» обязана дать отдельный ACK даже внутри
 // защитного окна: иначе Клиент останется в ложном терминальном состоянии.
@@ -528,41 +671,67 @@ func (server *Server) transportRecovered() {
 	})
 }
 
-func (server *Server) deleteTransportPacket(ctx context.Context, receiver *telegram.ServerReceiver, messageID int64) {
-	if messageID <= 0 {
+func (server *Server) enqueueTransportPacketDeletion(ctx context.Context, chatID, messageID int64) error {
+	if chatID == 0 || messageID <= 0 {
+		return errors.New("не заданы чат или транспортное сообщение для очистки")
+	}
+	return server.Store.EnqueueTransportDeletion(ctx, chatID, messageID)
+}
+
+func (server *Server) releaseTransportLease(updateID int64, leaseToken string) {
+	if updateID < 0 || strings.TrimSpace(leaseToken) == "" {
 		return
 	}
-	err := receiver.DeletePacket(ctx, messageID)
-	if err == nil {
-		_ = server.Store.CompleteTransportDeletion(ctx, messageID)
-		return
-	}
-	// Отмена процесса не означает, что Telegram удалил сообщение. Существующую
-	// запись очистки нельзя ошибочно завершать: после запуска она будет повторена.
-	if ctx.Err() != nil {
-		return
-	}
-	server.Logger.Warn("не удалось удалить обработанный пакет из транспортной группы",
-		"telegram_message_id", messageID, "error", err)
-	dropped, queueErr := server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC())
-	if queueErr != nil {
-		server.Logger.Warn("не удалось сохранить повтор удаления транспортного пакета",
-			"telegram_message_id", messageID, "error", queueErr)
-	} else if dropped {
-		server.Logger.Error("исчерпан лимит удаления транспортного пакета",
-			"telegram_message_id", messageID, "attempts", 120)
+	releaseContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := server.Store.ReleaseTransportPacketLease(releaseContext, updateID, leaseToken); err != nil &&
+		!errors.Is(err, stateDB.ErrTransportLeaseLost) {
+		server.Logger.Warn("не удалось освободить аренду входного пакета при остановке",
+			"transport_update_id", updateID, "error", err)
 	}
 }
 
-func (server *Server) retryTransportDeletions(ctx context.Context, receiver *telegram.ServerReceiver) {
-	messageIDs, err := server.Store.DueTransportDeletions(ctx, time.Now().UTC(), 25)
+func (server *Server) transportCleanupLoop(ctx context.Context, receiver *telegram.ServerReceiver) {
+	nextPruneAt := time.Time{}
+	for ctx.Err() == nil {
+		now := time.Now().UTC()
+		if !now.Before(nextPruneAt) {
+			if dropped, err := server.Store.PruneTransportDeletions(ctx, now); err != nil {
+				if ctx.Err() == nil {
+					server.Logger.Warn("не удалось ограничить очередь удаления транспортных файлов", "error", err)
+				}
+			} else if dropped > 0 {
+				server.Logger.Warn("устаревшие запросы на удаление транспортных файлов удалены из технической очереди",
+					"count", dropped)
+			}
+			nextPruneAt = now.Add(time.Minute)
+		}
+		processed := server.retryTransportDeletions(ctx, receiver)
+		if processed == 0 && !waitForRetry(ctx, 250*time.Millisecond) {
+			return
+		}
+	}
+}
+
+func (server *Server) retryTransportDeletions(ctx context.Context, receiver *telegram.ServerReceiver) int {
+	messageIDs, err := server.Store.DueTransportDeletions(ctx, receiver.ChatID, time.Now().UTC(), 25)
 	if err != nil {
-		server.Logger.Warn("не удалось прочитать очередь удаления транспортных пакетов", "error", err)
-		return
+		if ctx.Err() == nil {
+			server.Logger.Warn("не удалось прочитать очередь удаления транспортных пакетов", "error", err)
+		}
+		return 0
 	}
 	for _, messageID := range messageIDs {
+		if ctx.Err() != nil {
+			return len(messageIDs)
+		}
 		if err := receiver.DeletePacket(ctx, messageID); err != nil {
-			dropped, queueErr := server.Store.QueueTransportDeletion(ctx, messageID, time.Now().UTC())
+			if ctx.Err() != nil {
+				return len(messageIDs)
+			}
+			dropped, queueErr := server.Store.QueueTransportDeletion(
+				ctx, receiver.ChatID, messageID, time.Now().UTC(),
+			)
 			if queueErr != nil {
 				server.Logger.Warn("не удалось обновить повтор удаления транспортного пакета",
 					"telegram_message_id", messageID, "error", queueErr)
@@ -572,8 +741,12 @@ func (server *Server) retryTransportDeletions(ctx context.Context, receiver *tel
 			}
 			continue
 		}
-		_ = server.Store.CompleteTransportDeletion(ctx, messageID)
+		if err := server.Store.CompleteTransportDeletion(ctx, receiver.ChatID, messageID); err != nil && ctx.Err() == nil {
+			server.Logger.Warn("не удалось завершить очередь удаления транспортного пакета",
+				"telegram_message_id", messageID, "error", err)
+		}
 	}
+	return len(messageIDs)
 }
 
 func (server *Server) deliveryLoop(ctx context.Context, service *application.DeliveryService) {
@@ -601,8 +774,20 @@ func (server *Server) deliveryLoop(ctx context.Context, service *application.Del
 }
 
 func (server *Server) gateways(cfg config.Server) map[string]application.DeliveryGateway {
+	return server.gatewaysWithTransportAPI(cfg, nil)
+}
+
+// gatewaysWithTransportAPI переиспользует клиент транспортного бота для
+// направлений с тем же token. Так ACK, очистка и конечная доставка разделяют
+// один sendLimiter и одну паузу RetryAfter Telegram.
+func (server *Server) gatewaysWithTransportAPI(
+	cfg config.Server, transportAPI *telegram.Client,
+) map[string]application.DeliveryGateway {
 	result := make(map[string]application.DeliveryGateway)
 	telegramAPIs := make(map[string]*telegram.Client)
+	if transportAPI != nil && strings.TrimSpace(cfg.Transport.BotToken) != "" {
+		telegramAPIs[cfg.Transport.BotToken] = transportAPI
+	}
 	for id, destination := range cfg.Destinations {
 		switch destination.Kind {
 		case domain.DestinationTelegram:

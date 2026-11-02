@@ -842,12 +842,31 @@ const (
 	transportDeletionMaxPending  = 10000
 )
 
+// EnqueueTransportDeletion идемпотентно передаёт удаление фоновому worker.
+// Повторная постановка не считается неудачной попыткой и не отодвигает уже
+// назначенное удаление, поэтому intake может сразу продолжить приём.
+func (store *ServerStore) EnqueueTransportDeletion(ctx context.Context, chatID, messageID int64) error {
+	if chatID == 0 || messageID <= 0 {
+		return errors.New("не заданы чат или транспортное сообщение")
+	}
+	now := time.Now().UTC()
+	_, err := store.db.ExecContext(ctx, `
+		INSERT INTO transport_cleanup_scoped(chat_id,message_id,created_at,next_attempt_at,attempts)
+		VALUES(?,?,?,?,0)
+		ON CONFLICT(chat_id,message_id) DO NOTHING`,
+		chatID, messageID, stamp(now), stamp(now))
+	if err != nil {
+		return fmt.Errorf("поставить транспортное сообщение в очередь очистки: %w", err)
+	}
+	return nil
+}
+
 // QueueTransportDeletion сохраняет неудавшееся удаление служебного сообщения.
 // Повтор ограничен числом попыток и временем, чтобы недоступный навсегда ID не
 // создавал бесконечную техническую очередь. dropped сообщает об исчерпании лимита.
-func (store *ServerStore) QueueTransportDeletion(ctx context.Context, messageID int64, now time.Time) (dropped bool, err error) {
-	if messageID <= 0 {
-		return false, errors.New("не задано транспортное сообщение")
+func (store *ServerStore) QueueTransportDeletion(ctx context.Context, chatID, messageID int64, now time.Time) (dropped bool, err error) {
+	if chatID == 0 || messageID <= 0 {
+		return false, errors.New("не заданы чат или транспортное сообщение")
 	}
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -855,18 +874,18 @@ func (store *ServerStore) QueueTransportDeletion(ctx context.Context, messageID 
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(ctx, `
-		INSERT INTO transport_cleanup(message_id,created_at,next_attempt_at,attempts)
-		VALUES(?,?,?,1)
-		ON CONFLICT(message_id) DO UPDATE SET
+		INSERT INTO transport_cleanup_scoped(chat_id,message_id,created_at,next_attempt_at,attempts)
+		VALUES(?,?,?,?,1)
+		ON CONFLICT(chat_id,message_id) DO UPDATE SET
 			next_attempt_at=excluded.next_attempt_at,
-			attempts=transport_cleanup.attempts+1`,
-		messageID, stamp(now), stamp(now.Add(time.Minute))); err != nil {
+			attempts=transport_cleanup_scoped.attempts+1`,
+		chatID, messageID, stamp(now), stamp(now.Add(time.Minute))); err != nil {
 		return false, err
 	}
 	result, err := tx.ExecContext(ctx, `
-		DELETE FROM transport_cleanup
-		WHERE message_id=? AND (attempts>=? OR created_at<?)`,
-		messageID, transportDeletionMaxAttempts, stamp(now.Add(-transportDeletionMaxAge)))
+		DELETE FROM transport_cleanup_scoped
+		WHERE message_id=? AND chat_id=? AND (attempts>=? OR created_at<?)`,
+		messageID, chatID, transportDeletionMaxAttempts, stamp(now.Add(-transportDeletionMaxAge)))
 	if err != nil {
 		return false, err
 	}
@@ -881,13 +900,14 @@ func (store *ServerStore) QueueTransportDeletion(ctx context.Context, messageID 
 }
 
 // DueTransportDeletions возвращает ограниченную очередь повторного удаления.
-func (store *ServerStore) DueTransportDeletions(ctx context.Context, now time.Time, limit int) ([]int64, error) {
-	if limit <= 0 || limit > 100 {
-		return nil, errors.New("некорректный размер очереди удаления")
+func (store *ServerStore) DueTransportDeletions(ctx context.Context, chatID int64, now time.Time, limit int) ([]int64, error) {
+	if chatID == 0 || limit <= 0 || limit > 100 {
+		return nil, errors.New("некорректные параметры очереди удаления")
 	}
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT message_id FROM transport_cleanup
-		WHERE next_attempt_at<=? ORDER BY next_attempt_at,message_id LIMIT ?`, stamp(now), limit)
+		SELECT message_id FROM transport_cleanup_scoped
+		WHERE chat_id=? AND next_attempt_at<=?
+		ORDER BY next_attempt_at,message_id LIMIT ?`, chatID, stamp(now), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -903,8 +923,9 @@ func (store *ServerStore) DueTransportDeletions(ctx context.Context, now time.Ti
 	return result, rows.Err()
 }
 
-func (store *ServerStore) CompleteTransportDeletion(ctx context.Context, messageID int64) error {
-	_, err := store.db.ExecContext(ctx, "DELETE FROM transport_cleanup WHERE message_id=?", messageID)
+func (store *ServerStore) CompleteTransportDeletion(ctx context.Context, chatID, messageID int64) error {
+	_, err := store.db.ExecContext(ctx,
+		"DELETE FROM transport_cleanup_scoped WHERE message_id=? AND chat_id=?", messageID, chatID)
 	return err
 }
 
@@ -917,9 +938,9 @@ func (store *ServerStore) PruneTransportDeletions(ctx context.Context, now time.
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `
-		DELETE FROM transport_cleanup
-		WHERE created_at<? OR message_id IN (
-			SELECT message_id FROM transport_cleanup
+		DELETE FROM transport_cleanup_scoped
+		WHERE created_at<? OR rowid IN (
+			SELECT rowid FROM transport_cleanup_scoped
 			ORDER BY created_at DESC, message_id DESC
 			LIMIT -1 OFFSET ?
 		)`, stamp(now.Add(-transportDeletionMaxAge)), transportDeletionMaxPending)

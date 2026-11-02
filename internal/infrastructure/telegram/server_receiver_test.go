@@ -102,7 +102,7 @@ func TestServerReceiverDiscardsInvalidSizeTransportFile(t *testing.T) {
 	receiver := ServerReceiver{
 		API: client, ChatID: -1001, MaxBytes: 1024,
 		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
-		Discard:   func(_ context.Context, messageID int64) { discarded.Store(messageID) },
+		Discard:   func(_ context.Context, messageID int64) error { discarded.Store(messageID); return nil },
 		Observe:   func(item application.TransportObservation) { observations = append(observations, item) },
 	}
 	packets, next, err := receiver.Packets(context.Background(), 0)
@@ -344,7 +344,7 @@ func TestServerReceiverRejectsUnauthenticatedPacketBeforeInbox(t *testing.T) {
 			}
 			return nil
 		},
-		Discard: func(_ context.Context, messageID int64) { discarded.Store(messageID) },
+		Discard: func(_ context.Context, messageID int64) error { discarded.Store(messageID); return nil },
 		Observe: func(item application.TransportObservation) { observations = append(observations, item) },
 	}
 	packets, next, err := receiver.Packets(context.Background(), 0)
@@ -431,7 +431,7 @@ func TestServerReceiverSkipsPermanentlyUnavailableFile(t *testing.T) {
 	receiver := ServerReceiver{
 		API: client, ChatID: -1001, MaxBytes: 1024,
 		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
-		Discard:   func(_ context.Context, messageID int64) { discarded.Store(messageID) },
+		Discard:   func(_ context.Context, messageID int64) error { discarded.Store(messageID); return nil },
 	}
 	packets, next, err := receiver.Packets(context.Background(), 0)
 	if err != nil {
@@ -477,6 +477,268 @@ func TestServerReceiverKeepsOffsetOnTemporaryFileFailure(t *testing.T) {
 	packets, next, err := receiver.Packets(context.Background(), 40)
 	if err == nil || len(packets) != 0 || next != 40 {
 		t.Fatalf("временная ошибка должна сохранить смещение: packets=%#v next=%d err=%v", packets, next, err)
+	}
+}
+
+// Скачивания действительно идут одновременно, но результат остаётся в
+// порядке update_id, даже когда более новые файлы заканчиваются раньше.
+func TestServerReceiverDownloadsConcurrentlyWithoutReordering(t *testing.T) {
+	t.Parallel()
+	updates := []any{
+		transportDocumentUpdate(61, 71, "file-1"),
+		transportDocumentUpdate(62, 72, "file-2"),
+		transportDocumentUpdate(63, 73, "file-3"),
+		transportDocumentUpdate(64, 74, "file-4"),
+		transportDocumentUpdate(65, 75, "file-5"),
+		transportDocumentUpdate(66, 76, "file-6"),
+	}
+	var active atomic.Int32
+	var maximum atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": updates})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			var input struct {
+				FileID string `json:"file_id"`
+			}
+			_ = json.NewDecoder(request.Body).Decode(&input)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"file_path": input.FileID + ".icevent"},
+			})
+		case strings.Contains(request.URL.Path, "/file/bot"):
+			current := active.Add(1)
+			for observed := maximum.Load(); current > observed && !maximum.CompareAndSwap(observed, current); observed = maximum.Load() {
+			}
+			defer active.Add(-1)
+			filename := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+			fileID := strings.TrimSuffix(filename, ".icevent")
+			delay := 20 * time.Millisecond
+			switch fileID {
+			case "file-1":
+				delay = 100 * time.Millisecond
+			case "file-2":
+				delay = 80 * time.Millisecond
+			case "file-3":
+				delay = 60 * time.Millisecond
+			case "file-4":
+				delay = 40 * time.Millisecond
+			}
+			time.Sleep(delay)
+			_, _ = writer.Write([]byte(fileID))
+		default:
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := ServerReceiver{
+		API: client, ChatID: -1001, MaxBytes: 1024,
+		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+	}
+	packets, next, err := receiver.Packets(context.Background(), 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != 67 || len(packets) != 6 {
+		t.Fatalf("неполный результат: packets=%#v next=%d", packets, next)
+	}
+	for index, packet := range packets {
+		wantUpdateID := int64(61 + index)
+		wantPayload := "file-" + string(rune('1'+index))
+		if packet.UpdateID != wantUpdateID || string(packet.Payload) != wantPayload {
+			t.Fatalf("пакет %d вышел не по update_id: update=%d payload=%q", index, packet.UpdateID, packet.Payload)
+		}
+	}
+	if maximum.Load() < 2 {
+		t.Fatalf("скачивания остались последовательными: maximum=%d", maximum.Load())
+	}
+	if maximum.Load() > serverReceiverDownloadWorkers {
+		t.Fatalf("превышен предел пула: maximum=%d", maximum.Load())
+	}
+}
+
+// Временная ошибка в середине не пропускает проблемный update_id и отменяет
+// зависшее скачивание справа от него, не задерживая безопасный префикс.
+func TestServerReceiverStopsAtTransientFailureInParallelBatch(t *testing.T) {
+	t.Parallel()
+	suffixStarted := make(chan struct{})
+	suffixCanceled := make(chan struct{})
+	var observations []application.TransportObservation
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": []any{
+				transportDocumentUpdate(71, 81, "first"),
+				transportDocumentUpdate(72, 82, "temporary"),
+				transportDocumentUpdate(73, 83, "third"),
+			}})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			var input struct {
+				FileID string `json:"file_id"`
+			}
+			_ = json.NewDecoder(request.Body).Decode(&input)
+			if input.FileID == "temporary" {
+				<-suffixStarted
+				writer.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(writer).Encode(map[string]any{
+					"ok": false, "error_code": 500, "description": "Internal Server Error",
+				})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"file_path": input.FileID + ".icevent"},
+			})
+		case strings.Contains(request.URL.Path, "/file/bot"):
+			if strings.HasSuffix(request.URL.Path, "/third.icevent") {
+				close(suffixStarted)
+				<-request.Context().Done()
+				close(suffixCanceled)
+				return
+			}
+			_, _ = writer.Write([]byte("first"))
+		default:
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := ServerReceiver{
+		API: client, ChatID: -1001, MaxBytes: 1024,
+		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+		Observe:   func(item application.TransportObservation) { observations = append(observations, item) },
+	}
+	packets, next, err := receiver.Packets(context.Background(), 70)
+	if err == nil || next != 72 || len(packets) != 1 || packets[0].UpdateID != 71 {
+		t.Fatalf("временная ошибка пропустила безопасный префикс: packets=%#v next=%d err=%v", packets, next, err)
+	}
+	select {
+	case <-suffixCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("зависшая загрузка после временного сбоя не отменена")
+	}
+	if len(observations) != 2 || observations[0].UpdateID != 71 ||
+		observations[0].Outcome != "awaiting_processing" || observations[1].UpdateID != 72 ||
+		observations[1].Outcome != "download_retry" {
+		t.Fatalf("обработка вышла за первый временный сбой: %#v", observations)
+	}
+}
+
+func TestServerReceiverParallelDownloadsHonorCancellation(t *testing.T) {
+	t.Parallel()
+	updates := []any{
+		transportDocumentUpdate(81, 91, "blocked-1"),
+		transportDocumentUpdate(82, 92, "blocked-2"),
+		transportDocumentUpdate(83, 93, "blocked-3"),
+		transportDocumentUpdate(84, 94, "blocked-4"),
+		transportDocumentUpdate(85, 95, "blocked-5"),
+		transportDocumentUpdate(86, 96, "blocked-6"),
+	}
+	allWorkersStarted := make(chan struct{})
+	var blocked atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/getUpdates"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": updates})
+		case strings.HasSuffix(request.URL.Path, "/getFile"):
+			var input struct {
+				FileID string `json:"file_id"`
+			}
+			_ = json.NewDecoder(request.Body).Decode(&input)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"ok": true, "result": map[string]any{"file_path": input.FileID + ".icevent"},
+			})
+		case strings.Contains(request.URL.Path, "/file/bot"):
+			if blocked.Add(1) == serverReceiverDownloadWorkers {
+				close(allWorkersStarted)
+			}
+			<-request.Context().Done()
+		default:
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := ServerReceiver{
+		API: client, ChatID: -1001, MaxBytes: 1024,
+		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return true, nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	type receiveResult struct {
+		packets []application.IncomingPacket
+		next    int64
+		err     error
+	}
+	resultChannel := make(chan receiveResult, 1)
+	go func() {
+		packets, next, err := receiver.Packets(ctx, 80)
+		resultChannel <- receiveResult{packets: packets, next: next, err: err}
+	}()
+	select {
+	case <-allWorkersStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("пул не запустил четыре ограниченных скачивания")
+	}
+	cancel()
+	select {
+	case result := <-resultChannel:
+		if result.err == nil || result.next != 80 || len(result.packets) != 0 {
+			t.Fatalf("отмена пропустила пакет: packets=%#v next=%d err=%v", result.packets, result.next, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("workers не завершились после отмены контекста")
+	}
+}
+
+func TestServerReceiverDoesNotAdvanceOffsetPastFailedDurableDiscard(t *testing.T) {
+	t.Parallel()
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasSuffix(request.URL.Path, "/getUpdates") {
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": []any{
+			transportDocumentUpdate(91, 101, "unauthorized-1"),
+			transportDocumentUpdate(92, 102, "unauthorized-2"),
+		}})
+	}))
+	defer api.Close()
+	client, err := NewWithBaseURL("123:token", api.URL, api.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	discardErr := errors.New("cleanup database unavailable")
+	var discarded []int64
+	receiver := ServerReceiver{
+		API: client, ChatID: -1001, MaxBytes: 1024,
+		Authorize: func(context.Context, application.IncomingPacket) (bool, error) { return false, nil },
+		Discard: func(_ context.Context, messageID int64) error {
+			discarded = append(discarded, messageID)
+			if messageID == 102 {
+				return discardErr
+			}
+			return nil
+		},
+	}
+	packets, next, err := receiver.Packets(context.Background(), 90)
+	if !errors.Is(err, discardErr) {
+		t.Fatalf("ошибка долговечной постановки потеряна: %v", err)
+	}
+	if len(packets) != 0 || next != 92 {
+		t.Fatalf("offset прошёл пакет без cleanup: packets=%#v next=%d", packets, next)
+	}
+	if len(discarded) != 2 || discarded[0] != 101 || discarded[1] != 102 {
+		t.Fatalf("неожиданные удаления: %#v", discarded)
 	}
 }
 

@@ -41,6 +41,11 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 	}); err != nil {
 		return nil, err
 	}
+	// Совместимая транспортная схема намеренно не повышает schema_migrations:
+	// rc125 игнорирует добавочные поля/таблицы и может открыть БД после возврата.
+	if err := ensureTransportInboxLeaseSchema(ctx, db); err != nil {
+		return nil, err
+	}
 	for _, item := range []struct{ table, column string }{
 		{"server_clients", "key_bytes"},
 		{"received_events", "payload_json"},
@@ -58,6 +63,9 @@ func NewServerStore(ctx context.Context, db *sql.DB) (*ServerStore, error) {
 		return nil, err
 	}
 	if err := backfillSourceRevisionBarriers(ctx, db); err != nil {
+		return nil, err
+	}
+	if err := backfillTransportSenderBotIDs(ctx, db); err != nil {
 		return nil, err
 	}
 	if err := repairIncidentTimes(ctx, db); err != nil {

@@ -74,7 +74,7 @@ func transportDecodeCounts(t *testing.T, ctx context.Context, db *sql.DB) (int, 
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rejected_packets").Scan(&rejected); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup").Scan(&cleanup); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM transport_cleanup_scoped").Scan(&cleanup); err != nil {
 		t.Fatal(err)
 	}
 	return rejected, cleanup

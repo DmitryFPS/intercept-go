@@ -9,10 +9,61 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"intercept/internal/application"
 )
+
+const serverReceiverDownloadWorkers = 4
+
+type serverReceiveDisposition uint8
+
+const (
+	receiveSkip serverReceiveDisposition = iota
+	receiveMissingSender
+	receiveNonTransport
+	receiveOtherDocument
+	receiveInvalidSize
+	receiveUnauthorized
+	receiveAuthorizationRetry
+	receiveDownload
+)
+
+type serverReceiveItem struct {
+	updateID    int64
+	message     *Message
+	edited      bool
+	filename    string
+	disposition serverReceiveDisposition
+	packet      application.IncomingPacket
+	err         error
+	download    serverDownloadResult
+}
+
+type serverDownloadStage uint8
+
+const (
+	downloadGetFile serverDownloadStage = iota
+	downloadFile
+)
+
+type serverDownloadResult struct {
+	payload    []byte
+	receivedAt time.Time
+	stage      serverDownloadStage
+	err        error
+}
+
+type serverDownloadJob struct {
+	index int
+	ctx   context.Context
+}
+
+type serverDownloadCompletion struct {
+	index  int
+	result serverDownloadResult
+}
 
 // ServerReceiver получает только файлы из настроенной транспортной группы.
 type ServerReceiver struct {
@@ -26,8 +77,9 @@ type ServerReceiver struct {
 	// долговечной записи. Временная ошибка оставляет Telegram offset прежним.
 	Authenticate func(context.Context, application.IncomingPacket) error
 	// Discard передаёт удаление служебного файла владельцу долговечной очереди
-	// очистки. Без обработчика сохраняется совместимый однократный вызов API.
-	Discard func(context.Context, int64)
+	// очистки. Ошибка запрещает продвигать Telegram offset. Без обработчика
+	// сохраняется совместимый однократный вызов API.
+	Discard func(context.Context, int64) error
 	// Observe неблокирующе передаёт техническую классификацию владельцу журнала.
 	// Ошибка журнала не должна менять приём или продвижение Telegram offset.
 	Observe func(application.TransportObservation)
@@ -39,77 +91,56 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 	if err != nil {
 		return nil, offset, err
 	}
-	next := offset
-	var packets []application.IncomingPacket
+	items := receiver.prepareReceiveItems(ctx, updates)
+	receiver.downloadReceiveItems(ctx, items)
+	return receiver.finishReceiveItems(ctx, items, offset)
+}
+
+// prepareReceiveItems разбирает метаданные строго в порядке Telegram и не
+// скачивает содержимое до проверки зарегистрированного отправителя. При
+// временной ошибке авторизации более новые обновления даже не планируются:
+// безопасный префикс останется тем же, что и при последовательном приёме.
+func (receiver *ServerReceiver) prepareReceiveItems(ctx context.Context, updates []Update) []serverReceiveItem {
+	items := make([]serverReceiveItem, 0, len(updates))
 	for _, update := range updates {
-		// При ошибке этого обновления уже скачанный префикс можно сохранить
-		// вместе со смещением до него, не пропуская проблемный пакет.
-		processedUntil := next
-		if update.UpdateID >= next {
-			next = update.UpdateID + 1
-		}
+		item := serverReceiveItem{updateID: update.UpdateID}
 		message := update.Message
-		edited := false
 		if message == nil {
 			message = update.ChannelPost
 		}
 		if message == nil {
-			message, edited = update.EditedMessage, update.EditedMessage != nil
+			message, item.edited = update.EditedMessage, update.EditedMessage != nil
 		}
 		if message == nil {
-			message, edited = update.EditedChannelPost, update.EditedChannelPost != nil
+			message, item.edited = update.EditedChannelPost, update.EditedChannelPost != nil
 		}
+		item.message = message
 		if message == nil || message.Chat.ID != receiver.ChatID {
+			items = append(items, item)
 			continue
 		}
-		observation := receiver.observation(update.UpdateID, message)
 		if message.From == nil {
-			observation.MessageKind, observation.Outcome, observation.Reason, observation.Rank =
-				"unknown", "ignored_missing_sender", "Telegram не указал отправителя", 100
-			receiver.observe(observation)
+			item.disposition = receiveMissingSender
+			items = append(items, item)
 			continue
 		}
 		if message.Document == nil {
-			observation.MessageKind = "user_media"
-			if strings.TrimSpace(message.Text) != "" || strings.TrimSpace(message.Caption) != "" {
-				observation.MessageKind = "user_text"
-			}
-			if message.From.IsBot {
-				observation.MessageKind = "bot_non_transport"
-			}
-			if edited {
-				observation.MessageKind += "_edited"
-			}
-			observation.Outcome, observation.Reason, observation.Rank =
-				"ignored_non_transport", "Не является служебным пакетом EAVC Connect", 100
-			receiver.observe(observation)
+			item.disposition = receiveNonTransport
+			items = append(items, item)
 			continue
 		}
-		filename := strings.ToLower(message.Document.FileName)
-		if !message.From.IsBot || (!strings.HasSuffix(filename, ".icevent") && !strings.HasSuffix(filename, ".icprobe")) {
-			observation.MessageKind, observation.Outcome, observation.Reason, observation.Rank =
-				"other_document", "ignored_non_transport", "Файл не является пакетом зарегистрированного бота EAVC Connect", 100
-			if edited {
-				observation.MessageKind = "other_document_edited"
-			}
-			receiver.observe(observation)
+		item.filename = strings.ToLower(message.Document.FileName)
+		if !message.From.IsBot || (!strings.HasSuffix(item.filename, ".icevent") && !strings.HasSuffix(item.filename, ".icprobe")) {
+			item.disposition = receiveOtherDocument
+			items = append(items, item)
 			continue
-		}
-		observation.MessageKind = "event_packet"
-		if strings.HasSuffix(filename, ".icprobe") {
-			observation.MessageKind = "probe_packet"
 		}
 		if message.Document.FileSize <= 0 || message.Document.FileSize > receiver.MaxBytes {
-			observation.Outcome, observation.Reason, observation.Rank =
-				"ignored_invalid_size", "Недопустимый размер служебного файла", 100
-			receiver.observe(observation)
-			// Размер уже известен из метаданных Telegram, поэтому такой пакет
-			// окончательно невалиден и не должен навсегда оставаться в служебной
-			// группе. Discard сохраняет неудавшееся удаление в долговечной очереди.
-			receiver.discardPacket(ctx, message.MessageID)
+			item.disposition = receiveInvalidSize
+			items = append(items, item)
 			continue
 		}
-		packet := application.IncomingPacket{
+		item.packet = application.IncomingPacket{
 			UpdateID:    update.UpdateID,
 			SenderBotID: message.From.ID, SenderBotUsername: message.From.Username,
 			ChatID: message.Chat.ID, ThreadID: message.MessageThreadID,
@@ -117,54 +148,209 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			SentAt:    time.Unix(message.Date, 0).UTC(),
 		}
 		if receiver.Authorize != nil {
-			allowed, err := receiver.Authorize(ctx, packet)
-			if err != nil {
-				observation.Outcome, observation.Reason, observation.Rank =
-					"authorization_retry", "Временная ошибка проверки отправителя", 20
-				receiver.observe(observation)
-				return packets, processedUntil, fmt.Errorf("проверить отправителя пакета: %w", err)
+			allowed, authorizeErr := receiver.Authorize(ctx, item.packet)
+			if authorizeErr != nil {
+				item.disposition = receiveAuthorizationRetry
+				item.err = authorizeErr
+				items = append(items, item)
+				break
 			}
 			if !allowed {
-				observation.Outcome, observation.Reason, observation.Rank =
-					"ignored_unauthorized", "Бот или тема не зарегистрированы как рабочая точка", 100
-				receiver.observe(observation)
-				// Неизвестный бот не заставит сервер скачивать произвольные файлы.
-				receiver.discardPacket(ctx, message.MessageID)
+				item.disposition = receiveUnauthorized
+				items = append(items, item)
 				continue
 			}
 		}
-		file, err := receiver.API.GetFile(ctx, message.Document.FileID)
-		if err != nil {
-			if permanentTransportFileError(err) {
+		item.disposition = receiveDownload
+		items = append(items, item)
+	}
+	return items
+}
+
+// downloadReceiveItems ограничивает число одновременных пар getFile/download
+// четырьмя. Временная ошибка отменяет только более новые загрузки: безопасный
+// префикс завершается, а зависший suffix не задерживает возврат до HTTP timeout.
+func (receiver *ServerReceiver) downloadReceiveItems(ctx context.Context, items []serverReceiveItem) {
+	jobs := make(chan serverDownloadJob, len(items))
+	results := make(chan serverDownloadCompletion, len(items))
+	cancels := make(map[int]context.CancelFunc)
+	jobCount := 0
+	for index := range items {
+		if items[index].disposition == receiveDownload {
+			jobContext, cancel := context.WithCancel(ctx)
+			cancels[index] = cancel
+			jobs <- serverDownloadJob{index: index, ctx: jobContext}
+			jobCount++
+		}
+	}
+	close(jobs)
+	defer func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}()
+	if jobCount == 0 {
+		return
+	}
+	workerCount := min(serverReceiverDownloadWorkers, jobCount)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for job := range jobs {
+				result := serverDownloadResult{stage: downloadGetFile}
+				if ctxErr := job.ctx.Err(); ctxErr != nil {
+					result.err = ctxErr
+					results <- serverDownloadCompletion{index: job.index, result: result}
+					continue
+				}
+				file, getFileErr := receiver.API.GetFile(job.ctx, items[job.index].message.Document.FileID)
+				if getFileErr != nil {
+					result.err = getFileErr
+					results <- serverDownloadCompletion{index: job.index, result: result}
+					continue
+				}
+				result.stage = downloadFile
+				result.payload, result.err = receiver.API.DownloadFile(job.ctx, file.FilePath, receiver.MaxBytes)
+				if result.err == nil {
+					result.receivedAt = time.Now().UTC()
+				}
+				results <- serverDownloadCompletion{index: job.index, result: result}
+			}
+		}()
+	}
+	blockingIndex := len(items)
+	for range jobCount {
+		completion := <-results
+		items[completion.index].download = completion.result
+		if completion.index >= blockingIndex || completion.result.err == nil ||
+			permanentTransportFileError(completion.result.err) || errors.Is(completion.result.err, context.Canceled) {
+			continue
+		}
+		blockingIndex = completion.index
+		for index, cancel := range cancels {
+			if index > blockingIndex {
+				cancel()
+			}
+		}
+	}
+	workers.Wait()
+}
+
+// finishReceiveItems применяет результаты в исходном порядке update_id. Даже
+// если более новый файл успел скачаться первым, он не попадёт в packets и не
+// продвинет offset через временную ошибку более старого обновления.
+func (receiver *ServerReceiver) finishReceiveItems(ctx context.Context, items []serverReceiveItem, offset int64) ([]application.IncomingPacket, int64, error) {
+	next := offset
+	var packets []application.IncomingPacket
+	for _, item := range items {
+		// При ошибке этого обновления уже скачанный префикс можно сохранить
+		// вместе со смещением до него, не пропуская проблемный пакет.
+		processedUntil := next
+		itemNext := next
+		if item.updateID >= itemNext {
+			itemNext = item.updateID + 1
+		}
+		message := item.message
+		if item.disposition == receiveSkip {
+			next = itemNext
+			continue
+		}
+		observation := receiver.observation(item.updateID, message)
+		switch item.disposition {
+		case receiveMissingSender:
+			observation.MessageKind, observation.Outcome, observation.Reason, observation.Rank =
+				"unknown", "ignored_missing_sender", "Telegram не указал отправителя", 100
+			receiver.observe(observation)
+			next = itemNext
+			continue
+		case receiveNonTransport:
+			observation.MessageKind = "user_media"
+			if strings.TrimSpace(message.Text) != "" || strings.TrimSpace(message.Caption) != "" {
+				observation.MessageKind = "user_text"
+			}
+			if message.From.IsBot {
+				observation.MessageKind = "bot_non_transport"
+			}
+			if item.edited {
+				observation.MessageKind += "_edited"
+			}
+			observation.Outcome, observation.Reason, observation.Rank =
+				"ignored_non_transport", "Не является служебным пакетом EAVC Connect", 100
+			receiver.observe(observation)
+			next = itemNext
+			continue
+		case receiveOtherDocument:
+			observation.MessageKind, observation.Outcome, observation.Reason, observation.Rank =
+				"other_document", "ignored_non_transport", "Файл не является пакетом зарегистрированного бота EAVC Connect", 100
+			if item.edited {
+				observation.MessageKind = "other_document_edited"
+			}
+			receiver.observe(observation)
+			next = itemNext
+			continue
+		}
+		observation.MessageKind = "event_packet"
+		if strings.HasSuffix(item.filename, ".icprobe") {
+			observation.MessageKind = "probe_packet"
+		}
+		switch item.disposition {
+		case receiveInvalidSize:
+			observation.Outcome, observation.Reason, observation.Rank =
+				"ignored_invalid_size", "Недопустимый размер служебного файла", 100
+			receiver.observe(observation)
+			// Размер уже известен из метаданных Telegram, поэтому такой пакет
+			// окончательно невалиден и не должен навсегда оставаться в служебной
+			// группе. Discard сохраняет неудавшееся удаление в долговечной очереди.
+			if err := receiver.discardPacket(ctx, message.MessageID); err != nil {
+				return packets, processedUntil, fmt.Errorf("поставить невалидный пакет в очередь очистки: %w", err)
+			}
+			next = itemNext
+			continue
+		case receiveUnauthorized:
+			observation.Outcome, observation.Reason, observation.Rank =
+				"ignored_unauthorized", "Бот или тема не зарегистрированы как рабочая точка", 100
+			receiver.observe(observation)
+			// Неизвестный бот не заставит сервер скачивать произвольные файлы.
+			if err := receiver.discardPacket(ctx, message.MessageID); err != nil {
+				return packets, processedUntil, fmt.Errorf("поставить пакет неизвестного бота в очередь очистки: %w", err)
+			}
+			next = itemNext
+			continue
+		case receiveAuthorizationRetry:
+			observation.Outcome, observation.Reason, observation.Rank =
+				"authorization_retry", "Временная ошибка проверки отправителя", 20
+			receiver.observe(observation)
+			return packets, processedUntil, fmt.Errorf("проверить отправителя пакета: %w", item.err)
+		}
+		packet := item.packet
+		if item.download.err != nil {
+			if permanentTransportFileError(item.download.err) {
 				observation.Outcome, observation.Reason, observation.Rank =
 					"unavailable_file", "Telegram больше не отдаёт служебный файл; Клиент повторит пакет", 100
 				receiver.observe(observation)
-				receiver.skipUnavailableFile(ctx, packet, err)
+				if err := receiver.skipUnavailableFile(ctx, packet, item.download.err); err != nil {
+					return packets, processedUntil, fmt.Errorf("поставить недоступный пакет в очередь очистки: %w", err)
+				}
+				next = itemNext
 				continue
 			}
-			observation.Outcome, observation.Reason, observation.Rank =
-				"download_retry", "Временная ошибка получения служебного файла", 20
-			receiver.observe(observation)
-			return packets, processedUntil, fmt.Errorf("получить пакет Telegram: %w", err)
-		}
-		payload, err := receiver.API.DownloadFile(ctx, file.FilePath, receiver.MaxBytes)
-		if err != nil {
-			if permanentTransportFileError(err) {
-				observation.Outcome, observation.Reason, observation.Rank =
-					"unavailable_file", "Telegram больше не отдаёт служебный файл; Клиент повторит пакет", 100
-				receiver.observe(observation)
-				receiver.skipUnavailableFile(ctx, packet, err)
-				continue
+			reason := "Временная ошибка скачивания служебного файла"
+			resultErr := item.download.err
+			if item.download.stage == downloadGetFile {
+				reason = "Временная ошибка получения служебного файла"
+				resultErr = fmt.Errorf("получить пакет Telegram: %w", resultErr)
 			}
 			observation.Outcome, observation.Reason, observation.Rank =
-				"download_retry", "Временная ошибка скачивания служебного файла", 20
+				"download_retry", reason, 20
 			receiver.observe(observation)
-			return packets, processedUntil, err
+			return packets, processedUntil, resultErr
 		}
-		packet.Payload = payload
-		packet.ReceivedAt = time.Now().UTC()
-		if strings.HasSuffix(filename, ".icprobe") {
-			decoder := json.NewDecoder(strings.NewReader(string(payload)))
+		packet.Payload = item.download.payload
+		packet.ReceivedAt = item.download.receivedAt
+		if strings.HasSuffix(item.filename, ".icprobe") {
+			decoder := json.NewDecoder(strings.NewReader(string(packet.Payload)))
 			decoder.DisallowUnknownFields()
 			var probe probePayload
 			decodeErr := decoder.Decode(&probe)
@@ -176,7 +362,10 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 				observation.Outcome, observation.Reason, observation.Rank =
 					"invalid_probe", "Повреждённый или неподписанный контрольный пакет", 100
 				receiver.observe(observation)
-				receiver.discardPacket(ctx, message.MessageID)
+				if err := receiver.discardPacket(ctx, message.MessageID); err != nil {
+					return packets, processedUntil, fmt.Errorf("поставить повреждённый probe в очередь очистки: %w", err)
+				}
+				next = itemNext
 				continue
 			}
 			probeAt, err := time.Parse(time.RFC3339, probe.SentAt)
@@ -184,7 +373,10 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 				observation.Outcome, observation.Reason, observation.Rank =
 					"invalid_probe", "Некорректное время контрольного пакета", 100
 				receiver.observe(observation)
-				receiver.discardPacket(ctx, message.MessageID)
+				if err := receiver.discardPacket(ctx, message.MessageID); err != nil {
+					return packets, processedUntil, fmt.Errorf("поставить probe с неверным временем в очередь очистки: %w", err)
+				}
+				next = itemNext
 				continue
 			}
 			packet.ProbeID = probe.ProbeID
@@ -204,7 +396,10 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 				observation.Outcome, observation.Reason, observation.Rank =
 					"rejected_authentication", "Служебный пакет не прошёл проверку подлинности", 200
 				receiver.observe(observation)
-				receiver.discardPacket(ctx, message.MessageID)
+				if err := receiver.discardPacket(ctx, message.MessageID); err != nil {
+					return packets, processedUntil, fmt.Errorf("поставить неподлинный пакет в очередь очистки: %w", err)
+				}
+				next = itemNext
 				continue
 			}
 		}
@@ -212,6 +407,7 @@ func (receiver *ServerReceiver) Packets(ctx context.Context, offset int64) ([]ap
 			"awaiting_processing", "Служебный пакет передан обработчику", 10
 		receiver.observe(observation)
 		packets = append(packets, packet)
+		next = itemNext
 	}
 	return packets, next, nil
 }
@@ -251,7 +447,10 @@ func permanentTransportFileError(err error) bool {
 	return false
 }
 
-func (receiver *ServerReceiver) skipUnavailableFile(ctx context.Context, packet application.IncomingPacket, err error) {
+func (receiver *ServerReceiver) skipUnavailableFile(ctx context.Context, packet application.IncomingPacket, err error) error {
+	if discardErr := receiver.discardPacket(ctx, packet.MessageID); discardErr != nil {
+		return discardErr
+	}
 	if receiver.Logger != nil {
 		receiver.Logger.Warn(
 			"недоступный транспортный файл пропущен; рабочая точка повторит отправку",
@@ -260,18 +459,21 @@ func (receiver *ServerReceiver) skipUnavailableFile(ctx context.Context, packet 
 			"error", err,
 		)
 	}
-	receiver.discardPacket(ctx, packet.MessageID)
+	return nil
 }
 
-func (receiver *ServerReceiver) discardPacket(ctx context.Context, messageID int64) {
+func (receiver *ServerReceiver) discardPacket(ctx context.Context, messageID int64) error {
 	if receiver.Discard != nil {
-		receiver.Discard(ctx, messageID)
-		return
+		return receiver.Discard(ctx, messageID)
 	}
-	if err := receiver.DeletePacket(ctx, messageID); err != nil && receiver.Logger != nil && ctx.Err() == nil {
-		receiver.Logger.Warn("не удалось удалить отброшенный транспортный файл",
-			"telegram_message_id", messageID, "error", err)
+	if err := receiver.DeletePacket(ctx, messageID); err != nil {
+		if receiver.Logger != nil && ctx.Err() == nil {
+			receiver.Logger.Warn("не удалось удалить отброшенный транспортный файл",
+				"telegram_message_id", messageID, "error", err)
+		}
+		return err
 	}
+	return nil
 }
 
 func validProbeID(value string) bool {
