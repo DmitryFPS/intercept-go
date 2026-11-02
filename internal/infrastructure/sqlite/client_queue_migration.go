@@ -12,12 +12,7 @@ import (
 
 // NewClientQueue применяет миграции и открывает долговечную очередь точки.
 func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
-	if err := Migrate(ctx, db, []string{
-		clientMigration, clientExpiryMigration, clientSourceVersionMigration,
-		clientStreamMigration, clientStreamRepairMigration, clientSourceStreamMigration,
-		clientClearedEventsMigration, clientTimeStateMigration, clientTimeStateRetentionMigration,
-		clientConfirmedTransportMigration,
-	}); err != nil {
+	if err := Migrate(ctx, db, clientMigrationPlan()); err != nil {
 		return nil, err
 	}
 	if err := protectExistingColumn(ctx, db, "client_events", "payload_json"); err != nil {
@@ -30,6 +25,15 @@ func NewClientQueue(ctx context.Context, db *sql.DB) (*ClientQueue, error) {
 		return nil, err
 	}
 	return &ClientQueue{db: db}, nil
+}
+
+func clientMigrationPlan() []string {
+	return []string{
+		clientMigration, clientExpiryMigration, clientSourceVersionMigration,
+		clientStreamMigration, clientStreamRepairMigration, clientSourceStreamMigration,
+		clientClearedEventsMigration, clientTimeStateMigration, clientTimeStateRetentionMigration,
+		clientConfirmedTransportMigration, clientEnqueueSequenceMigration,
+	}
 }
 
 // cleanupRC88LegacyBlockArtifacts удаляет только ложные локальные записи,

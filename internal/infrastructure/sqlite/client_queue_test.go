@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,6 +133,436 @@ func TestClientQueueSeparatesBlocksButPreservesRecordOrder(t *testing.T) {
 	pending, err = queue.Pending(ctx, 10, now.Add(2*time.Minute))
 	if err != nil || len(pending) != 1 || pending[0].Event.ID != second.ID {
 		t.Fatalf("второй блок не вышел после первого: %#v err=%v", pending, err)
+	}
+}
+
+// Несколько блоков одной записи могут получить одинаковые CreatedAt и общий
+// миллисекундный префикс UUIDv7. Случайная часть UUID не должна становиться
+// порядком отправки после сохранения очереди или перезапуска клиента.
+func TestClientQueuePreservesEnqueueOrderForSameTimestampUUIDv7(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := OpenState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeEvent := func(id, blockUUID, text string, sequence int) domain.Event {
+		return domain.Event{
+			ID: id, ClientID: "vesyoloe", CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+			Source:   domain.SourceRecord{ID: 1203, UUID: "source-order", UpdatedAt: "record-version"},
+			Position: domain.Position{UnitName: "1 аэмб 68 оаэмбр"}, Mode: domain.SourceModeNormal,
+			Content: text, ContentDigest: "digest-" + blockUUID, SourceBlockUUID: blockUUID,
+			Blocks: []domain.ContentBlock{{
+				UUID: blockUUID, Sequence: sequence, Text: text,
+				UpdatedAt: "2026-11-01 18:33:04",
+			}},
+		}
+	}
+	events := []domain.Event{
+		makeEvent("01a197be-e468-7c80-a793-7acc4b3c6eeb", "block-1819", "18.19\n-Первый", 0),
+		makeEvent("01a197be-e468-7bb9-9313-20c3c1704f20", "block-1826", "18.26\n-Второй", 1),
+		makeEvent("01a197be-e468-72f8-a4ed-d1f1876fb5f9", "block-1833", "18.33\n-Третий", 2),
+	}
+	for _, event := range events {
+		if inserted, enqueueErr := queue.Enqueue(ctx, event); enqueueErr != nil || !inserted {
+			t.Fatalf("поставить %s: inserted=%v err=%v", event.ID, inserted, enqueueErr)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = OpenState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err = NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, want := range events {
+		pending, pendingErr := queue.Pending(ctx, 1, now.Add(time.Minute))
+		if pendingErr != nil || len(pending) != 1 || pending[0].Event.ID != want.ID {
+			t.Fatalf("шаг %d: got=%#v want=%s err=%v", index, pending, want.ID, pendingErr)
+		}
+		if err := queue.MarkAcknowledged(ctx, want.ID, now.Add(time.Duration(index+1)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Правка и удаление того же блока обязаны идти после его создания, даже когда
+// все три состояния получили одну отметку времени и UUID сортируются наоборот.
+func TestClientQueuePreservesCreateEditDeleteOrderAtSameTimestamp(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := domain.Event{
+		ID: "01a197be-e468-7c80-a793-7acc4b3c6eeb", ClientID: "vesyoloe",
+		CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source:   domain.SourceRecord{ID: 1203, UUID: "source-edit-delete", UpdatedAt: "version-1"},
+		Position: domain.Position{UnitName: "1 аэмб 68 оаэмбр"}, Mode: domain.SourceModeNormal,
+		Content: "18.19\n-Исходный текст", ContentDigest: "digest-create", SourceBlockUUID: "block-a",
+		Blocks: []domain.ContentBlock{{UUID: "block-a", Text: "18.19\n-Исходный текст", UpdatedAt: "2026-11-01 18:19:00"}},
+	}
+	edit := base
+	edit.ID = "01a197be-e468-7bb9-9313-20c3c1704f20"
+	edit.Source.UpdatedAt = "version-2"
+	edit.Content = "18.19\n-Исправленный текст"
+	edit.ContentDigest = "digest-edit"
+	edit.Blocks = []domain.ContentBlock{{UUID: "block-a", Text: edit.Content, UpdatedAt: "2026-11-01 18:26:00"}}
+	deleted := edit
+	deleted.ID = "01a197be-e468-72f8-a4ed-d1f1876fb5f9"
+	deleted.Source.UpdatedAt = "version-3"
+	deleted.Content = ""
+	deleted.ContentDigest = "digest-delete"
+	deleted.SourceBlockDeleted = true
+	deleted.Blocks = []domain.ContentBlock{{UUID: "block-a", DeletedAt: "2026-11-01 18:33:00"}}
+
+	events := []domain.Event{base, edit, deleted}
+	for _, event := range events {
+		if inserted, enqueueErr := queue.Enqueue(ctx, event); enqueueErr != nil || !inserted {
+			t.Fatalf("поставить %s: inserted=%v err=%v", event.ID, inserted, enqueueErr)
+		}
+	}
+	for index, want := range events {
+		pending, pendingErr := queue.Pending(ctx, 1, now.Add(time.Minute))
+		if pendingErr != nil || len(pending) != 1 {
+			t.Fatalf("шаг %d: got=%#v err=%v", index, pending, pendingErr)
+		}
+		got := pending[0].Event
+		if got.ID != want.ID || got.Content != want.Content || got.SourceBlockDeleted != want.SourceBlockDeleted {
+			t.Fatalf("шаг %d: got=(%s,%q,%v) want=(%s,%q,%v)", index,
+				got.ID, got.Content, got.SourceBlockDeleted, want.ID, want.Content, want.SourceBlockDeleted)
+		}
+		if err := queue.MarkAcknowledged(ctx, got.ID, now.Add(time.Duration(index+1)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// SQLite сам выдаёт enqueue_seq внутри INSERT; параллельные циклы чтения не
+// должны получить одинаковые номера и потерять событие из-за UNIQUE-конфликта.
+func TestClientQueueAssignsUniqueEnqueueSequenceConcurrently(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const eventCount = 24
+	errors := make(chan error, eventCount)
+	var wait sync.WaitGroup
+	for index := 0; index < eventCount; index++ {
+		index := index
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			event := domain.Event{
+				ID: fmt.Sprintf("concurrent-%02d", index), ClientID: "vesyoloe",
+				CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+				Source:   domain.SourceRecord{UUID: fmt.Sprintf("source-%02d", index)},
+				Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+				Content: "блок", ContentDigest: fmt.Sprintf("digest-%02d", index),
+			}
+			inserted, enqueueErr := queue.Enqueue(ctx, event)
+			if enqueueErr != nil {
+				errors <- enqueueErr
+				return
+			}
+			if !inserted {
+				errors <- fmt.Errorf("событие %s не вставлено", event.ID)
+			}
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for enqueueErr := range errors {
+		t.Fatal(enqueueErr)
+	}
+	var total, distinct int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COUNT(DISTINCT enqueue_seq) FROM client_events`).Scan(&total, &distinct); err != nil {
+		t.Fatal(err)
+	}
+	if total != eventCount || distinct != eventCount {
+		t.Fatalf("последовательности: total=%d distinct=%d want=%d", total, distinct, eventCount)
+	}
+}
+
+// Граничная запись EAVC перечитывается на каждом цикле. Точный дубль должен
+// отсеиваться до AUTOINCREMENT, чтобы не создавать постоянные записи в WAL.
+func TestClientQueueDuplicateDoesNotAdvanceEnqueueSequence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.Event{
+		ID: "event-original", ClientID: "vesyoloe", CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source:   domain.SourceRecord{UUID: "source-duplicate", UpdatedAt: "source-version"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "блок", ContentDigest: "digest-duplicate",
+	}
+	if inserted, enqueueErr := queue.Enqueue(ctx, event); enqueueErr != nil || !inserted {
+		t.Fatalf("первая вставка: inserted=%v err=%v", inserted, enqueueErr)
+	}
+	var before int64
+	if err := db.QueryRowContext(ctx, `SELECT seq FROM sqlite_sequence WHERE name='client_events'`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := event
+	duplicate.ID = "event-duplicate"
+	if inserted, enqueueErr := queue.Enqueue(ctx, duplicate); enqueueErr != nil || inserted {
+		t.Fatalf("точный дубль: inserted=%v err=%v", inserted, enqueueErr)
+	}
+	var after int64
+	if err := db.QueryRowContext(ctx, `SELECT seq FROM sqlite_sequence WHERE name='client_events'`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("дубль сдвинул AUTOINCREMENT: before=%d after=%d", before, after)
+	}
+}
+
+// Обновление существующего клиента восстанавливает порядок старой очереди по
+// порядку вставки строк, не доверяя лексикографическому порядку event_id.
+func TestClientQueueMigrationBackfillsEnqueueOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	migrations := clientMigrationPlan()
+	if err := Migrate(ctx, db, migrations[:len(migrations)-1]); err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{"event-z", "event-a", "event-m"}
+	storedPayloads := make(map[string][]byte, len(ids))
+	for index, id := range ids {
+		event := domain.Event{
+			ID: id, ClientID: "vesyoloe", CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+			Source:   domain.SourceRecord{ID: 42, UUID: "legacy-source"},
+			Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+			Content: "блок", ContentDigest: "digest-" + id,
+		}
+		plain, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		payload, protectErr := protectDatabaseValue(plain)
+		if protectErr != nil {
+			t.Fatal(protectErr)
+		}
+		storedPayloads[id] = append([]byte(nil), payload...)
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO client_events(
+				event_id, source_uuid, source_version, stream_key, content_digest,
+				payload_json, state, next_attempt_at, expires_at, created_at
+			) VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+			id, event.Source.UUID, now.Format(time.RFC3339Nano), "source:"+event.Source.UUID,
+			event.ContentDigest, payload, now.Format(time.RFC3339Nano),
+			now.Add(time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+			t.Fatalf("legacy insert %d: %v", index, err)
+		}
+	}
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previousSequence int64
+	for _, id := range ids {
+		var sequence int64
+		var payload []byte
+		var state string
+		var attempts int
+		if err := db.QueryRowContext(ctx, `
+			SELECT enqueue_seq, payload_json, state, attempts
+			FROM client_events WHERE event_id=?`, id).Scan(&sequence, &payload, &state, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		if sequence <= previousSequence || !bytes.Equal(payload, storedPayloads[id]) || state != "pending" || attempts != 0 {
+			t.Fatalf("миграция %s: seq=%d previous=%d payload_equal=%v state=%s attempts=%d",
+				id, sequence, previousSequence, bytes.Equal(payload, storedPayloads[id]), state, attempts)
+		}
+		previousSequence = sequence
+	}
+	for index, want := range ids {
+		pending, pendingErr := queue.Pending(ctx, 1, now.Add(time.Minute))
+		if pendingErr != nil || len(pending) != 1 || pending[0].Event.ID != want {
+			t.Fatalf("миграция, шаг %d: got=%#v want=%s err=%v", index, pending, want, pendingErr)
+		}
+		if err := queue.MarkAcknowledged(ctx, want, now.Add(time.Duration(index+1)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM client_events WHERE event_id=?`, ids[len(ids)-1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+	newEvent := domain.Event{
+		ID: "event-new", ClientID: "vesyoloe", CreatedAt: now, ObservedAt: now, ExpiresAt: now.Add(time.Hour),
+		Source:   domain.SourceRecord{ID: 42, UUID: "legacy-source"},
+		Position: domain.Position{UnitName: "позиция"}, Mode: domain.SourceModeNormal,
+		Content: "новый блок", ContentDigest: "digest-new",
+	}
+	if inserted, enqueueErr := queue.Enqueue(ctx, newEvent); enqueueErr != nil || !inserted {
+		t.Fatalf("вставить после удаления и VACUUM: inserted=%v err=%v", inserted, enqueueErr)
+	}
+	var newSequence int64
+	if err := db.QueryRowContext(ctx, `SELECT enqueue_seq FROM client_events WHERE event_id=?`, newEvent.ID).Scan(&newSequence); err != nil {
+		t.Fatal(err)
+	}
+	if newSequence <= previousSequence {
+		t.Fatalf("AUTOINCREMENT переиспользовал номер: got=%d previous_max=%d", newSequence, previousSequence)
+	}
+}
+
+// Перестройка таблицы выполняется одной транзакцией. Даже если обновление
+// оборвётся после переноса данных, SQLite должен вернуть схему и строки v10.
+func TestClientQueueMigrationFailureRollsBackLegacyTable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	migrations := clientMigrationPlan()
+	if err := Migrate(ctx, db, migrations[:len(migrations)-1]); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte{0, 1, 2, 3, 0xff}
+	createdAt := now.Add(-time.Hour).Format(time.RFC3339Nano)
+	nextAttemptAt := now.Add(time.Minute).Format(time.RFC3339Nano)
+	expiresAt := now.Add(time.Hour).Format(time.RFC3339Nano)
+	uploadedAt := now.Add(-time.Minute).Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO client_events(
+			event_id, source_uuid, source_version, stream_key, content_digest,
+			payload_json, state, attempts, next_attempt_at, expires_at,
+			telegram_message_id, center_transport_message_id, last_error,
+			created_at, uploaded_at, acknowledged_at, expired_at
+		) VALUES(?, ?, ?, ?, ?, ?, 'uploaded', 3, ?, ?, 123, 456, ?, ?, ?, NULL, NULL)`,
+		"legacy-event", "legacy-source", "legacy-version", "source:legacy-source",
+		"legacy-digest", payload, nextAttemptAt, expiresAt, "temporary failure",
+		createdAt, uploadedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	brokenPlan := append([]string(nil), migrations...)
+	brokenPlan[len(brokenPlan)-1] += "\nSELECT * FROM migration_failure_missing_table;"
+	if err := Migrate(ctx, db, brokenPlan); err == nil || !strings.Contains(err.Error(), "migration_failure_missing_table") {
+		t.Fatalf("ожидалась искусственная ошибка миграции, получено: %v", err)
+	}
+
+	var version int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != len(migrations)-1 {
+		t.Fatalf("ошибочная миграция записана в журнал: got=%d want=%d", version, len(migrations)-1)
+	}
+	var renamedTableCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type='table' AND name='client_events_v10'`).Scan(&renamedTableCount); err != nil {
+		t.Fatal(err)
+	}
+	if renamedTableCount != 0 {
+		t.Fatalf("после отката осталась временная таблица: %d", renamedTableCount)
+	}
+	columns, err := db.QueryContext(ctx, `PRAGMA table_info(client_events)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasEnqueueSequence := false
+	for columns.Next() {
+		var id, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := columns.Scan(&id, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			columns.Close()
+			t.Fatal(err)
+		}
+		if name == "enqueue_seq" {
+			hasEnqueueSequence = true
+		}
+	}
+	if err := columns.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if hasEnqueueSequence {
+		t.Fatal("после отката в схеме v10 остался enqueue_seq")
+	}
+	var matchingRows int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM client_events
+		WHERE event_id='legacy-event'
+		  AND source_uuid='legacy-source'
+		  AND source_version='legacy-version'
+		  AND stream_key='source:legacy-source'
+		  AND content_digest='legacy-digest'
+		  AND payload_json=?
+		  AND state='uploaded'
+		  AND attempts=3
+		  AND next_attempt_at=?
+		  AND expires_at=?
+		  AND telegram_message_id=123
+		  AND center_transport_message_id=456
+		  AND last_error='temporary failure'
+		  AND created_at=?
+		  AND uploaded_at=?
+		  AND acknowledged_at IS NULL
+		  AND expired_at IS NULL`,
+		payload, nextAttemptAt, expiresAt, createdAt, uploadedAt).Scan(&matchingRows); err != nil {
+		t.Fatal(err)
+	}
+	if matchingRows != 1 {
+		t.Fatalf("исходная строка изменилась при откате: count=%d", matchingRows)
+	}
+	var integrity string
+	if err := db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		t.Fatal(err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("integrity_check после отката: %s", integrity)
 	}
 }
 

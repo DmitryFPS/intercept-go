@@ -150,3 +150,47 @@ CREATE INDEX client_time_state_updated_idx ON client_time_state(updated_at);
 const clientConfirmedTransportMigration = `
 ALTER TABLE client_events ADD COLUMN center_transport_message_id INTEGER;
 `
+
+// Время Windows может быть одинаковым для нескольких блоков одной записи, а
+// случайная часть UUIDv7 не отражает порядок их создания. Явный номер вставки
+// сохраняет порядок клиентской очереди через перезапуски и повторные попытки.
+const clientEnqueueSequenceMigration = `
+ALTER TABLE client_events RENAME TO client_events_v10;
+DROP INDEX client_events_pending_idx;
+CREATE TABLE client_events (
+	enqueue_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+	event_id TEXT NOT NULL UNIQUE,
+	source_uuid TEXT NOT NULL,
+	source_version TEXT NOT NULL,
+	stream_key TEXT NOT NULL DEFAULT '',
+	content_digest TEXT NOT NULL,
+	payload_json BLOB NOT NULL,
+	state TEXT NOT NULL CHECK(state IN ('pending', 'uploaded', 'acknowledged', 'expired')),
+	attempts INTEGER NOT NULL DEFAULT 0,
+	next_attempt_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	telegram_message_id INTEGER,
+	center_transport_message_id INTEGER,
+	last_error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	uploaded_at TEXT,
+	acknowledged_at TEXT,
+	expired_at TEXT,
+	UNIQUE(source_uuid, source_version, content_digest)
+);
+INSERT INTO client_events(
+	enqueue_seq, event_id, source_uuid, source_version, stream_key, content_digest,
+	payload_json, state, attempts, next_attempt_at, expires_at, telegram_message_id,
+	center_transport_message_id, last_error, created_at, uploaded_at,
+	acknowledged_at, expired_at
+)
+SELECT rowid, event_id, source_uuid, source_version, stream_key, content_digest,
+	payload_json, state, attempts, next_attempt_at, expires_at, telegram_message_id,
+	center_transport_message_id, last_error, created_at, uploaded_at,
+	acknowledged_at, expired_at
+FROM client_events_v10
+ORDER BY rowid;
+DROP TABLE client_events_v10;
+CREATE INDEX client_events_pending_idx
+	ON client_events(state, stream_key, next_attempt_at, created_at, enqueue_seq, event_id);
+`

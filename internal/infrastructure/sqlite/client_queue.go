@@ -80,7 +80,8 @@ func (queue *ClientQueue) EventsPage(ctx context.Context, state string, limit, o
 		       COALESCE(expired_at, acknowledged_at, uploaded_at, created_at), last_error,
 		       attempts, telegram_message_id, center_transport_message_id
 		FROM client_events WHERE state=?
-		ORDER BY COALESCE(expired_at, acknowledged_at, uploaded_at, created_at) DESC, event_id DESC
+		ORDER BY COALESCE(expired_at, acknowledged_at, uploaded_at, created_at) DESC,
+		         enqueue_seq DESC, event_id DESC
 		LIMIT ? OFFSET ?`, state, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("прочитать сообщения очереди: %w", err)
@@ -218,7 +219,8 @@ func (queue *ClientQueue) PurgeTerminal(ctx context.Context, before time.Time) (
 		  AND event_id NOT IN (
 			SELECT event_id FROM client_events
 			WHERE state IN ('acknowledged','expired')
-			ORDER BY COALESCE(acknowledged_at, expired_at, created_at) DESC, event_id DESC
+			ORDER BY COALESCE(acknowledged_at, expired_at, created_at) DESC,
+			         enqueue_seq DESC, event_id DESC
 			LIMIT ?
 		  )`, clearedAt, clientTerminalRecordLimit); err != nil {
 		return 0, fmt.Errorf("запомнить ограниченные события клиента: %w", err)
@@ -229,7 +231,8 @@ func (queue *ClientQueue) PurgeTerminal(ctx context.Context, before time.Time) (
 		  AND event_id NOT IN (
 			SELECT event_id FROM client_events
 			WHERE state IN ('acknowledged','expired')
-			ORDER BY COALESCE(acknowledged_at, expired_at, created_at) DESC, event_id DESC
+			ORDER BY COALESCE(acknowledged_at, expired_at, created_at) DESC,
+			         enqueue_seq DESC, event_id DESC
 			LIMIT ?
 		  )`, clientTerminalRecordLimit)
 	if err != nil {
@@ -327,12 +330,18 @@ func (queue *ClientQueue) Enqueue(ctx context.Context, event domain.Event) (bool
 			SELECT 1 FROM client_cleared_events
 			WHERE source_uuid=? AND source_version=? AND content_digest=?
 		)
+		AND NOT EXISTS (
+			SELECT 1 FROM client_events
+			WHERE source_uuid=? AND source_version=? AND content_digest=?
+		)
 		ON CONFLICT(source_uuid, source_version, content_digest) DO NOTHING`,
 		event.ID, sourceKey, sourceVersion, clientStreamKey(event), event.ContentDigest, payload, state,
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
 		expiresAt.Format(time.RFC3339Nano),
 		event.CreatedAt.UTC().Format(time.RFC3339Nano),
-		expiredAt, lastError, sourceKey, sourceVersion, event.ContentDigest,
+		expiredAt, lastError,
+		sourceKey, sourceVersion, event.ContentDigest,
+		sourceKey, sourceVersion, event.ContentDigest,
 	)
 	if err != nil {
 		return false, fmt.Errorf("поставить событие в очередь: %w", err)
@@ -715,9 +724,13 @@ func (queue *ClientQueue) Pending(ctx context.Context, limit int, now time.Time)
 				WHERE earlier.state IN ('pending', 'uploaded')
 					AND earlier.stream_key = client_events.stream_key
 					AND (earlier.created_at < client_events.created_at OR
-						(earlier.created_at = client_events.created_at AND earlier.event_id < client_events.event_id))
+						(earlier.created_at = client_events.created_at AND
+							(earlier.enqueue_seq < client_events.enqueue_seq OR
+								(earlier.enqueue_seq = client_events.enqueue_seq AND
+									earlier.event_id < client_events.event_id))))
 			)
-		ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END, created_at, event_id
+		ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END,
+		         created_at, enqueue_seq, event_id
 		LIMIT ?`, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, fmt.Errorf("прочитать очередь: %w", err)
