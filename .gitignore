@@ -3,6 +3,7 @@
 /coverage/
 /.idea/
 /.gocache/
+/.gocache-*/
 /.gocache-race/
 /.gocache-storage-diagnostic/
 /.gocache-test/
