@@ -425,6 +425,7 @@ func (queue *ClientQueue) SeedBlockBaselinesFromLegacy(
 // метод возвращает false: архив будет обработан и данные не потеряются.
 func (queue *ClientQueue) SeedArchiveBaselinesFromSeenBlocks(
 	ctx context.Context, sourceUUID, sourceVersion string, events []domain.Event,
+	exactLegacySnapshotReplay bool,
 ) (bool, error) {
 	sourceUUID = strings.TrimSpace(sourceUUID)
 	sourceVersion = strings.TrimSpace(sourceVersion)
@@ -438,7 +439,7 @@ func (queue *ClientQueue) SeedArchiveBaselinesFromSeenBlocks(
 			return false, fmt.Errorf("проверить архивную идентичность: %w", err)
 		}
 		blockUUID := strings.ToLower(strings.TrimSpace(event.SourceBlockUUID))
-		if blockUUID == "" || event.SourceBlockDeleted {
+		if blockUUID == "" || (event.SourceBlockDeleted && !exactLegacySnapshotReplay) {
 			return false, nil
 		}
 		base := strings.TrimSpace(event.Source.UUID)
@@ -482,12 +483,38 @@ func (queue *ClientQueue) SeedArchiveBaselinesFromSeenBlocks(
 			if seen == 0 {
 				// Archive rows drop source_mode and catalog_uuid. Their digest can
 				// change even when the same logical block was already queued.
-				matched, matchErr := archivedBlockMatchesQueuedEvent(ctx, tx, event)
+				matched, matchErr := archivedBlockMatchesQueuedEvent(
+					ctx, tx, event, exactLegacySnapshotReplay,
+				)
 				if matchErr != nil {
 					return false, matchErr
 				}
 				if matched {
 					seen = 1
+				}
+			}
+			if seen == 0 && exactLegacySnapshotReplay {
+				// The snapshot proves the current archive content, but a digest-only
+				// cleared row can still be an older edit written in the same SQLite
+				// second. Without its payload an identity-only digest change cannot
+				// be distinguished from that edit, so this source must be isolated.
+				var related int
+				err := tx.QueryRowContext(ctx, `
+					SELECT EXISTS(
+						SELECT 1 FROM client_events
+						WHERE source_uuid=? AND source_version=?
+						UNION ALL
+						SELECT 1 FROM client_cleared_events
+						WHERE source_uuid=? AND source_version=?
+					)`, lineage, version, lineage, version).Scan(&related)
+				if err != nil {
+					return false, fmt.Errorf("сверить архивный блок старого клиента: %w", err)
+				}
+				if related != 0 {
+					return false, fmt.Errorf(
+						"%w: логический блок %q версии %q имеет другой отпечаток",
+						application.ErrArchiveReplayIdentityAmbiguous, event.SourceBlockUUID, version,
+					)
 				}
 			}
 			if seen == 0 {
@@ -543,7 +570,9 @@ func (queue *ClientQueue) SeedArchiveBaselinesFromSeenBlocks(
 	return true, nil
 }
 
-func archivedBlockMatchesQueuedEvent(ctx context.Context, tx *sql.Tx, archive domain.Event) (bool, error) {
+func archivedBlockMatchesQueuedEvent(
+	ctx context.Context, tx *sql.Tx, archive domain.Event, allowLegacyIdentity bool,
+) (bool, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT payload_json FROM client_events WHERE source_uuid=? AND source_version=?`,
 		archive.SourceLineageKey(), archive.SourceVersion(),
@@ -565,7 +594,7 @@ func archivedBlockMatchesQueuedEvent(ctx context.Context, tx *sql.Tx, archive do
 		if err := json.Unmarshal(plain, &queued); err != nil {
 			return false, fmt.Errorf("разобрать событие архивного блока: %w", err)
 		}
-		if sameArchivedQueuedBlock(archive, queued) {
+		if sameArchivedQueuedBlock(archive, queued, allowLegacyIdentity) {
 			return true, nil
 		}
 	}
@@ -575,19 +604,21 @@ func archivedBlockMatchesQueuedEvent(ctx context.Context, tx *sql.Tx, archive do
 	return false, nil
 }
 
-func sameArchivedQueuedBlock(archive, queued domain.Event) bool {
+func sameArchivedQueuedBlock(archive, queued domain.Event, allowLegacyIdentity bool) bool {
+	archiveCatalog := strings.TrimSpace(archive.Position.CatalogUUID)
+	queuedCatalog := strings.TrimSpace(queued.Position.CatalogUUID)
 	if archive.SourceLineageKey() != queued.SourceLineageKey() ||
 		archive.SourceVersion() != queued.SourceVersion() ||
-		archive.Source.ID != queued.Source.ID ||
 		!strings.EqualFold(archive.Source.UUID, queued.Source.UUID) ||
-		archive.Source.SessionID != queued.Source.SessionID ||
-		archive.Source.SessionUUID != queued.Source.SessionUUID ||
+		(!allowLegacyIdentity && (archive.Source.ID != queued.Source.ID ||
+			archive.Source.SessionID != queued.Source.SessionID ||
+			archive.Source.SessionUUID != queued.Source.SessionUUID)) ||
 		archive.Position.UnitName != queued.Position.UnitName ||
 		archive.Position.Frequency != queued.Position.Frequency ||
 		archive.Position.GroupCode != queued.Position.GroupCode ||
-		archive.Position.CatalogUUID != "" ||
+		(archiveCatalog != "" && !strings.EqualFold(archiveCatalog, queuedCatalog)) ||
 		(archive.Mode != domain.SourceModeUnknown && archive.Mode != queued.Mode) ||
-		archive.SourceBlockDeleted || queued.SourceBlockDeleted ||
+		archive.SourceBlockDeleted != queued.SourceBlockDeleted ||
 		archive.HasActiveBlocks != queued.HasActiveBlocks ||
 		archive.Content != queued.Content || archive.UpdatedBy != queued.UpdatedBy ||
 		len(archive.Blocks) != 1 || len(queued.Blocks) != 1 {

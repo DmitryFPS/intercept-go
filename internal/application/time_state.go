@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +16,17 @@ import (
 )
 
 const maxSourceTimeStateEntries = 10_000
+
+// ErrSourceTimeStateInvalid marks a source-scoped logical state error. The
+// collector can quarantine that one record without presenting it as a failed
+// EAVC database connection or blocking later records in the same batch.
+var ErrSourceTimeStateInvalid = errors.New("некорректное состояние временных блоков EAVC")
+
+// ErrArchiveReplayIdentityAmbiguous marks an rc125 archive replay whose
+// digest-only cleared history cannot distinguish an identity migration from a
+// same-second edit. The collector persists a source-scoped conflict instead of
+// guessing; a later active version can safely replace that conflict.
+var ErrArchiveReplayIdentityAmbiguous = errors.New("неоднозначная идентичность архивного повтора EAVC")
 
 // SourceTimeStateStore хранит локальные идентификаторы отдельных вхождений
 // времени. Они не зависят от решётки и от физических UUID intercept_blocks.
@@ -34,13 +47,16 @@ type SourceTimeStateRecord struct {
 }
 
 type SourceTimeSnapshot struct {
-	SourceID          int64                  `json:"source_id"`
-	SourceUUID        string                 `json:"source_uuid"`
-	SourceVersion     string                 `json:"source_version"`
-	SourceMode        domain.SourceMode      `json:"source_mode,omitempty"`
-	SourcePosition    *domain.Position       `json:"source_position,omitempty"`
-	SourceContentHash string                 `json:"source_content_hash,omitempty"`
-	Blocks            []SourceTimeStateEntry `json:"blocks"`
+	SourceID            int64                  `json:"source_id"`
+	SourceUUID          string                 `json:"source_uuid"`
+	SourceSessionID     int64                  `json:"source_session_id,omitempty"`
+	SourceSessionUUID   string                 `json:"source_session_uuid,omitempty"`
+	SourceIdentityKnown bool                   `json:"source_identity_known,omitempty"`
+	SourceVersion       string                 `json:"source_version"`
+	SourceMode          domain.SourceMode      `json:"source_mode,omitempty"`
+	SourcePosition      *domain.Position       `json:"source_position,omitempty"`
+	SourceContentHash   string                 `json:"source_content_hash,omitempty"`
+	Blocks              []SourceTimeStateEntry `json:"blocks"`
 }
 
 // SourceTimeStateEntry описывает логическое вхождение заголовка. Несколько
@@ -68,9 +84,10 @@ type SourceTimeConflict struct {
 }
 
 type sourceTimePlan struct {
-	Item     SourceItem
-	Record   SourceTimeStateRecord
-	Conflict *SourceTimeConflict
+	Item                           SourceItem
+	Record                         SourceTimeStateRecord
+	Conflict                       *SourceTimeConflict
+	ArchiveReplayIdentityMigration bool
 }
 
 func sourceTimeStateRecordsEqual(left, right SourceTimeStateRecord) bool {
@@ -176,12 +193,37 @@ func planSourceTimeBlocks(
 		// fallback text parser can assign a different day offset to unchanged
 		// content, especially when a session crosses midnight. Keep the saved
 		// logical identities and let the queue deduplicate (or recover) events.
-		plan.Item = itemFromTimeState(item, stored.Snapshot.Blocks)
+		canonicalItem := canonicalTimeStateSource(item, *stored.Snapshot)
+		plan.Item = itemFromTimeState(canonicalItem, stored.Snapshot.Blocks)
+		// Snapshots written by rc125 do not contain the source session identity.
+		// The queue may therefore need to prove an exact archive replay by its
+		// stable logical block lineage and version instead of the newer digest.
+		plan.ArchiveReplayIdentityMigration = !stored.Snapshot.SourceIdentityKnown
+		// EAVC can copy the same logical record into the archive under another
+		// physical row ID. The current content digest includes that ID, so use
+		// the proven active identity for an exact archive replay. Otherwise a
+		// delivered block could be published again after manual queue cleanup.
 		if sameArchivedSourceMetadata(*stored.Snapshot, item) {
 			plan.Item.Mode = stored.Snapshot.SourceMode
 			plan.Item.Position.CatalogUUID = stored.Snapshot.SourcePosition.CatalogUUID
 		}
-		plan.Record = stored
+		if plan.ArchiveReplayIdentityMigration {
+			migrated := *stored.Snapshot
+			migrated.SourceID = canonicalItem.Record.ID
+			migrated.SourceUUID = strings.TrimSpace(canonicalItem.Record.UUID)
+			migrated.SourceSessionID = canonicalItem.Record.SessionID
+			migrated.SourceSessionUUID = strings.TrimSpace(canonicalItem.Record.SessionUUID)
+			migrated.SourceIdentityKnown = true
+			plan.Record = SourceTimeStateRecord{Snapshot: &migrated}
+		} else {
+			plan.Record = stored
+		}
+		return plan
+	}
+
+	if exists && stored.Snapshot == nil && stored.Conflict != nil &&
+		stored.Conflict.Kind == "invalid_local_time_state" {
+		plan.Conflict = stored.Conflict
 		return plan
 	}
 
@@ -200,6 +242,11 @@ func planSourceTimeBlocks(
 			occurrenceID := newTimeOccurrenceID(item, observation, index)
 			entries = append(entries, activeTimeStateEntry(item, observation, occurrenceID, nil))
 		}
+		if conflict := logicalTimeIdentityCollision(item, entries, now); conflict != nil {
+			plan.Conflict = conflict
+			plan.Record = SourceTimeStateRecord{Conflict: conflict}
+			return plan
+		}
 		snapshot := sourceTimeSnapshot(item, entries)
 		plan.Item = itemFromTimeState(item, entries)
 		plan.Record = SourceTimeStateRecord{Snapshot: &snapshot}
@@ -215,11 +262,20 @@ func planSourceTimeBlocks(
 		return plan
 	}
 
+	reactivated, reactivatedPrevious := matchReactivatedTimeTombstones(previous, observed, matches, item)
 	entries := make([]SourceTimeStateEntry, 0, len(observed)+len(previous.Blocks))
 	for currentIndex, observation := range observed {
 		previousIndex, matched := matches[currentIndex]
 		if matched {
 			prior := previousActive[previousIndex]
+			entries = append(entries, activeTimeStateEntry(item, observation, prior.OccurrenceID, &prior))
+			continue
+		}
+		if previousIndex, matched = reactivated[currentIndex]; matched {
+			prior := previous.Blocks[previousIndex]
+			observation.Block.UpdatedAt = latestTimeStateVersion(
+				observation.Block.UpdatedAt, item.Record.UpdatedAt,
+			)
 			entries = append(entries, activeTimeStateEntry(item, observation, prior.OccurrenceID, &prior))
 			continue
 		}
@@ -232,8 +288,8 @@ func planSourceTimeBlocks(
 	// тот же deletion-event, а очередь подавляет его по версии и digest. Это
 	// исключает потерю удаления, если процесс завершился между сохранением
 	// состояния и постановкой события в очередь.
-	for _, entry := range previous.Blocks {
-		if !entry.Active {
+	for index, entry := range previous.Blocks {
+		if !entry.Active && !reactivatedPrevious[index] {
 			entries = append(entries, entry)
 		}
 	}
@@ -243,6 +299,11 @@ func planSourceTimeBlocks(
 			continue
 		}
 		entries = append(entries, deletedTimeStateEntry(item, prior, deletedObserved))
+	}
+	if conflict := logicalTimeIdentityCollision(item, entries, now); conflict != nil {
+		plan.Conflict = conflict
+		plan.Record = SourceTimeStateRecord{Snapshot: stored.Snapshot, Conflict: conflict}
+		return plan
 	}
 	if len(entries) > maxSourceTimeStateEntries {
 		plan.Conflict = newSourceTimeConflict(
@@ -254,8 +315,9 @@ func planSourceTimeBlocks(
 		return plan
 	}
 
-	snapshot := sourceTimeSnapshot(item, entries)
-	plan.Item = itemFromTimeState(item, entries)
+	canonicalItem := canonicalTimeStateSource(item, previous)
+	snapshot := sourceTimeSnapshot(canonicalItem, entries)
+	plan.Item = itemFromTimeState(canonicalItem, entries)
 	plan.Record = SourceTimeStateRecord{Snapshot: &snapshot}
 	return plan
 }
@@ -263,8 +325,7 @@ func planSourceTimeBlocks(
 func sameArchivedTimeObservations(
 	item SourceItem, observed []sourceTimeObservation, snapshot SourceTimeSnapshot,
 ) bool {
-	if item.Record.ID <= 0 || snapshot.SourceID != item.Record.ID ||
-		!strings.EqualFold(strings.TrimSpace(snapshot.SourceUUID), strings.TrimSpace(item.Record.UUID)) ||
+	if !sameTimeStateSource(snapshot, item) ||
 		strings.TrimSpace(snapshot.SourceVersion) == "" ||
 		!sameArchivedSourceVersion(snapshot.SourceVersion, item.Record.UpdatedAt) {
 		return false
@@ -276,7 +337,8 @@ func sameArchivedTimeObservations(
 	for index, current := range observed {
 		previous := active[index]
 		if previous.CanonicalTime != current.CanonicalTime ||
-			normalizeTimeStateText(previous.Block.Text) != normalizeTimeStateText(current.Block.Text) {
+			!sameLogicalTimeBlock(previous.Block, current.Block) ||
+			strings.TrimSpace(previous.Block.UpdatedBy) != strings.TrimSpace(current.Block.UpdatedBy) {
 			return false
 		}
 	}
@@ -334,15 +396,56 @@ func sameTimeStateSource(snapshot SourceTimeSnapshot, item SourceItem) bool {
 		strings.EqualFold(strings.TrimSpace(snapshot.SourceUUID), strings.TrimSpace(item.Record.UUID))
 }
 
+func canonicalTimeStateSource(item SourceItem, snapshot SourceTimeSnapshot) SourceItem {
+	snapshotUUID := strings.TrimSpace(snapshot.SourceUUID)
+	itemUUID := strings.TrimSpace(item.Record.UUID)
+	if snapshotUUID == "" || itemUUID == "" || !strings.EqualFold(snapshotUUID, itemUUID) {
+		return item
+	}
+	item.Record.ID = snapshot.SourceID
+	item.Record.UUID = snapshotUUID
+	if snapshot.SourceIdentityKnown {
+		item.Record.SessionID = snapshot.SourceSessionID
+		item.Record.SessionUUID = snapshot.SourceSessionUUID
+	}
+	return item
+}
+
 func sourceTimeSnapshot(item SourceItem, entries []SourceTimeStateEntry) SourceTimeSnapshot {
 	position := item.Position
 	return SourceTimeSnapshot{
 		SourceID: item.Record.ID, SourceUUID: strings.TrimSpace(item.Record.UUID),
-		SourceVersion: strings.TrimSpace(item.Record.UpdatedAt),
-		SourceMode:    item.Mode, SourcePosition: &position,
+		SourceSessionID: item.Record.SessionID, SourceSessionUUID: strings.TrimSpace(item.Record.SessionUUID),
+		SourceIdentityKnown: true,
+		SourceVersion:       strings.TrimSpace(item.Record.UpdatedAt),
+		SourceMode:          item.Mode, SourcePosition: &position,
 		SourceContentHash: sourceTimeContentHash(item.Content),
 		Blocks:            append([]SourceTimeStateEntry(nil), entries...),
 	}
+}
+
+func logicalTimeIdentityCollision(
+	item SourceItem, entries []SourceTimeStateEntry, now time.Time,
+) *SourceTimeConflict {
+	seen := make(map[string]SourceTimeStateEntry, len(entries))
+	for _, entry := range entries {
+		identity := strings.ToLower(strings.TrimSpace(entry.Block.UUID))
+		if identity == "" {
+			continue
+		}
+		previous, duplicate := seen[identity]
+		if !duplicate {
+			seen[identity] = entry
+			continue
+		}
+		return newSourceTimeConflict(
+			"logical_identity_collision",
+			fmt.Sprintf("логический UUID временного блока %q уже сохранён в истории записи", entry.Block.UUID),
+			item.Record.UpdatedAt, entry.CanonicalTime, entry.DayOffset,
+			[]string{previous.OccurrenceID, entry.OccurrenceID}, 2, now,
+		)
+	}
+	return nil
 }
 
 func newSourceTimeConflict(
@@ -473,6 +576,241 @@ func activeTimeEntries(entries []SourceTimeStateEntry) []SourceTimeStateEntry {
 		}
 	}
 	return result
+}
+
+// matchReactivatedTimeTombstones repairs both an ordinary delete/reappear
+// sequence and the valid intermediate snapshot produced by older clients when
+// active and archive rows alternated under one UUID. Ordinary reactivation is
+// allowed only for a strictly newer source version. Equality is accepted only
+// for the deterministic rc125 collision proved in canReactivateTimeTombstone.
+func matchReactivatedTimeTombstones(
+	previous SourceTimeSnapshot, current []sourceTimeObservation,
+	activeMatches map[int]int, item SourceItem,
+) (map[int]int, map[int]bool) {
+	entries := previous.Blocks
+	legacyCounterparts := indexLegacyArchiveTimeCounterparts(entries)
+	matches := make(map[int]int)
+	matchedPrevious := make(map[int]bool)
+	currentGroups := make(map[string][]int)
+	tombstoneGroups := make(map[string][]int)
+	for index, observation := range current {
+		if _, matched := activeMatches[index]; !matched {
+			key := timeGroup(observation.DayOffset, observation.CanonicalTime)
+			currentGroups[key] = append(currentGroups[key], index)
+		}
+	}
+	for index, entry := range entries {
+		if !entry.Active {
+			key := timeGroup(entry.DayOffset, entry.CanonicalTime)
+			tombstoneGroups[key] = append(tombstoneGroups[key], index)
+		}
+	}
+	keys := make([]string, 0, len(currentGroups))
+	for key := range currentGroups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		currentIndexes := currentGroups[key]
+		newestCurrentVersion := ""
+		legacyCurrentByOccurrence := make(map[string]int, len(currentIndexes))
+		for _, currentIndex := range currentIndexes {
+			observation := current[currentIndex]
+			version := latestTimeStateVersion(observation.Block.UpdatedAt, item.Record.UpdatedAt)
+			newestCurrentVersion = latestTimeStateVersion(newestCurrentVersion, version)
+			legacyCurrentByOccurrence[newTimeOccurrenceID(item, observation, currentIndex)] = currentIndex
+		}
+
+		tombstoneIndexes := make([]int, 0, len(tombstoneGroups[key]))
+		for _, previousIndex := range tombstoneGroups[key] {
+			entry := entries[previousIndex]
+			eligible := timeStateVersionAfter(newestCurrentVersion, timeStateEntryVersion(entry))
+			if !eligible {
+				if currentIndex, ok := legacyCurrentByOccurrence[entry.OccurrenceID]; ok {
+					eligible = canReactivateTimeTombstone(
+						previous, item, current[currentIndex], currentIndex, previousIndex,
+						legacyCounterparts[previousIndex],
+					)
+				}
+			}
+			if eligible {
+				tombstoneIndexes = append(tombstoneIndexes, previousIndex)
+			}
+		}
+
+		previousByText := make(map[string][]int)
+		currentByText := make(map[string][]int)
+		for _, index := range tombstoneIndexes {
+			previousByText[normalizeTimeStateText(entries[index].Block.Text)] = append(
+				previousByText[normalizeTimeStateText(entries[index].Block.Text)], index,
+			)
+		}
+		for _, index := range currentIndexes {
+			currentByText[normalizeTimeStateText(current[index].Block.Text)] = append(
+				currentByText[normalizeTimeStateText(current[index].Block.Text)], index,
+			)
+		}
+		for text, previousMatches := range previousByText {
+			currentMatches := currentByText[text]
+			if text == "" || len(previousMatches) != 1 || len(currentMatches) != 1 {
+				continue
+			}
+			previousIndex, currentIndex := previousMatches[0], currentMatches[0]
+			if matchedPrevious[previousIndex] ||
+				!canReactivateTimeTombstone(
+					previous, item, current[currentIndex], currentIndex, previousIndex,
+					legacyCounterparts[previousIndex],
+				) {
+				continue
+			}
+			matches[currentIndex] = previousIndex
+			matchedPrevious[previousIndex] = true
+		}
+
+		var remainingCurrent, remainingPrevious []int
+		for _, index := range currentIndexes {
+			if _, matched := matches[index]; !matched {
+				remainingCurrent = append(remainingCurrent, index)
+			}
+		}
+		for _, index := range tombstoneIndexes {
+			if !matchedPrevious[index] {
+				remainingPrevious = append(remainingPrevious, index)
+			}
+		}
+		if len(remainingCurrent) == 1 && len(remainingPrevious) == 1 {
+			currentIndex, previousIndex := remainingCurrent[0], remainingPrevious[0]
+			// A single replacement at the same logical time is the continuation
+			// of that occurrence even when its text and physical UUID changed.
+			// Ordinary tombstones still require a strictly newer version. The
+			// equality exception remains limited to the proven rc125 legacy pair.
+			if canReactivateTimeTombstone(
+				previous, item, current[currentIndex], currentIndex, previousIndex,
+				legacyCounterparts[previousIndex],
+			) {
+				matches[currentIndex] = previousIndex
+				matchedPrevious[previousIndex] = true
+			}
+		}
+	}
+	return matches, matchedPrevious
+}
+
+func canReactivateTimeTombstone(
+	previous SourceTimeSnapshot, item SourceItem, current sourceTimeObservation,
+	currentIndex, tombstoneIndex int, hasLegacyArchiveCounterpart bool,
+) bool {
+	tombstone := previous.Blocks[tombstoneIndex]
+	currentVersion := latestTimeStateVersion(current.Block.UpdatedAt, item.Record.UpdatedAt)
+	if timeStateVersionAfter(currentVersion, timeStateEntryVersion(tombstone)) {
+		return true
+	}
+	// The equality exception is limited to the exact state emitted by rc125:
+	// an old-format snapshot moved between physical rows, an active archive
+	// counterpart on another day offset, and the deterministic occurrence that
+	// would otherwise collide with its own tombstone.
+	return !previous.SourceIdentityKnown && previous.SourceID > 0 && item.Record.ID > 0 &&
+		previous.SourceID != item.Record.ID &&
+		sameArchivedSourceVersion(previous.SourceVersion, currentVersion) &&
+		hasLegacyArchiveCounterpart &&
+		newTimeOccurrenceID(item, current, currentIndex) == tombstone.OccurrenceID
+}
+
+type legacyArchiveTimeContentKey struct {
+	canonicalTime string
+	text          string
+	callsigns     string
+}
+
+type legacyArchiveTimeDays struct {
+	firstDayOffset     int
+	multipleDayOffsets bool
+}
+
+// indexLegacyArchiveTimeCounterparts records whether each tombstone has the
+// exact active counterpart emitted by rc125 on another day offset. Building
+// the index once keeps legacy recovery linear at the 10,000-entry state limit.
+func indexLegacyArchiveTimeCounterparts(entries []SourceTimeStateEntry) []bool {
+	activeDays := make(map[legacyArchiveTimeContentKey]legacyArchiveTimeDays, len(entries))
+	for _, entry := range entries {
+		if !entry.Active {
+			continue
+		}
+		key := legacyArchiveTimeKey(entry)
+		days, exists := activeDays[key]
+		if !exists {
+			activeDays[key] = legacyArchiveTimeDays{firstDayOffset: entry.DayOffset}
+			continue
+		}
+		if days.firstDayOffset != entry.DayOffset {
+			days.multipleDayOffsets = true
+			activeDays[key] = days
+		}
+	}
+
+	result := make([]bool, len(entries))
+	for index, entry := range entries {
+		if entry.Active {
+			continue
+		}
+		days, exists := activeDays[legacyArchiveTimeKey(entry)]
+		result[index] = exists && (days.multipleDayOffsets || days.firstDayOffset != entry.DayOffset)
+	}
+	return result
+}
+
+func legacyArchiveTimeKey(entry SourceTimeStateEntry) legacyArchiveTimeContentKey {
+	return legacyArchiveTimeContentKey{
+		canonicalTime: entry.CanonicalTime,
+		text:          normalizeTimeStateText(entry.Block.Text),
+		callsigns:     legacyArchiveCallsignsKey(entry.Block.Callsigns),
+	}
+}
+
+func legacyArchiveCallsignsKey(callsigns []domain.Callsign) string {
+	var key strings.Builder
+	appendLegacyArchiveKeyField(&key, strconv.Itoa(len(callsigns)))
+	for _, callsign := range callsigns {
+		appendLegacyArchiveKeyField(&key, strconv.FormatInt(callsign.Number, 10))
+		appendLegacyArchiveKeyField(&key, callsign.Code)
+		appendLegacyArchiveKeyField(&key, callsign.Label)
+		appendLegacyArchiveKeyField(&key, callsign.Tag)
+		appendLegacyArchiveKeyField(&key, callsign.Description)
+	}
+	return key.String()
+}
+
+func appendLegacyArchiveKeyField(key *strings.Builder, value string) {
+	key.WriteString(strconv.Itoa(len(value)))
+	key.WriteByte(':')
+	key.WriteString(value)
+}
+
+func timeStateEntryVersion(entry SourceTimeStateEntry) string {
+	if value := strings.TrimSpace(entry.Block.DeletedAt); value != "" {
+		return value
+	}
+	return strings.TrimSpace(entry.Block.UpdatedAt)
+}
+
+func latestTimeStateVersion(left, right string) string {
+	left, right = strings.TrimSpace(left), strings.TrimSpace(right)
+	if left == "" {
+		return right
+	}
+	if timeStateVersionAfter(right, left) {
+		return right
+	}
+	return left
+}
+
+func timeStateVersionAfter(current, previous string) bool {
+	currentEvent := domain.Event{Source: domain.SourceRecord{UpdatedAt: strings.TrimSpace(current)}}
+	previousEvent := domain.Event{Source: domain.SourceRecord{UpdatedAt: strings.TrimSpace(previous)}}
+	currentTime, currentErr := time.Parse(time.RFC3339Nano, currentEvent.CanonicalSourceVersion())
+	previousTime, previousErr := time.Parse(time.RFC3339Nano, previousEvent.CanonicalSourceVersion())
+	return currentErr == nil && previousErr == nil && currentTime.After(previousTime)
 }
 
 func matchTimeOccurrences(
@@ -694,6 +1032,7 @@ func activeTimeStateEntry(
 	previous *SourceTimeStateEntry,
 ) SourceTimeStateEntry {
 	block := observation.Block
+	block.DeletedAt = ""
 	block.UUID = logicalTimeBlockID(observation.DayOffset, observation.CanonicalTime, occurrenceID)
 	block.Key = observation.CanonicalTime
 	block.TimeKey = observation.Minutes
@@ -704,7 +1043,7 @@ func activeTimeStateEntry(
 	if strings.TrimSpace(block.UpdatedBy) == "" {
 		block.UpdatedBy = item.UpdatedBy
 	}
-	if previous != nil && sameLogicalTimeBlock(previous.Block, block) {
+	if previous != nil && previous.Active && sameLogicalTimeBlock(previous.Block, block) {
 		block.UpdatedAt = previous.Block.UpdatedAt
 		block.UpdatedBy = previous.Block.UpdatedBy
 		block.Hash = previous.Block.Hash

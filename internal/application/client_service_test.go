@@ -642,7 +642,7 @@ func (state *memoryClientState) SeedBlockBaselinesFromLegacy(
 }
 
 func (state *memoryClientState) SeedArchiveBaselinesFromSeenBlocks(
-	_ context.Context, sourceUUID, sourceVersion string, events []domain.Event,
+	_ context.Context, sourceUUID, sourceVersion string, events []domain.Event, _ bool,
 ) (bool, error) {
 	prefix := sourceUUID + "|block:"
 	knownBlocks := make(map[string]struct{})

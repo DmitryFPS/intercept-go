@@ -41,10 +41,12 @@ func (queue *ClientQueue) LoadSourceTimeState(
 	}
 	var record application.SourceTimeStateRecord
 	if err := json.Unmarshal(plain, &record); err != nil {
-		return application.SourceTimeStateRecord{}, false, fmt.Errorf("разобрать состояние временных блоков EAVC: %w", err)
+		return application.SourceTimeStateRecord{}, false, fmt.Errorf(
+			"%w: разобрать сохранённое состояние: %v", application.ErrSourceTimeStateInvalid, err,
+		)
 	}
 	if err := validateSourceTimeState(record); err != nil {
-		return application.SourceTimeStateRecord{}, false, err
+		return record, true, fmt.Errorf("%w: %v", application.ErrSourceTimeStateInvalid, err)
 	}
 	return record, true, nil
 }
@@ -57,7 +59,7 @@ func (queue *ClientQueue) SaveSourceTimeState(
 		return errors.New("пустой ключ состояния временных блоков EAVC")
 	}
 	if err := validateSourceTimeState(record); err != nil {
-		return err
+		return fmt.Errorf("%w: %v", application.ErrSourceTimeStateInvalid, err)
 	}
 	plain, err := json.Marshal(record)
 	if err != nil {

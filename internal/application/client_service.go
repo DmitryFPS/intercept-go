@@ -112,6 +112,11 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 	}
 	queued := 0
 	for _, item := range items {
+		archiveReplayIdentityMigration := false
+		deferredTimeStateSave := false
+		deferredTimeStateKey := ""
+		var deferredTimeStateRecord SourceTimeStateRecord
+		var archiveReplayOriginalState SourceTimeStateRecord
 		if strings.TrimSpace(item.ContractError) != "" {
 			if service.Logger != nil {
 				service.Logger.Error("нарушена обратная совместимость записи EAVC; запись изолирована",
@@ -132,8 +137,66 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 				var stateErr error
 				stored, exists, stateErr = timeState.LoadSourceTimeState(ctx, stateKey)
 				if stateErr != nil {
+					if errors.Is(stateErr, ErrSourceTimeStateInvalid) {
+						quarantined := SourceTimeStateRecord{Conflict: newSourceTimeConflict(
+							"invalid_local_time_state", stateErr.Error(), item.Record.UpdatedAt,
+							"", 0, nil, len(item.Blocks), service.Now().UTC(),
+						)}
+						if saveErr := timeState.SaveSourceTimeState(ctx, stateKey, quarantined); saveErr != nil {
+							return queued, saveErr
+						}
+						if service.Logger != nil {
+							service.Logger.Warn("некорректное локальное состояние перехвата EAVC изолировано",
+								"source_id", item.Record.ID, "source_uuid", item.Record.UUID,
+								"source_version", item.Record.UpdatedAt, "error", stateErr,
+							)
+						}
+						continue
+					}
 					return queued, stateErr
 				}
+			}
+			if exists && stored.Snapshot == nil && stored.Conflict != nil &&
+				stored.Conflict.Kind == "invalid_local_time_state" {
+				// Повреждённая локальная история не должна навсегда закрывать
+				// логическую запись. Архив без доказанного маршрута остаётся в
+				// карантине, а строго более новая активная версия начинает новую
+				// детерминированную историю и перезаписывает компактный конфликт.
+				if !item.Archived && timeStateVersionAfter(
+					item.Record.UpdatedAt, stored.Conflict.SourceVersion,
+				) {
+					if service.Logger != nil {
+						service.Logger.Info("новая версия перехвата снимает карантин повреждённого локального состояния",
+							"source_id", item.Record.ID, "source_uuid", item.Record.UUID,
+							"source_version", item.Record.UpdatedAt,
+							"quarantined_version", stored.Conflict.SourceVersion,
+						)
+					}
+					stored = SourceTimeStateRecord{}
+					exists = false
+				} else {
+					if service.Logger != nil {
+						service.Logger.Warn("перехват EAVC остаётся в карантине повреждённого локального состояния",
+							"source_id", item.Record.ID, "source_uuid", item.Record.UUID,
+							"source_version", item.Record.UpdatedAt,
+						)
+					}
+					continue
+				}
+			}
+			if exists && stored.Conflict != nil &&
+				stored.Conflict.Kind == "archive_replay_identity_ambiguous" &&
+				(item.Archived || !timeStateVersionAfter(
+					item.Record.UpdatedAt, stored.Conflict.SourceVersion,
+				)) {
+				if service.Logger != nil {
+					service.Logger.Warn("архивный повтор rc125 остаётся в карантине до новой активной версии",
+						"source_id", item.Record.ID, "source_uuid", item.Record.UUID,
+						"source_version", item.Record.UpdatedAt,
+						"quarantined_version", stored.Conflict.SourceVersion,
+					)
+				}
+				continue
 			}
 			originalStored := stored
 			if item.ArchiveMetadataAmbiguous {
@@ -188,7 +251,12 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 			// получит те же occurrence-ID. Tombstone остаются в снимке и поэтому
 			// удаление также не потеряется при таком повторе.
 			if timeState != nil && (!exists || !sourceTimeStateRecordsEqual(originalStored, prepared.Record)) {
-				if stateErr := timeState.SaveSourceTimeState(ctx, stateKey, prepared.Record); stateErr != nil {
+				if prepared.ArchiveReplayIdentityMigration {
+					deferredTimeStateSave = true
+					deferredTimeStateKey = stateKey
+					deferredTimeStateRecord = prepared.Record
+					archiveReplayOriginalState = originalStored
+				} else if stateErr := timeState.SaveSourceTimeState(ctx, stateKey, prepared.Record); stateErr != nil {
 					return queued, stateErr
 				}
 			}
@@ -207,6 +275,7 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 				}
 				continue
 			}
+			archiveReplayIdentityMigration = prepared.ArchiveReplayIdentityMigration
 			item = prepared.Item
 		}
 		events, err := service.newEvents(item)
@@ -230,9 +299,41 @@ func (service *ClientService) CollectOnce(ctx context.Context) (int, error) {
 			if item.Archived {
 				archivedReplay, archiveErr := service.Queue.SeedArchiveBaselinesFromSeenBlocks(
 					ctx, legacySourceUUID, strings.TrimSpace(item.Record.UpdatedAt), events,
+					archiveReplayIdentityMigration,
 				)
 				if archiveErr != nil {
+					if errors.Is(archiveErr, ErrArchiveReplayIdentityAmbiguous) {
+						conflict := newSourceTimeConflict(
+							"archive_replay_identity_ambiguous", archiveErr.Error(),
+							item.Record.UpdatedAt, "", 0, nil, len(events), service.Now().UTC(),
+						)
+						quarantined := SourceTimeStateRecord{
+							Snapshot: archiveReplayOriginalState.Snapshot, Conflict: conflict,
+						}
+						if timeState != nil {
+							if stateErr := timeState.SaveSourceTimeState(
+								ctx, deferredTimeStateKey, quarantined,
+							); stateErr != nil {
+								return queued, stateErr
+							}
+						}
+						if service.Logger != nil {
+							service.Logger.Warn("архивный повтор rc125 изолирован: очищенная история не доказывает его идентичность",
+								"source_uuid", item.Record.UUID, "source_id", item.Record.ID,
+								"source_version", item.Record.UpdatedAt, "error", archiveErr,
+							)
+						}
+						continue
+					}
 					return queued, archiveErr
+				}
+				if deferredTimeStateSave {
+					if stateErr := timeState.SaveSourceTimeState(
+						ctx, deferredTimeStateKey, deferredTimeStateRecord,
+					); stateErr != nil {
+						return queued, stateErr
+					}
+					deferredTimeStateSave = false
 				}
 				if archivedReplay {
 					if service.Logger != nil {
