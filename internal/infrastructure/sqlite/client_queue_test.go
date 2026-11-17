@@ -663,7 +663,7 @@ func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
 			t.Fatalf("история не очищена: removed=%d err=%v", removed, err)
 		}
 		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(
-			ctx, "source-389", "2026-10-27T19:45:00Z", archive,
+			ctx, "source-389", "2026-10-27T19:45:00Z", archive, false,
 		)
 		if err != nil || !matched {
 			t.Fatalf("доказанный архивный повтор не распознан: matched=%v err=%v", matched, err)
@@ -683,7 +683,7 @@ func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(
-			ctx, "source-389", "2026-10-27T19:45:00Z", archive,
+			ctx, "source-389", "2026-10-27T19:45:00Z", archive, false,
 		)
 		if err != nil || matched {
 			t.Fatalf("неполная история ошибочно подавлена: matched=%v err=%v", matched, err)
@@ -702,7 +702,7 @@ func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
 			}
 		}
 		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(
-			ctx, "source-389", "2026-10-27T19:45:00Z", archive,
+			ctx, "source-389", "2026-10-27T19:45:00Z", archive, false,
 		)
 		if err != nil || matched {
 			t.Fatalf("неизвестная последняя версия ошибочно подавлена: matched=%v err=%v", matched, err)
@@ -729,7 +729,7 @@ func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
 			makeEvent("archive-a", first, newVersion, "new-digest-a"),
 			makeEvent("archive-b", second, newVersion, "new-digest-b"),
 		}
-		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(ctx, "source-389", newVersion, archive)
+		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(ctx, "source-389", newVersion, archive, false)
 		if err != nil || matched {
 			t.Fatalf("частично записанная версия подавлена: matched=%v err=%v", matched, err)
 		}
@@ -761,7 +761,7 @@ func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
 		if archive.ContentDigest == active.ContentDigest {
 			t.Fatal("потеря режима и каталога не изменила отпечаток")
 		}
-		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(ctx, "source-389", version, []domain.Event{archive})
+		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(ctx, "source-389", version, []domain.Event{archive}, false)
 		if err != nil || !matched {
 			t.Fatalf("неизменённый архивный блок не распознан: matched=%v err=%v", matched, err)
 		}
@@ -791,7 +791,7 @@ func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
 		archive := active
 		archive.ID = "archive-a"
 		archive.ContentDigest = archive.CanonicalContentDigest()
-		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(ctx, "source-389", version, []domain.Event{archive})
+		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(ctx, "source-389", version, []domain.Event{archive}, false)
 		if err != nil || !matched {
 			t.Fatalf("очищенная версия не распознана: matched=%v err=%v", matched, err)
 		}
@@ -811,12 +811,100 @@ func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
 		archive := makeEvent("archive-a", block, version, "changed-digest")
 		archive.Content = "19.40\n-Исправленный текст"
 		archive.Blocks[0].Text = archive.Content
-		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(ctx, "source-389", version, []domain.Event{archive})
+		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(ctx, "source-389", version, []domain.Event{archive}, false)
 		if err != nil || matched {
 			t.Fatalf("неизвестный отпечаток подавлен: matched=%v err=%v", matched, err)
 		}
 		if inserted, err := queue.Enqueue(ctx, archive); err != nil || !inserted {
 			t.Fatalf("новая редакция потеряна: inserted=%v err=%v", inserted, err)
+		}
+	})
+
+	t.Run("legacy retained payload proves active and tombstone identity", func(t *testing.T) {
+		db, queue := openQueue(t)
+		defer db.Close()
+		const version = "2026-10-27T19:45:00Z"
+		active := makeEvent("active-a", "time:d1:0003:occurrence-a", version, "")
+		active.Source.SessionID = 7
+		active.Source.SessionUUID = "session-active"
+		active.ContentDigestVersion = domain.ContentDigestVersionCurrent
+		active.ContentDigest = active.CanonicalContentDigest()
+		deleted := makeEvent("deleted-b", "time:d1:0004:occurrence-b", version, "")
+		deleted.Source.SessionID = 7
+		deleted.Source.SessionUUID = "session-active"
+		deleted.SourceBlockDeleted = true
+		deleted.Blocks[0].DeletedAt = version
+		deleted.ContentDigestVersion = domain.ContentDigestVersionCurrent
+		deleted.ContentDigest = deleted.CanonicalContentDigest()
+		for _, event := range []domain.Event{active, deleted} {
+			if inserted, err := queue.Enqueue(ctx, event); err != nil || !inserted {
+				t.Fatalf("исходное событие не сохранено: inserted=%v err=%v", inserted, err)
+			}
+		}
+
+		archiveActive := active
+		archiveActive.ID = "archive-active"
+		archiveActive.Source.SessionID = 99
+		archiveActive.Source.SessionUUID = "session-archive"
+		archiveActive.ContentDigest = archiveActive.CanonicalContentDigest()
+		archiveDeleted := deleted
+		archiveDeleted.ID = "archive-deleted"
+		archiveDeleted.Source.SessionID = 99
+		archiveDeleted.Source.SessionUUID = "session-archive"
+		archiveDeleted.ContentDigest = archiveDeleted.CanonicalContentDigest()
+		archive := []domain.Event{archiveActive, archiveDeleted}
+		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(
+			ctx, "source-389", version, archive, true,
+		)
+		if err != nil || !matched {
+			t.Fatalf("активный блок и tombstone rc125 не доказаны: matched=%v err=%v", matched, err)
+		}
+		for _, event := range archive {
+			if inserted, err := queue.Enqueue(ctx, event); err != nil || inserted {
+				t.Fatalf("архивное событие rc125 переиздано: inserted=%v err=%v", inserted, err)
+			}
+		}
+	})
+
+	t.Run("legacy partial batch recovers unseen block with restored catalog", func(t *testing.T) {
+		db, queue := openQueue(t)
+		defer db.Close()
+		const version = "2026-10-27T19:45:00Z"
+		const firstBlock = "time:d1:0003:occurrence-a"
+		const secondBlock = "time:d1:0004:occurrence-b"
+		first := makeEvent("active-a", firstBlock, version, "")
+		first.Source.SessionID = 7
+		first.Source.SessionUUID = "session-active"
+		first.Position.CatalogUUID = "catalog-a"
+		first.ContentDigestVersion = domain.ContentDigestVersionCurrent
+		first.ContentDigest = first.CanonicalContentDigest()
+		if inserted, err := queue.Enqueue(ctx, first); err != nil || !inserted {
+			t.Fatalf("первый блок до аварии не сохранён: inserted=%v err=%v", inserted, err)
+		}
+
+		archiveFirst := first
+		archiveFirst.ID = "archive-a"
+		archiveFirst.Source.SessionID = 99
+		archiveFirst.Source.SessionUUID = "session-archive"
+		archiveFirst.ContentDigest = archiveFirst.CanonicalContentDigest()
+		archiveSecond := makeEvent("archive-b", secondBlock, version, "")
+		archiveSecond.Source.SessionID = 99
+		archiveSecond.Source.SessionUUID = "session-archive"
+		archiveSecond.Position.CatalogUUID = "catalog-a"
+		archiveSecond.ContentDigestVersion = domain.ContentDigestVersionCurrent
+		archiveSecond.ContentDigest = archiveSecond.CanonicalContentDigest()
+		archive := []domain.Event{archiveFirst, archiveSecond}
+		matched, err := queue.SeedArchiveBaselinesFromSeenBlocks(
+			ctx, "source-389", version, archive, true,
+		)
+		if err != nil || matched {
+			t.Fatalf("частичный пакет rc125 подавлен целиком: matched=%v err=%v", matched, err)
+		}
+		if inserted, err := queue.Enqueue(ctx, archiveFirst); err != nil || inserted {
+			t.Fatalf("уже сохранённый первый блок продублирован: inserted=%v err=%v", inserted, err)
+		}
+		if inserted, err := queue.Enqueue(ctx, archiveSecond); err != nil || !inserted {
+			t.Fatalf("второй блок после аварии потерян: inserted=%v err=%v", inserted, err)
 		}
 	})
 
@@ -852,6 +940,150 @@ func TestClientQueueSuppressesOnlyProvenArchiveReplay(t *testing.T) {
 			t.Fatalf("старая версия записи ошибочно подтвердила новый маршрут: found=%v err=%v", found, err)
 		}
 	})
+}
+
+func TestClientServiceSuppressesArchiveReplayAfterPhysicalIDChangeAndManualCleanup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	versionTime := now.Add(-2 * time.Minute)
+	version := versionTime.Format("2006-01-02 15:04:05")
+
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	position := domain.Position{
+		CatalogUUID: "catalog-veseloe", UnitName: "Веселое", Frequency: "159.680", GroupCode: "233223",
+	}
+	content := "00.17\n-/1/ Эней, Астра на связи.\n-/2/ Астра, прием."
+	active := application.SourceItem{
+		Record: domain.SourceRecord{
+			ID: 101, UUID: "source-veseloe", SessionID: 7, SessionUUID: "session-7", UpdatedAt: version,
+		},
+		Position: position, Mode: domain.SourceModeDeferred, Content: content, ObservedAt: now,
+		Blocks: []domain.ContentBlock{{
+			UUID: "physical-active", DayOffset: 1, Text: content, UpdatedAt: version,
+		}},
+	}
+	activeCursor := application.Cursor{UpdatedAt: version, ID: active.Record.ID}
+	service := application.ClientService{
+		ClientID: "veseloe", Source: archiveCursorSource{items: []application.SourceItem{active}, next: activeCursor},
+		Queue: queue, State: queue, TimeState: queue, BatchSize: 10, CatchUpExisting: true,
+		Now: func() time.Time { return now },
+	}
+	if queued, err := service.CollectOnce(ctx); err != nil || queued != 1 {
+		t.Fatalf("исходный активный блок не поставлен в очередь: queued=%d err=%v", queued, err)
+	}
+	var activeEventID string
+	if err := db.QueryRowContext(ctx, "SELECT event_id FROM client_events").Scan(&activeEventID); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.MarkAcknowledged(ctx, activeEventID, now); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := queue.ClearTerminal(ctx, "acknowledged"); err != nil || removed != 1 {
+		t.Fatalf("ручная очистка подтверждённого события не выполнена: removed=%d err=%v", removed, err)
+	}
+	// Simulate an in-place update from rc125: its saved JSON predates source
+	// session identity, while the acknowledged digest was built with that
+	// identity and remains only in the cleared-history table.
+	legacyState, exists, err := queue.LoadSourceTimeState(ctx, "uuid:source-veseloe")
+	if err != nil || !exists || legacyState.Snapshot == nil {
+		t.Fatalf("исходное состояние времени не найдено: exists=%v err=%v", exists, err)
+	}
+	legacyState.Snapshot.SourceSessionID = 0
+	legacyState.Snapshot.SourceSessionUUID = ""
+	legacyState.Snapshot.SourceIdentityKnown = false
+	if err := queue.SaveSourceTimeState(ctx, "uuid:source-veseloe", legacyState); err != nil {
+		t.Fatalf("состояние rc125 не сохранено: %v", err)
+	}
+
+	archive := active
+	archive.Record.ID = 202
+	archive.Record.UUID = "SOURCE-VESELOE"
+	archive.Record.SessionID = 99
+	archive.Record.SessionUUID = "session-archive-copy"
+	archive.Record.UpdatedAt = versionTime.Format(time.RFC3339)
+	archive.Position.CatalogUUID = ""
+	archive.Mode = domain.SourceModeUnknown
+	archive.Archived = true
+	archive.ArchiveMetadataAmbiguous = false
+	archive.Blocks = []domain.ContentBlock{{
+		UUID: "legacy-archive", DayOffset: 0, Text: content, UpdatedAt: version,
+	}}
+	archiveCursor := application.Cursor{UpdatedAt: archive.Record.UpdatedAt, ID: archive.Record.ID}
+	service.Source = archiveCursorSource{items: []application.SourceItem{archive}, next: archiveCursor}
+	if queued, err := service.CollectOnce(ctx); err != nil || queued != 0 {
+		t.Fatalf("архив с новым физическим ID переиздан: queued=%d err=%v", queued, err)
+	}
+	stats, err := queue.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats != (ClientStats{}) {
+		t.Fatalf("архив создал новую строку после ручной очистки: %+v", stats)
+	}
+	var clearedDigests int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_cleared_events").Scan(&clearedDigests); err != nil {
+		t.Fatal(err)
+	}
+	if clearedDigests != 1 {
+		t.Fatalf("неоднозначный архив изменил очищенную историю: count=%d", clearedDigests)
+	}
+	quarantinedState, exists, err := queue.LoadSourceTimeState(ctx, "uuid:source-veseloe")
+	if err != nil || !exists || quarantinedState.Snapshot == nil || quarantinedState.Conflict == nil ||
+		quarantinedState.Conflict.Kind != "archive_replay_identity_ambiguous" ||
+		quarantinedState.Snapshot.SourceIdentityKnown {
+		t.Fatalf("неоднозначный архив не сохранён как конфликт rc125: state=%#v exists=%v err=%v", quarantinedState, exists, err)
+	}
+	if cursor, err := queue.Cursor(ctx, "eavc"); err != nil || cursor != archiveCursor {
+		t.Fatalf("курсор не прошёл изолированный архивный повтор: cursor=%+v err=%v", cursor, err)
+	}
+	if queued, err := service.CollectOnce(ctx); err != nil || queued != 0 {
+		t.Fatalf("повтор старого архива вышел из карантина: queued=%d err=%v", queued, err)
+	}
+	repeatedState, exists, err := queue.LoadSourceTimeState(ctx, "uuid:source-veseloe")
+	if err != nil || !exists || repeatedState.Conflict == nil ||
+		repeatedState.Conflict.Kind != "archive_replay_identity_ambiguous" {
+		t.Fatalf("повтор старого архива снял конфликт: state=%#v exists=%v err=%v", repeatedState, exists, err)
+	}
+
+	corrected := active
+	corrected.Record.UpdatedAt = versionTime.Add(time.Second).Format(time.RFC3339)
+	corrected.Content = "00.17\n-/1/ Эней, Астра, исправленная активная версия."
+	corrected.Blocks[0].Text = corrected.Content
+	corrected.Blocks[0].UpdatedAt = corrected.Record.UpdatedAt
+	correctedCursor := application.Cursor{UpdatedAt: corrected.Record.UpdatedAt, ID: corrected.Record.ID}
+	service.Source = archiveCursorSource{items: []application.SourceItem{corrected}, next: correctedCursor}
+	if queued, err := service.CollectOnce(ctx); err != nil || queued != 1 {
+		t.Fatalf("новая активная версия не сняла конфликт rc125: queued=%d err=%v", queued, err)
+	}
+	recoveredState, exists, err := queue.LoadSourceTimeState(ctx, "uuid:source-veseloe")
+	if err != nil || !exists || recoveredState.Snapshot == nil || recoveredState.Conflict != nil ||
+		!recoveredState.Snapshot.SourceIdentityKnown {
+		t.Fatalf("новая активная версия не завершила миграцию: state=%#v exists=%v err=%v", recoveredState, exists, err)
+	}
+
+	later := application.SourceItem{
+		Record:   domain.SourceRecord{ID: 203, UUID: "source-later", UpdatedAt: now.Add(-time.Minute).Format(time.RFC3339)},
+		Position: position, Mode: domain.SourceModeNormal,
+		Content: "00.18\n-/1/ Астра, продолжаем движение.", ObservedAt: now,
+	}
+	laterCursor := application.Cursor{UpdatedAt: later.Record.UpdatedAt, ID: later.Record.ID}
+	service.Source = archiveCursorSource{items: []application.SourceItem{later}, next: laterCursor}
+	if queued, err := service.CollectOnce(ctx); err != nil || queued != 1 {
+		t.Fatalf("архив остановил последующий перехват: queued=%d err=%v", queued, err)
+	}
+	if cursor, err := queue.Cursor(ctx, "eavc"); err != nil || cursor != laterCursor {
+		t.Fatalf("курсор не продвинулся до следующего перехвата: cursor=%+v err=%v", cursor, err)
+	}
 }
 
 // An unreadable retained event must stop the EAVC scan before its cursor moves.

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -97,5 +98,57 @@ func TestClientTimeStateRemovesExpiredCacheRows(t *testing.T) {
 	var expired int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM client_time_state WHERE source_key='uuid:expired'`).Scan(&expired); err != nil || expired != 0 {
 		t.Fatalf("устаревшее техническое состояние не очищено: count=%d err=%v", expired, err)
+	}
+}
+
+func TestClientTimeStateValidationReturnsTypedError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate := domain.ContentBlock{UUID: "time:d0:0017:same", Text: "00.17\n-Проверка"}
+	record := application.SourceTimeStateRecord{Snapshot: &application.SourceTimeSnapshot{
+		SourceID: 17, SourceUUID: "source-17", SourceVersion: "2026-11-16 23:53:21",
+		Blocks: []application.SourceTimeStateEntry{
+			{OccurrenceID: "occurrence-a", CanonicalTime: "00:17", Active: true, Block: duplicate},
+			{OccurrenceID: "occurrence-b", CanonicalTime: "00:17", Active: false, Block: duplicate},
+		},
+	}}
+	if err := queue.SaveSourceTimeState(ctx, "uuid:source-17", record); !errors.Is(err, application.ErrSourceTimeStateInvalid) {
+		t.Fatalf("ошибка валидатора не классифицирована: %v", err)
+	}
+}
+
+func TestClientTimeStateInvalidJSONReturnsTypedSourceError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queue, err := NewClientQueue(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected, err := protectDatabaseValue([]byte("{"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO client_time_state(source_key,payload,updated_at) VALUES(?,?,?)`,
+		"uuid:source-invalid-json", protected, time.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := queue.LoadSourceTimeState(ctx, "uuid:source-invalid-json"); !errors.Is(err, application.ErrSourceTimeStateInvalid) {
+		t.Fatalf("повреждённый JSON не классифицирован как ошибка одной записи: %v", err)
 	}
 }
